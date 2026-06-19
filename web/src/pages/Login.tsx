@@ -1,0 +1,55 @@
+import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { post } from '../api/client'
+import { btnPrimary, card, formLabel, input } from '../ui'
+
+export default function Login() {
+  const navigate = useNavigate()
+  const [pwd, setPwd] = useState('')
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const submit = async () => {
+    if (!pwd || busy) return
+    setBusy(true)
+    setErr('')
+    try {
+      await post('/api/login', { password: pwd })
+      navigate('/admin')
+    } catch (e) {
+      setErr(e instanceof Error && e.message !== 'HTTP 401' ? e.message : '密码错误')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex min-h-[60vh] items-center justify-center">
+      <form
+        className={`${card} w-full max-w-sm p-6`}
+        onSubmit={(e) => {
+          e.preventDefault()
+          submit()
+        }}
+      >
+        <div className="mb-6 text-center">
+          <div className="text-3xl">🌿</div>
+          <h1 className="mt-2 text-lg font-bold">Moss 管理后台</h1>
+        </div>
+        <label className={formLabel}>管理密码</label>
+        <input
+          type="password"
+          className={input}
+          placeholder="请输入密码"
+          value={pwd}
+          onChange={(e) => setPwd(e.target.value)}
+          autoFocus
+        />
+        {err && <p className="mt-2 text-xs text-rose-500">{err}</p>}
+        <button type="submit" disabled={busy} className={`${btnPrimary} mt-4 w-full justify-center py-2 disabled:opacity-60`}>
+          {busy ? '登录中…' : '登 录'}
+        </button>
+      </form>
+    </div>
+  )
+}

@@ -1,0 +1,35 @@
+# Moss server 部署（阶段5 将在此基础上叠加 nginx + TLS + wss）
+# 用法：
+#   cd deploy
+#   echo 'MOSS_ADMIN_PASSWORD=你的强密码' > .env   # 仅首次初始化生效
+#   docker compose up -d            # 拉取 GHCR 镜像启动
+#   docker compose up -d --build    # 或本地从源码构建启动
+services:
+  moss-server:
+    image: ghcr.io/j606y/moss:latest
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: moss-server
+    restart: unless-stopped
+    ports:
+      - "8787:8787" # 阶段5 接 nginx 后可改为仅内网暴露
+    environment:
+      MOSS_ADMIN_PASSWORD: "${MOSS_ADMIN_PASSWORD:-}" # 仅首次（库无密码）生效，之后忽略
+    volumes:
+      - moss-data:/app/data # 命名卷，继承镜像内 /app/data 的 nonroot(65532) 属主，免手动 chown
+    # 阶段5 在反代之后启用真实来源 IP：
+    # command: ["--listen", ":8787", "--data", "/app/data", "--trust-proxy"]
+
+volumes:
+  moss-data:
+
+# 阶段5 预留（nginx 反代 + TLS + wss）：
+#  nginx:
+#    image: nginx:alpine
+#    depends_on: [moss-server]
+#    restart: unless-stopped
+#    ports: ["80:80", "443:443"]
+#    volumes:
+#      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+#      - ./certs:/etc/nginx/certs:ro

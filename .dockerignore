@@ -1,0 +1,17 @@
+# 构建产物与运行时数据（镜像内自行重建/挂载，不进 build context）
+.git
+.github
+.claude
+.gitignore
+bin/
+data/
+data-*/
+deploy/
+web/node_modules/
+web/dist/
+server/dist/
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.log
+*.exe

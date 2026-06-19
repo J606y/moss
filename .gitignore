@@ -1,0 +1,30 @@
+# ---- 构建产物 ----
+/bin/
+/web/dist/
+# -tags embed_web 构建时由 CI/Docker 临时注入的前端产物
+/server/dist/
+
+# ---- 依赖 ----
+/web/node_modules/
+
+# ---- 运行时数据：SQLite 库（含管理密码！）/ WAL / 日志 ----
+/data/
+/data-smoke/
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# ---- Go ----
+*.exe
+*.test
+*.out
+coverage.*
+
+# ---- 操作系统 / 编辑器 ----
+.DS_Store
+Thumbs.db
+*.swp
+
+# ---- Claude Code 本地设置 ----
+.claude/settings.local.json

@@ -1,0 +1,8 @@
+# 统一行尾：默认 LF（install.sh 在 Linux 执行且被 go:embed，绝不能是 CRLF）
+* text=auto eol=lf
+# Windows 专属脚本用 CRLF
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+# 二进制类不做转换
+*.png binary
+*.svg text eol=lf
