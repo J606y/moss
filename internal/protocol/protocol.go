@@ -12,6 +12,8 @@ type AgentInfo struct {
 	SwapTotal      uint64 `json:"swapTotal"`
 	DiskTotal      uint64 `json:"diskTotal"`
 	AgentVersion   string `json:"agentVersion"`
+	IP             string `json:"ip"`          // agent 自测的公网 IP，留空则 server 回退到连接来源 IP
+	CountryCode    string `json:"countryCode"` // ISO alpha-2 小写国家码，用于自动国旗
 }
 
 // Stats 周期上报的实时指标，字段名与前端 LiveStats 对齐。

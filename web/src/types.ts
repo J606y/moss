@@ -72,6 +72,7 @@ export interface AdminServer {
   group: string
   region: string
   flag: string
+  autoFlag: string
   note: string
   expireAt: string
   token: string

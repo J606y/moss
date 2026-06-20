@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS servers (
 	disk_total INTEGER NOT NULL DEFAULT 0,
 	agent_version TEXT NOT NULL DEFAULT '',
 	ip TEXT NOT NULL DEFAULT '',
-	last_seen INTEGER NOT NULL DEFAULT 0
+	last_seen INTEGER NOT NULL DEFAULT 0,
+	auto_flag TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS history (
 	server_id TEXT NOT NULL,
@@ -89,12 +90,43 @@ func openDB(path string) (*sql.DB, error) {
 	if _, err := db.Exec(schema); err != nil {
 		return nil, err
 	}
+	// 老库迁移：CREATE TABLE IF NOT EXISTS 不会给已有表加新列，按需补齐。
+	if err := ensureColumn(db, "servers", "auto_flag", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, err
+	}
 	for k, v := range defaultSettings {
 		if _, err := db.Exec(`INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)`, k, v); err != nil {
 			return nil, err
 		}
 	}
 	return db, nil
+}
+
+// ensureColumn 在列不存在时给表追加列（SQLite 不支持 ADD COLUMN IF NOT EXISTS）。
+func ensureColumn(db *sql.DB, table, col, def string) error {
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid, notnull, pk int
+			name, ctype      string
+			dflt             sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == col {
+			return nil // 已存在
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + col + ` ` + def)
+	return err
 }
 
 func getSetting(db *sql.DB, key, fallback string) string {

@@ -23,7 +23,7 @@ function emit() {
 
 async function fetchServers() {
   try {
-    const res = await fetch('/api/servers')
+    const res = await fetch('/api/servers', { cache: 'no-store' })
     if (!res.ok) return
     const data: Array<ServerMeta & { stats: LiveStats }> = await res.json()
     servers = data.map(({ stats: st, ...meta }) => {
@@ -159,7 +159,7 @@ export const getLiveBuf = (id: string): LivePoint[] => bufs[id] ?? []
 /** 进入详情页时回填服务端的滚动缓冲，让实时图立即有数据 */
 export async function ensureBuf(id: string) {
   try {
-    const res = await fetch(`/api/servers/${id}/recent`)
+    const res = await fetch(`/api/servers/${id}/recent`, { cache: 'no-store' })
     if (!res.ok) return
     const recent: LivePoint[] = await res.json()
     const existing = bufs[id] ?? []

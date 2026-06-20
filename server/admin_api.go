@@ -17,7 +17,8 @@ type adminServer struct {
 	Name      string `json:"name"`
 	Group     string `json:"group"`
 	Region    string `json:"region"`
-	Flag      string `json:"flag"`
+	Flag      string `json:"flag"`     // 手动设置的国旗（编辑表单用原值）
+	AutoFlag  string `json:"autoFlag"` // agent 自动识别的国旗（列表回退显示用）
 	Note      string `json:"note"`
 	ExpireAt  string `json:"expireAt"`
 	Token     string `json:"token"`
@@ -38,7 +39,7 @@ type serverForm struct {
 
 func (s *App) handleAdminServers(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(
-		`SELECT id, name, grp, region, flag, note, expire_at, token, ip, last_seen, created_at
+		`SELECT id, name, grp, region, flag, auto_flag, note, expire_at, token, ip, last_seen, created_at
 		 FROM servers ORDER BY sort, created_at`)
 	if err != nil {
 		log.Printf("handleAdminServers query: %v", err)
@@ -49,7 +50,7 @@ func (s *App) handleAdminServers(w http.ResponseWriter, r *http.Request) {
 	out := []adminServer{}
 	for rows.Next() {
 		var a adminServer
-		if err := rows.Scan(&a.ID, &a.Name, &a.Group, &a.Region, &a.Flag, &a.Note,
+		if err := rows.Scan(&a.ID, &a.Name, &a.Group, &a.Region, &a.Flag, &a.AutoFlag, &a.Note,
 			&a.ExpireAt, &a.Token, &a.IP, &a.LastSeen, &a.CreatedAt); err != nil {
 			log.Printf("handleAdminServers scan: %v", err)
 			writeErr(w, 500, "内部错误")

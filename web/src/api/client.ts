@@ -6,6 +6,7 @@ export interface ApiError extends Error {
 
 export async function api<T = unknown>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
+    cache: 'no-store', // API 实时数据不走浏览器缓存，避免增删后列表拿到旧响应
     headers: { 'Content-Type': 'application/json' },
     ...init,
   })

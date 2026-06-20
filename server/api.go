@@ -14,6 +14,9 @@ import (
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	// API 数据均为实时，禁止 CDN / 反代 / 浏览器缓存，否则增删后列表会拿到
+	// 旧响应、要等缓存 TTL 过期才更新（表现为“列表好几分钟才刷新”）。
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(v)
 }
@@ -50,7 +53,7 @@ func (s *App) listPublicServers() ([]publicServer, error) {
 	// 必须在 Query 之前取 setting：rows 未关闭时占用连接，期间再发查询会耗尽连接池
 	interval := getSettingInt(s.db, "report_interval", 2)
 	rows, err := s.db.Query(
-		`SELECT id, name, grp, region, flag, expire_at, os, arch, virt, cpu_model, cpu_cores,
+		`SELECT id, name, grp, region, flag, auto_flag, expire_at, os, arch, virt, cpu_model, cpu_cores,
 		 mem_total, swap_total, disk_total, agent_version FROM servers ORDER BY sort, created_at`)
 	if err != nil {
 		return nil, err
@@ -59,10 +62,14 @@ func (s *App) listPublicServers() ([]publicServer, error) {
 	out := []publicServer{}
 	for rows.Next() {
 		var p publicServer
-		if err := rows.Scan(&p.ID, &p.Name, &p.Group, &p.Region, &p.Flag, &p.ExpireAt,
+		var autoFlag string
+		if err := rows.Scan(&p.ID, &p.Name, &p.Group, &p.Region, &p.Flag, &autoFlag, &p.ExpireAt,
 			&p.OS, &p.Arch, &p.Virtualization, &p.CPUModel, &p.CPUCores,
 			&p.MemTotal, &p.SwapTotal, &p.DiskTotal, &p.AgentVersion); err != nil {
 			return nil, err
+		}
+		if p.Flag == "" {
+			p.Flag = autoFlag // 手动国旗优先，未设则用自动识别
 		}
 		p.IntervalSec = interval
 		stats, uptime, online := s.hub.Snapshot(p.ID)

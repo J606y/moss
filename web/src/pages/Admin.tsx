@@ -268,7 +268,7 @@ function ServersTab({ toast }: { toast: Toast }) {
               return (
                 <tr key={s.id} className="border-b border-zinc-500/10 last:border-0 dark:border-white/5">
                   <td className={`${td} font-medium`}>
-                    {s.flag && <Flag code={s.flag} className="mr-1.5" />}
+                    {(s.flag || s.autoFlag) && <Flag code={s.flag || s.autoFlag} className="mr-1.5" />}
                     {s.name}
                   </td>
                   <td className={`${td} text-zinc-500`}>{s.group}</td>

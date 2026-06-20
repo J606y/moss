@@ -17,7 +17,7 @@ import { ensureBuf, getLive, getLiveBuf, pct, useLive, useServers } from '../api
 import { get } from '../api/client'
 import type { HistoryPoint, PingData } from '../types'
 import { StatusPill } from '../components/ServerCard'
-import { barColor, clampPct } from '../components/ProgressBar'
+import { ProgressBar, barColor, clampPct } from '../components/ProgressBar'
 import Flag from '../components/Flag'
 import { axisProps, ChartCard, ChartTip, gridStroke, palette, SeriesChips } from '../components/Charts'
 import { fmtAxisTime, fmtBytes, fmtDateTime, fmtPercent, fmtSpeed, fmtTime, fmtUptime } from '../utils/format'
@@ -79,7 +79,7 @@ export default function ServerDetail() {
   const { id } = useParams<{ id: string }>()
   useLive()
   const serverList = useServers()
-  const [hours, setHours] = useState(1)
+  const [hours, setHours] = useState(0) // 默认「实时」
   const [tab, setTab] = useState<'load' | 'ping'>('load')
   // 时间轴刷选窗口 [起, 止] 时间戳，null 为完整范围
   const [timeWin, setTimeWin] = useState<[number, number] | null>(null)
@@ -324,11 +324,21 @@ export default function ServerDetail() {
                 pct={pct(st.diskUsed, server.diskTotal)}
                 detail={`${fmtBytes(st.diskUsed)} / ${fmtBytes(server.diskTotal)}`}
               />
-              <GaugeCard
-                title="交换分区"
-                pct={pct(st.swapUsed, server.swapTotal)}
-                detail={`${fmtBytes(st.swapUsed)} / ${fmtBytes(server.swapTotal)}`}
-              />
+              <div className={`${card} p-4`}>
+                <div className="text-xs text-zinc-500">内存</div>
+                <div className="mt-3 space-y-3">
+                  <ProgressBar
+                    label="内存"
+                    right={`${fmtBytes(st.memUsed)} / ${fmtBytes(server.memTotal)}`}
+                    pct={pct(st.memUsed, server.memTotal)}
+                  />
+                  <ProgressBar
+                    label="交换"
+                    right={`${fmtBytes(st.swapUsed)} / ${fmtBytes(server.swapTotal)}`}
+                    pct={pct(st.swapUsed, server.swapTotal)}
+                  />
+                </div>
+              </div>
               <div className={`${card} p-4`}>
                 <div className="text-xs text-zinc-500">总流量</div>
                 <div className="mt-1.5 space-y-1 text-sm font-medium tabular-nums">
