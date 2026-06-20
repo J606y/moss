@@ -2,16 +2,18 @@
 # Moss server 镜像（多阶段，自包含单二进制：内嵌前端）
 # 构建：在仓库根执行  docker build -f deploy/Dockerfile -t moss .
 
-# ---- 阶段1：构建前端 ----
-FROM node:20-bookworm-slim AS web
+# ---- 阶段1：构建前端（在构建机原生架构上跑，产物与架构无关）----
+FROM --platform=$BUILDPLATFORM node:20-bookworm-slim AS web
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-# ---- 阶段2：构建 server（CGO_ENABLED=0 + embed_web 内嵌前端）----
-FROM golang:1.26-bookworm AS build
+# ---- 阶段2：构建 server（在构建机原生架构上交叉编译到目标架构）----
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS build
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -21,7 +23,7 @@ COPY --from=web /src/web/dist ./server/dist
 # 预备一个空数据目录，供最终镜像 chown 给 nonroot
 RUN mkdir -p /app-data
 ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     go build -tags embed_web -trimpath -ldflags "-s -w" \
     -o /out/moss-server ./server
 
