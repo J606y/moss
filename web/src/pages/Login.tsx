@@ -5,19 +5,20 @@ import { btnPrimary, card, formLabel, input } from '../ui'
 
 export default function Login() {
   const navigate = useNavigate()
+  const [user, setUser] = useState('admin')
   const [pwd, setPwd] = useState('')
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
 
   const submit = async () => {
-    if (!pwd || busy) return
+    if (!user || !pwd || busy) return
     setBusy(true)
     setErr('')
     try {
-      await post('/api/login', { password: pwd })
+      await post('/api/login', { username: user, password: pwd })
       navigate('/admin')
     } catch (e) {
-      setErr(e instanceof Error && e.message !== 'HTTP 401' ? e.message : '密码错误')
+      setErr(e instanceof Error && e.message !== 'HTTP 401' ? e.message : '用户名或密码错误')
     } finally {
       setBusy(false)
     }
@@ -36,14 +37,22 @@ export default function Login() {
           <div className="text-3xl">🌿</div>
           <h1 className="mt-2 text-lg font-bold">Moss 管理后台</h1>
         </div>
-        <label className={formLabel}>管理密码</label>
+        <label className={formLabel}>用户名</label>
+        <input
+          type="text"
+          className={input}
+          placeholder="用户名"
+          value={user}
+          onChange={(e) => setUser(e.target.value)}
+          autoFocus
+        />
+        <label className={`${formLabel} mt-3`}>管理密码</label>
         <input
           type="password"
           className={input}
           placeholder="请输入密码"
           value={pwd}
           onChange={(e) => setPwd(e.target.value)}
-          autoFocus
         />
         {err && <p className="mt-2 text-xs text-rose-500">{err}</p>}
         <button type="submit" disabled={busy} className={`${btnPrimary} mt-4 w-full justify-center py-2 disabled:opacity-60`}>

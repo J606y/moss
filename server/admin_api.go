@@ -218,6 +218,7 @@ func (s *App) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 /* ---------- 站点设置 ---------- */
 
 type settingsView struct {
+	Username       string `json:"username"`
 	SiteName       string `json:"siteName"`
 	SiteDesc       string `json:"siteDesc"`
 	ReportInterval int    `json:"reportInterval"`
@@ -228,6 +229,7 @@ type settingsView struct {
 
 func (s *App) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, settingsView{
+		Username:       getSetting(s.db, "username", "admin"),
 		SiteName:       getSetting(s.db, "site_name", "Moss"),
 		SiteDesc:       getSetting(s.db, "site_desc", "轻量服务器监控"),
 		ReportInterval: getSettingInt(s.db, "report_interval", 2),
@@ -259,6 +261,10 @@ func (s *App) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	if v.SiteName == "" {
 		v.SiteName = "Moss"
 	}
+	if v.Username == "" {
+		v.Username = "admin"
+	}
+	setSetting(s.db, "username", v.Username)
 	setSetting(s.db, "site_name", v.SiteName)
 	setSetting(s.db, "site_desc", v.SiteDesc)
 	setSetting(s.db, "report_interval", strconv.Itoa(clampInt(v.ReportInterval, 1, 60, 2)))

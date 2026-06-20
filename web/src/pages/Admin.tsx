@@ -822,6 +822,10 @@ function SettingsTab({ toast }: { toast: Toast }) {
       <div className={`${card} space-y-3 p-4`}>
         <h3 className="text-sm font-semibold">站点信息</h3>
         <div>
+          <label className={formLabel}>管理员用户名</label>
+          <input className={input} value={s.username} onChange={(e) => setS({ ...s, username: e.target.value })} />
+        </div>
+        <div>
           <label className={formLabel}>站点名称</label>
           <input className={input} value={s.siteName} onChange={(e) => setS({ ...s, siteName: e.target.value })} />
         </div>

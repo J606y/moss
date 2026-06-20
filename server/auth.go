@@ -17,9 +17,8 @@ const sessionTTL = 30 * 24 * time.Hour
 
 // 登录失败限流：按来源 IP 统计连续失败次数并退避锁定，防并发爆破。
 const (
-	loginMaxFails = 5                // 达到该连续失败次数后开始锁定
-	loginLockBase = 30 * time.Second // 锁定基准时长，随失败次数退避
-	loginLockMax  = 5 * time.Minute  // 锁定时长上限
+	loginMaxFails = 3                // 连续失败达到该次数即锁定该 IP
+	loginLockDur  = 30 * time.Minute // 锁定时长（固定）
 )
 
 type loginAttempt struct {
@@ -50,7 +49,7 @@ func loginLocked(ip string, now time.Time) bool {
 	return a != nil && now.Before(a.lockUntil)
 }
 
-// recordLoginFail 累加失败次数，达到阈值则按退避策略设置锁定到期时间。
+// recordLoginFail 累加失败次数，达到阈值即锁定该 IP 固定时长。
 func recordLoginFail(ip string, now time.Time) {
 	a := loginAttempts[ip]
 	if a == nil {
@@ -59,12 +58,7 @@ func recordLoginFail(ip string, now time.Time) {
 	}
 	a.fails++
 	if a.fails >= loginMaxFails {
-		// 退避：30s、1min、2min…按超出阈值的次数翻倍，封顶 5min。
-		lock := loginLockBase << uint(a.fails-loginMaxFails)
-		if lock > loginLockMax || lock <= 0 {
-			lock = loginLockMax
-		}
-		a.lockUntil = now.Add(lock)
+		a.lockUntil = now.Add(loginLockDur)
 	}
 }
 
@@ -108,6 +102,7 @@ func (s *App) checkPassword(pwd string) bool {
 
 func (s *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var body struct {
+		Username string `json:"username"`
 		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -120,23 +115,24 @@ func (s *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	loginMu.Lock()
 	if loginLocked(ip, time.Now()) {
 		loginMu.Unlock()
-		writeErr(w, 429, "登录失败次数过多，请稍后再试")
+		writeErr(w, 429, "登录失败次数过多，该 IP 已被锁定 30 分钟")
 		return
 	}
 	loginMu.Unlock()
 
 	// 轻量防爆破：固定延迟提高单次试探成本。
 	time.Sleep(300 * time.Millisecond)
-	if !s.checkPassword(body.Password) {
+	wantUser := getSetting(s.db, "username", "admin")
+	if body.Username != wantUser || !s.checkPassword(body.Password) {
 		loginMu.Lock()
 		recordLoginFail(ip, time.Now())
 		locked := loginLocked(ip, time.Now())
 		loginMu.Unlock()
 		if locked {
-			writeErr(w, 429, "登录失败次数过多，请稍后再试")
+			writeErr(w, 429, "登录失败次数过多，该 IP 已被锁定 30 分钟")
 			return
 		}
-		writeErr(w, 401, "密码错误")
+		writeErr(w, 401, "用户名或密码错误")
 		return
 	}
 

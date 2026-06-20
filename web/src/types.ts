@@ -104,6 +104,7 @@ export interface NotifySettings {
 }
 
 export interface Settings {
+  username: string
   siteName: string
   siteDesc: string
   reportInterval: number

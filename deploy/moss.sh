@@ -145,6 +145,7 @@ do_install(){
   c_grn "=========================================================="
   if c_running; then ok "Moss 已启动"; else warn "容器已创建但未运行，请用菜单 [5] 查看日志排查"; fi
   echo "  访问地址:   http://${ip}:${port}"
+  echo "  管理员用户名: admin（可登录后在「站点设置」修改）"
   if [ "$fresh" = 1 ]; then
     printf '%s\n' "$pass" > "$CRED"; chmod 600 "$CRED" 2>/dev/null
     echo "  管理员密码: ${pass}"
@@ -193,6 +194,7 @@ do_status(){
   fi
   local port; port="$(cur_port)"
   echo "访问地址:   http://$(detect_ip):${port}"
+  echo "管理员用户名: admin（如已在后台修改请以新的为准）"
   if [ -f "$CRED" ]; then
     echo "管理员密码: $(cat "$CRED")"
   else
