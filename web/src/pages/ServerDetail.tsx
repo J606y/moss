@@ -106,19 +106,25 @@ export default function ServerDetail() {
     }
   }, [id, hours])
 
-  // 延迟探测是分钟级上报，没有实时流，实时模式下展示最近 1 小时
+  // 延迟探测是周期上报、没有 WS 实时流，实时模式下展示最近 1 小时；
+  // 「实时」按站点设置的「实时上报间隔」轮询刷新，与负载页实时节奏一致。
+  const pollSec = server?.intervalSec ?? 2
   useEffect(() => {
     if (!id) return
     let dead = false
-    get<PingData>(`/api/servers/${id}/ping?hours=${Math.max(hours, 1)}`)
-      .then((d) => {
-        if (!dead) setPingData(d)
-      })
-      .catch(() => {})
+    const load = () =>
+      get<PingData>(`/api/servers/${id}/ping?hours=${Math.max(hours, 1)}`)
+        .then((d) => {
+          if (!dead) setPingData(d)
+        })
+        .catch(() => {})
+    load()
+    const timer = hours === 0 ? setInterval(load, Math.max(pollSec, 1) * 1000) : undefined
     return () => {
       dead = true
+      if (timer) clearInterval(timer)
     }
-  }, [id, hours])
+  }, [id, hours, pollSec])
 
   // 回填服务端滚动缓冲，让实时图立即有数据
   useEffect(() => {
@@ -340,15 +346,32 @@ export default function ServerDetail() {
                 detail={`${fmtBytes(st.diskUsed)} / ${fmtBytes(server.diskTotal)}`}
               />
               <div className={`${card} p-4`}>
-                <div className="text-xs text-zinc-500">总流量</div>
-                <div className="mt-1.5 space-y-1 text-sm font-medium tabular-nums">
-                  <div className="flex items-center gap-1.5">
-                    <ArrowUp className="h-3.5 w-3.5 text-emerald-500" />
-                    {fmtBytes(st.totalUp)}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <div className="text-xs text-zinc-500">实时网速</div>
+                    <div className="mt-1.5 space-y-1 text-sm font-medium tabular-nums">
+                      <div className="flex items-center gap-1.5">
+                        <ArrowUp className="h-3.5 w-3.5 text-emerald-500" />
+                        {fmtSpeed(st.netUp)}
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <ArrowDown className="h-3.5 w-3.5 text-sky-500" />
+                        {fmtSpeed(st.netDown)}
+                      </div>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-1.5">
-                    <ArrowDown className="h-3.5 w-3.5 text-sky-500" />
-                    {fmtBytes(st.totalDown)}
+                  <div>
+                    <div className="text-xs text-zinc-500">总流量</div>
+                    <div className="mt-1.5 space-y-1 text-sm font-medium tabular-nums">
+                      <div className="flex items-center gap-1.5">
+                        <ArrowUp className="h-3.5 w-3.5 text-emerald-500" />
+                        {fmtBytes(st.totalUp)}
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <ArrowDown className="h-3.5 w-3.5 text-sky-500" />
+                        {fmtBytes(st.totalDown)}
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
