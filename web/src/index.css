@@ -61,6 +61,15 @@ body {
 .animate-drift-c { animation: drift-c 42s ease-in-out infinite alternate; }
 .animate-drift-d { animation: drift-d 30s ease-in-out infinite alternate; }
 
+/* 逐位数字 Ticker：单个数字位变化时竖向滚入；只有变了的那位重挂并播放动画，
+   未变的位 DOM 不动。配合 JS 给的错峰 animationDelay + fill-mode:both 形成「个位先动」级联。 */
+@keyframes ticker-in {
+  from { transform: translateY(0.55em); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+.ticker-digit { display: inline-block; animation: ticker-in 0.22s cubic-bezier(0.4, 0, 0.2, 1) both; }
+.ticker-static { display: inline-block; white-space: pre; }
+
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;

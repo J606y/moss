@@ -5,6 +5,7 @@ import { getLive, pct } from '../api/store'
 import { fmtBytes, fmtPercent, fmtSpeed, fmtUptime } from '../utils/format'
 import { ProgressBar } from './ProgressBar'
 import Flag from './Flag'
+import Ticker from './Ticker'
 import { card } from '../ui'
 
 export function StatusPill({ online }: { online: boolean }) {
@@ -66,11 +67,11 @@ export default function ServerCard({ server }: { server: ServerMeta }) {
           <div className="mt-0.5 space-y-0.5 tabular-nums text-zinc-600 dark:text-zinc-300">
             <div className="flex items-center gap-1">
               <ArrowUp className="h-3 w-3 text-emerald-500" />
-              {fmtSpeed(st.netUp)}
+              <Ticker value={fmtSpeed(st.netUp)} />
             </div>
             <div className="flex items-center gap-1">
               <ArrowDown className="h-3 w-3 text-sky-500" />
-              {fmtSpeed(st.netDown)}
+              <Ticker value={fmtSpeed(st.netDown)} />
             </div>
           </div>
         </div>
