@@ -353,11 +353,11 @@ export default function ServerDetail() {
                     <div className="mt-1.5 space-y-1 text-sm font-medium tabular-nums">
                       <div className="flex items-center gap-1.5">
                         <ArrowUp className="h-3.5 w-3.5 text-emerald-500" />
-                        <Ticker value={fmtSpeed(st.netUp)} />
+                        <Ticker value={st.netUp} format={fmtSpeed} />
                       </div>
                       <div className="flex items-center gap-1.5">
                         <ArrowDown className="h-3.5 w-3.5 text-sky-500" />
-                        <Ticker value={fmtSpeed(st.netDown)} />
+                        <Ticker value={st.netDown} format={fmtSpeed} />
                       </div>
                     </div>
                   </div>

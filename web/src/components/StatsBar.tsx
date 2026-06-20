@@ -1,9 +1,7 @@
 import { Globe2, HardDriveDownload, Server, Wifi } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import type { ReactNode } from 'react'
 import { getLive, useServers } from '../api/store'
 import { fmtBytes, fmtSpeed } from '../utils/format'
-import Ticker from './Ticker'
 import { card } from '../ui'
 
 function Stat({
@@ -15,8 +13,8 @@ function Stat({
 }: {
   icon: LucideIcon
   label: string
-  value: ReactNode
-  sub?: ReactNode
+  value: string
+  sub?: string
   tint: string
 }) {
   return (
@@ -61,8 +59,8 @@ export default function StatsBar() {
       <Stat
         icon={Wifi}
         label="实时网速"
-        value={<Ticker value={`↑ ${fmtSpeed(up)}`} />}
-        sub={<Ticker value={`↓ ${fmtSpeed(down)}`} />}
+        value={`↑ ${fmtSpeed(up)}`}
+        sub={`↓ ${fmtSpeed(down)}`}
         tint="bg-sky-500/10 text-sky-600 dark:text-sky-400"
       />
       <Stat

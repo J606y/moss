@@ -67,11 +67,11 @@ export default function ServerCard({ server }: { server: ServerMeta }) {
           <div className="mt-0.5 space-y-0.5 tabular-nums text-zinc-600 dark:text-zinc-300">
             <div className="flex items-center gap-1">
               <ArrowUp className="h-3 w-3 text-emerald-500" />
-              <Ticker value={fmtSpeed(st.netUp)} />
+              <Ticker value={st.netUp} format={fmtSpeed} />
             </div>
             <div className="flex items-center gap-1">
               <ArrowDown className="h-3 w-3 text-sky-500" />
-              <Ticker value={fmtSpeed(st.netDown)} />
+              <Ticker value={st.netDown} format={fmtSpeed} />
             </div>
           </div>
         </div>

@@ -1,24 +1,41 @@
-// 逐位数字：把格式化后的字符串按字符拆开，只有发生变化的「数字位」会重挂并播放一次
-// 竖向滚入动画；未变的位 DOM 节点复用、纹丝不动 —— 不再「整段数字一次性重新渲染」。
-// 纯 CSS、不引依赖，保留 tabular-nums 等宽与实时刷新。
+import { useEffect, useRef, useState } from 'react'
+
+// 数值滚动计数器：目标值变化后，用 requestAnimationFrame 在 duration 内把「显示值」
+// 从当前值平滑补间到新目标，每帧用 format 重新格式化输出。
 //
-// 关键：数字位的 key 拼上字符本身（`${i}:${c}`），该位一变 React 即重挂这个 span、触发入场动画；
-// 未变的位 key 不变、节点复用、不重播。各位互相独立，不强制先后错峰。
-export default function Ticker({ value, className = '' }: { value: string; className?: string }) {
-  const chars = [...value]
-  return (
-    <span className={`tabular-nums ${className}`}>
-      {chars.map((c, i) =>
-        c >= '0' && c <= '9' ? (
-          <span key={`${i}:${c}`} className="ticker-digit">
-            {c}
-          </span>
-        ) : (
-          <span key={`x${i}`} className="ticker-static">
-            {c}
-          </span>
-        ),
-      )}
-    </span>
-  )
+// 这样单台服务器的数字也会像顶部「所有服务器合计」那样高频小步变化 ——
+// 配合 tabular-nums，就是「低位数字一位位滚动、高位不动」，而不是每次整段一次性替换。
+export default function Ticker({
+  value,
+  format,
+  duration = 700,
+  className = '',
+}: {
+  value: number
+  format: (n: number) => string
+  duration?: number
+  className?: string
+}) {
+  const [shown, setShown] = useState(value)
+  const shownRef = useRef(value)
+  shownRef.current = shown
+
+  useEffect(() => {
+    const from = shownRef.current
+    const to = value
+    if (from === to) return
+    let raf = 0
+    let start = 0
+    const tick = (ts: number) => {
+      if (!start) start = ts
+      const t = Math.min(1, (ts - start) / duration)
+      const eased = 1 - Math.pow(1 - t, 3) // easeOutCubic：先快后慢，落点平稳
+      setShown(from + (to - from) * eased)
+      if (t < 1) raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [value, duration])
+
+  return <span className={`tabular-nums ${className}`}>{format(shown)}</span>
 }
