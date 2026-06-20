@@ -25,6 +25,16 @@ case "$(uname -m)" in
   *) echo "不支持的架构: $(uname -m)"; exit 1 ;;
 esac
 
+# 提权方式：已是 root 直接执行；否则用 sudo；都不满足则报错（精简系统可能无 sudo）
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+  if command -v sudo >/dev/null 2>&1; then
+    SUDO="sudo"
+  else
+    echo "需要 root 权限，且未找到 sudo。请用 root 运行，或先安装 sudo。"; exit 1
+  fi
+fi
+
 BIN=/usr/local/bin/moss-agent
 if [[ "$VERSION" == "latest" ]]; then
   URL="https://github.com/${REPO}/releases/latest/download/moss-agent-${OS}-${ARCH}"
@@ -35,10 +45,10 @@ fi
 echo "下载 ${URL} ..."
 curl -fsSL -o /tmp/moss-agent "$URL"
 chmod +x /tmp/moss-agent
-sudo mv /tmp/moss-agent "$BIN"
+$SUDO mv /tmp/moss-agent "$BIN"
 
 if [[ "$OS" == "linux" ]] && command -v systemctl >/dev/null; then
-  sudo tee /etc/systemd/system/moss-agent.service >/dev/null <<EOF
+  $SUDO tee /etc/systemd/system/moss-agent.service >/dev/null <<EOF
 [Unit]
 Description=Moss Agent
 After=network-online.target
@@ -51,8 +61,8 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-  sudo systemctl daemon-reload
-  sudo systemctl enable --now moss-agent
+  $SUDO systemctl daemon-reload
+  $SUDO systemctl enable --now moss-agent
   echo "✅ 已安装并启动 moss-agent (systemd)"
 elif [[ "$OS" == "darwin" ]]; then
   PLIST="$HOME/Library/LaunchAgents/com.moss.agent.plist"
