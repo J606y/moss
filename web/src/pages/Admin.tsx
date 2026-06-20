@@ -7,6 +7,7 @@ import {
   Copy,
   Eye,
   EyeOff,
+  GripVertical,
   LogOut,
   Pencil,
   Plus,
@@ -163,7 +164,7 @@ function ServerFormModal({
         </div>
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className={formLabel}>国旗代码</label>
+            <label className={formLabel}>国旗代码（不填则自动）</label>
             <input className={input} placeholder="hk / jp / us…" value={f.flag} onChange={set('flag')} />
           </div>
           <div>
@@ -208,6 +209,7 @@ function ServersTab({ toast }: { toast: Toast }) {
   const [confirmDel, setConfirmDel] = useState<AdminServer | null>(null)
   const [revealed, setRevealed] = useState<Set<string>>(new Set())
   const [search, setSearch] = useState('')
+  const [dragId, setDragId] = useState<string | null>(null)
 
   const load = useCallback(() => {
     get<AdminServer[]>('/api/admin/servers')
@@ -219,6 +221,24 @@ function ServersTab({ toast }: { toast: Toast }) {
   const filtered = list.filter(
     (s) => !search || s.name.toLowerCase().includes(search.toLowerCase()) || s.region.includes(search),
   )
+
+  // 拖拽重排：把 fromId 移动到 toId 的位置，乐观更新后持久化 sort
+  const reorder = async (fromId: string, toId: string) => {
+    if (fromId === toId) return
+    const from = list.findIndex((s) => s.id === fromId)
+    const to = list.findIndex((s) => s.id === toId)
+    if (from < 0 || to < 0) return
+    const next = [...list]
+    const [moved] = next.splice(from, 1)
+    next.splice(to, 0, moved)
+    setList(next)
+    try {
+      await post('/api/admin/servers/reorder', next.map((s) => s.id))
+    } catch (e) {
+      toast(errMsg(e))
+      load()
+    }
+  }
 
   const toggleReveal = (id: string) => {
     setRevealed((prev) => {
@@ -243,10 +263,15 @@ function ServersTab({ toast }: { toast: Toast }) {
         </button>
       </div>
 
+      <p className="text-xs text-zinc-400">
+        拖拽行首 <GripVertical className="inline h-3 w-3 align-text-bottom" /> 可调整服务器顺序，首页按此顺序展示{search ? '（搜索时暂不可拖拽）' : ''}
+      </p>
+
       <div className={`${card} overflow-x-auto`}>
         <table className="w-full min-w-[760px]">
           <thead className="border-b border-zinc-500/15 dark:border-white/10">
             <tr>
+              <th className={`${th} w-8`} />
               <th className={th}>名称</th>
               <th className={th}>分组</th>
               <th className={th}>状态</th>
@@ -258,15 +283,33 @@ function ServersTab({ toast }: { toast: Toast }) {
           <tbody>
             {filtered.length === 0 && (
               <tr>
-                <td className={`${td} text-center text-zinc-400`} colSpan={6}>
+                <td className={`${td} text-center text-zinc-400`} colSpan={7}>
                   暂无服务器，点击右上角「添加服务器」开始
                 </td>
               </tr>
             )}
             {filtered.map((s) => {
               const shown = revealed.has(s.id)
+              const draggable = !search
               return (
-                <tr key={s.id} className="border-b border-zinc-500/10 last:border-0 dark:border-white/5">
+                <tr
+                  key={s.id}
+                  draggable={draggable}
+                  onDragStart={() => draggable && setDragId(s.id)}
+                  onDragOver={(e) => dragId && e.preventDefault()}
+                  onDrop={(e) => {
+                    e.preventDefault()
+                    if (dragId) reorder(dragId, s.id)
+                    setDragId(null)
+                  }}
+                  onDragEnd={() => setDragId(null)}
+                  className={`border-b border-zinc-500/10 transition last:border-0 dark:border-white/5 ${
+                    dragId === s.id ? 'opacity-40' : ''
+                  }`}
+                >
+                  <td className={`${td} text-zinc-300 dark:text-zinc-600`}>
+                    {draggable && <GripVertical className="h-4 w-4 cursor-grab active:cursor-grabbing" />}
+                  </td>
                   <td className={`${td} font-medium`}>
                     {(s.flag || s.autoFlag) && <Flag code={s.flag || s.autoFlag} className="mr-1.5" />}
                     {s.name}

@@ -73,10 +73,13 @@ func (s *App) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	}
 	id := randString(8)
 	token := newToken()
+	// 新服务器排到列表末尾：sort = 当前最大值 + 1
+	var maxSort int
+	s.db.QueryRow(`SELECT COALESCE(MAX(sort), 0) FROM servers`).Scan(&maxSort)
 	if _, err := s.db.Exec(
-		`INSERT INTO servers(id, token, name, grp, region, flag, note, expire_at, created_at)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, token, f.Name, f.Group, f.Region, f.Flag, f.Note, f.ExpireAt, time.Now().Unix(),
+		`INSERT INTO servers(id, token, name, grp, region, flag, note, expire_at, sort, created_at)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, token, f.Name, f.Group, f.Region, f.Flag, f.Note, f.ExpireAt, maxSort+1, time.Now().Unix(),
 	); err != nil {
 		log.Printf("handleAddServer insert (id=%s): %v", id, err)
 		writeErr(w, 500, "内部错误")
@@ -122,6 +125,36 @@ func (s *App) handleDeleteServer(w http.ResponseWriter, r *http.Request) {
 	s.db.Exec(`DELETE FROM history WHERE server_id=?`, id)
 	s.db.Exec(`DELETE FROM ping_results WHERE server_id=?`, id)
 	s.hub.Drop(id)
+	s.hub.BroadcastMeta()
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+// handleReorderServers 按前端拖拽后的顺序重写 sort（数组下标即新顺序）。
+func (s *App) handleReorderServers(w http.ResponseWriter, r *http.Request) {
+	var ids []string
+	if err := json.NewDecoder(r.Body).Decode(&ids); err != nil {
+		writeErr(w, 400, "请求格式错误")
+		return
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		log.Printf("handleReorderServers begin: %v", err)
+		writeErr(w, 500, "内部错误")
+		return
+	}
+	defer tx.Rollback()
+	for i, id := range ids {
+		if _, err := tx.Exec(`UPDATE servers SET sort=? WHERE id=?`, i, id); err != nil {
+			log.Printf("handleReorderServers update (id=%s): %v", id, err)
+			writeErr(w, 500, "内部错误")
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("handleReorderServers commit: %v", err)
+		writeErr(w, 500, "内部错误")
+		return
+	}
 	s.hub.BroadcastMeta()
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }

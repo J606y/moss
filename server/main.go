@@ -63,6 +63,7 @@ func main() {
 	// 管理接口
 	mux.HandleFunc("GET /api/admin/servers", app.requireAuth(app.handleAdminServers))
 	mux.HandleFunc("POST /api/admin/servers", app.requireAuth(app.handleAddServer))
+	mux.HandleFunc("POST /api/admin/servers/reorder", app.requireAuth(app.handleReorderServers))
 	mux.HandleFunc("PUT /api/admin/servers/{id}", app.requireAuth(app.handleUpdateServer))
 	mux.HandleFunc("DELETE /api/admin/servers/{id}", app.requireAuth(app.handleDeleteServer))
 	mux.HandleFunc("GET /api/admin/tasks", app.requireAuth(app.handleAdminTasks))

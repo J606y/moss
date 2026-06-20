@@ -319,11 +319,6 @@ export default function ServerDetail() {
                   5 分 {st.load5.toFixed(2)} · 15 分 {st.load15.toFixed(2)}
                 </div>
               </div>
-              <GaugeCard
-                title="硬盘"
-                pct={pct(st.diskUsed, server.diskTotal)}
-                detail={`${fmtBytes(st.diskUsed)} / ${fmtBytes(server.diskTotal)}`}
-              />
               <div className={`${card} p-4`}>
                 <div className="text-xs text-zinc-500">内存</div>
                 <div className="mt-3 space-y-3">
@@ -339,6 +334,11 @@ export default function ServerDetail() {
                   />
                 </div>
               </div>
+              <GaugeCard
+                title="硬盘"
+                pct={pct(st.diskUsed, server.diskTotal)}
+                detail={`${fmtBytes(st.diskUsed)} / ${fmtBytes(server.diskTotal)}`}
+              />
               <div className={`${card} p-4`}>
                 <div className="text-xs text-zinc-500">总流量</div>
                 <div className="mt-1.5 space-y-1 text-sm font-medium tabular-nums">
@@ -361,13 +361,31 @@ export default function ServerDetail() {
           <section>
             <h2 className="mb-2 text-sm font-semibold text-zinc-500">历史记录</h2>
             <div className="grid gap-3 lg:grid-cols-2">
+              <ChartCard title="CPU (%)">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={histView}>
+                    <CartesianGrid stroke={gridStroke} vertical={false} />
+                    <XAxis
+                      dataKey="time"
+                      type="number"
+                      domain={['dataMin', 'dataMax']}
+                      tickFormatter={tf}
+                      minTickGap={48}
+                      {...axisProps}
+                    />
+                    <YAxis domain={[0, 100]} width={36} {...axisProps} />
+                    <Tooltip content={<ChartTip fmt={(v) => fmtPercent(v)} />} />
+                    <Line type="monotone" dataKey="cpu" name="CPU" stroke={palette.green} dot={false} strokeWidth={1.5} isAnimationActive={!isLive} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </ChartCard>
               <ChartCard
-                title="CPU / 内存 (%)"
+                title="内存 / 交换 (%)"
                 right={
                   <SeriesChips
                     items={[
-                      { name: 'CPU', color: palette.green },
                       { name: '内存', color: palette.sky },
+                      { name: '交换', color: palette.rose },
                     ]}
                   />
                 }
@@ -385,8 +403,8 @@ export default function ServerDetail() {
                     />
                     <YAxis domain={[0, 100]} width={36} {...axisProps} />
                     <Tooltip content={<ChartTip fmt={(v) => fmtPercent(v)} />} />
-                    <Line type="monotone" dataKey="cpu" name="CPU" stroke={palette.green} dot={false} strokeWidth={1.5} isAnimationActive={!isLive} />
                     <Line type="monotone" dataKey="mem" name="内存" stroke={palette.sky} dot={false} strokeWidth={1.5} isAnimationActive={!isLive} />
+                    <Line type="monotone" dataKey="swap" name="交换" stroke={palette.rose} dot={false} strokeWidth={1.5} isAnimationActive={!isLive} />
                   </LineChart>
                 </ResponsiveContainer>
               </ChartCard>
@@ -439,35 +457,7 @@ export default function ServerDetail() {
                   </AreaChart>
                 </ResponsiveContainer>
               </ChartCard>
-              <ChartCard title="系统负载">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={histView}>
-                    <CartesianGrid stroke={gridStroke} vertical={false} />
-                    <XAxis
-                      dataKey="time"
-                      type="number"
-                      domain={['dataMin', 'dataMax']}
-                      tickFormatter={tf}
-                      minTickGap={48}
-                      {...axisProps}
-                    />
-                    <YAxis width={36} {...axisProps} />
-                    <Tooltip content={<ChartTip fmt={(v) => v.toFixed(2)} />} />
-                    <Line type="monotone" dataKey="load1" name="负载" stroke={palette.green} dot={false} strokeWidth={1.5} isAnimationActive={!isLive} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </ChartCard>
-              <ChartCard
-                title="硬盘 / 交换分区 (%)"
-                right={
-                  <SeriesChips
-                    items={[
-                      { name: '硬盘', color: palette.amber },
-                      { name: '交换', color: palette.rose },
-                    ]}
-                  />
-                }
-              >
+              <ChartCard title="硬盘 (%)">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={histView}>
                     <CartesianGrid stroke={gridStroke} vertical={false} />
@@ -482,7 +472,6 @@ export default function ServerDetail() {
                     <YAxis domain={[0, 100]} width={36} {...axisProps} />
                     <Tooltip content={<ChartTip fmt={(v) => fmtPercent(v)} />} />
                     <Line type="monotone" dataKey="disk" name="硬盘" stroke={palette.amber} dot={false} strokeWidth={1.5} isAnimationActive={!isLive} />
-                    <Line type="monotone" dataKey="swap" name="交换" stroke={palette.rose} dot={false} strokeWidth={1.5} isAnimationActive={!isLive} />
                   </LineChart>
                 </ResponsiveContainer>
               </ChartCard>
