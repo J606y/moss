@@ -62,7 +62,11 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
   $SUDO systemctl daemon-reload
-  $SUDO systemctl enable --now moss-agent
+  $SUDO systemctl enable moss-agent >/dev/null 2>&1 || true
+  # 必须 restart 而非 enable --now：服务若已在运行（重装 / 换 token 场景），
+  # enable --now 不会重启旧进程，会继续用旧 token 连接 →
+  # “面板删号后重装一直 401 不上线”。restart 强制拉起新二进制 + 新 token。
+  $SUDO systemctl restart moss-agent
   echo "✅ 已安装并启动 moss-agent (systemd)"
 elif [[ "$OS" == "darwin" ]]; then
   PLIST="$HOME/Library/LaunchAgents/com.moss.agent.plist"
