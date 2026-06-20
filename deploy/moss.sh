@@ -14,6 +14,8 @@ WORKDIR="/opt/moss"
 CONF="$WORKDIR/moss.conf"
 CRED="$WORKDIR/admin_password.txt"
 DEFAULT_PORT="8787"
+SELF_URL="https://raw.githubusercontent.com/J606y/moss/main/deploy/moss.sh"
+BIN_PATH="/usr/local/bin/moss"
 
 c_red(){ printf '\033[31m%s\033[0m\n' "$*"; }
 c_grn(){ printf '\033[32m%s\033[0m\n' "$*"; }
@@ -30,9 +32,33 @@ pause(){ read -rp "按回车返回菜单..." _; }
 
 require_root(){
   if [ "$(id -u)" -ne 0 ]; then
+    # 若以已安装的固定文件（moss 命令）运行，自动 sudo 提权
+    local self; self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+    if [ -f "$self" ]; then exec sudo bash "$self" "$@"; fi
     err "请用 root 运行，例如："
-    echo "  sudo bash <(curl -fsSL https://raw.githubusercontent.com/J606y/moss/main/deploy/moss.sh)"
+    echo "  sudo bash <(curl -fsSL $SELF_URL)"
     exit 1
+  fi
+}
+
+# 把脚本本体安装/刷新到 /usr/local/bin/moss，使「moss」命令可随时打开本菜单。
+install_shortcut(){
+  local self; self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+  local existed=1; [ -f "$BIN_PATH" ] || existed=0
+  if [ -f "$self" ] && [ "$self" != "$BIN_PATH" ]; then
+    # 以真实文件运行（bash moss.sh）：拷贝到固定路径
+    cp -f "$self" "$BIN_PATH" 2>/dev/null && chmod +x "$BIN_PATH"
+  elif [ ! -f "$self" ]; then
+    # curl|bash / 进程替换运行：从 GitHub 拉最新到固定路径（顺带自更新命令本体）
+    local tmp; tmp="$(mktemp 2>/dev/null || echo /tmp/moss.$$)"
+    if curl -fsSL "$SELF_URL" -o "$tmp" 2>/dev/null && bash -n "$tmp" 2>/dev/null; then
+      cp -f "$tmp" "$BIN_PATH" 2>/dev/null && chmod +x "$BIN_PATH"
+    fi
+    rm -f "$tmp" 2>/dev/null
+  fi
+  if [ -f "$BIN_PATH" ] && [ "$existed" = 0 ]; then
+    ok "已安装命令「moss」——以后直接输入  moss  即可重新打开本菜单"
+    sleep 1
   fi
 }
 
@@ -221,5 +247,6 @@ main_menu(){
   done
 }
 
-require_root
+require_root "$@"
+install_shortcut
 main_menu
