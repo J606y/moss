@@ -41,6 +41,18 @@ func spaHandler(webDir string) http.Handler {
 	return spaFromDisk(webDir)
 }
 
+// setStaticCache 按文件名定缓存策略：
+//   assets/* 是 Vite 按内容哈希命名的产物（内容变即换名），可永久强缓存；
+//   index.html（含所有 SPA 回退）绝不能强缓存，否则发版后浏览器仍读旧 HTML，
+//   而它引用的旧哈希资源已被新构建删除 → 页面白屏/卡旧版，必须每次回源校验。
+func setStaticCache(w http.ResponseWriter, name string) {
+	if strings.HasPrefix(name, "assets/") {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-cache")
+}
+
 // spaFromFS 基于内嵌 fs.FS 提供 SPA，未命中回退 index.html。
 func spaFromFS(fsys fs.FS) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -49,9 +61,11 @@ func spaFromFS(fsys fs.FS) http.Handler {
 			name = "index.html"
 		}
 		if st, err := fs.Stat(fsys, name); err == nil && !st.IsDir() {
+			setStaticCache(w, name)
 			http.ServeFileFS(w, r, fsys, name)
 			return
 		}
+		setStaticCache(w, "index.html")
 		http.ServeFileFS(w, r, fsys, "index.html")
 	})
 }
@@ -65,11 +79,14 @@ func spaFromDisk(webDir string) http.Handler {
 			w.Write([]byte("Moss API 运行中。前端构建产物未找到，请先执行 cd web && npm run build，或开发模式下访问 Vite 端口。\n"))
 			return
 		}
-		p := filepath.Join(webDir, filepath.Clean(strings.TrimPrefix(r.URL.Path, "/")))
+		rel := filepath.Clean(strings.TrimPrefix(r.URL.Path, "/"))
+		p := filepath.Join(webDir, rel)
 		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			setStaticCache(w, filepath.ToSlash(rel))
 			http.ServeFile(w, r, p)
 			return
 		}
+		setStaticCache(w, "index.html")
 		http.ServeFile(w, r, index)
 	})
 }
