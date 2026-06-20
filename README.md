@@ -39,6 +39,14 @@ moss/
 
 ### server（Docker，推荐）
 
+**最简单 —— 一键脚本**（菜单式：安装 / 更新 / 卸载，自动生成并打印管理员密码）：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/J606y/moss/main/deploy/moss.sh)
+```
+
+装完即可用 `http://<服务器IP>:8787` 直接访问。以下为等价的手动方式：
+
 ```bash
 # 方式一：用预构建镜像（GitHub Release / GHCR 发布后可用）
 mkdir -p moss && cd moss
