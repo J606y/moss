@@ -21,7 +21,7 @@ moss/
 ├── server/    # 后端 Go + SQLite（modernc 纯 Go 驱动），内嵌前端，单二进制
 ├── agent/     # 探针 Go + gopsutil，单二进制，WebSocket 上报
 ├── internal/  # server / agent 共享的协议类型
-└── deploy/    # Dockerfile + docker-compose（server 镜像；阶段5 加 nginx + TLS）
+└── deploy/    # Dockerfile + docker-compose + nginx 反代示例 + 一键脚本 moss.sh
 ```
 
 - Agent 通过 `ws(s)://<server>/api/agent/ws?token=mk_xxx` 连接，上报系统指标与探测结果；连接信息 Windows / Linux / macOS 三端通用，仅安装命令不同（`install.sh` / `install.ps1`）。
@@ -33,7 +33,7 @@ moss/
 - [x] 阶段 2：后端框架 + Agent，跑通真实数据
 - [x] 阶段 3：通知告警（离线 / 负载 / Telegram）—— 冒烟通过，待真实 bot 评审
 - [x] 阶段 4：Docker 多阶段打包 + GitHub Actions 交叉编译发版
-- [ ] 阶段 5：Nginx 反代 + TLS，部署到服务器
+- [x] 阶段 5：生产部署 —— Docker 上线 + Nginx 反代 / TLS / wss（见 `deploy/nginx.example.conf`）
 
 ## 部署
 
@@ -71,7 +71,9 @@ docker run -d --name moss -p 8787:8787 \
 
 数据库存于命名卷 `moss-data`（镜像内 `/app/data` 已归属 nonroot，无需手动 chown）。浏览器访问 `http://<服务器IP>:8787`。
 
-> 置于 nginx 反代之后时（阶段5），给 server 加 `--trust-proxy` 以获取真实来源 IP。
+### 反向代理 + TLS（Nginx，可选但生产推荐）
+
+前面挂一层 Nginx 终止 TLS，对外提供 HTTPS / wss。要点：容器用 `-p 127.0.0.1:8787:8787` 仅绑回环、并给 server 加 `--trust-proxy`（读取真实来源 IP + 在 HTTPS 下启用 Secure cookie）；Nginx 反代到 `http://127.0.0.1:8787`，**务必带上 WebSocket 升级头**（`/api/ws`、`/api/agent/ws` 靠它，漏了实时曲线与 agent 都连不上）。完整可用配置见 [`deploy/nginx.example.conf`](deploy/nginx.example.conf)，证书用 certbot / acme.sh 签发即可。
 
 ### agent（install 脚本）
 
