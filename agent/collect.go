@@ -78,7 +78,7 @@ func collectInfo() protocol.AgentInfo {
 		info.SwapTotal = sm.Total
 	}
 	info.DiskTotal, _ = diskTotals()
-	info.IP, info.CountryCode = publicNet()
+	info.IP, info.IPv6, info.CountryCode = publicNet()
 	return info
 }
 

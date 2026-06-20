@@ -74,14 +74,14 @@ type Hub struct {
 }
 
 // sampleInterval 读取“采样间隔”设置，5 秒内复用缓存值。
-// 返回 time.Duration（设置单位为分钟）。
+// 返回 time.Duration（设置单位为秒，决定历史落库的最细粒度）。
 func (h *Hub) sampleInterval() time.Duration {
 	h.siMu.Lock()
 	defer h.siMu.Unlock()
 	if h.siCached > 0 && time.Since(h.siReadAt) < 5*time.Second {
 		return h.siCached
 	}
-	d := time.Duration(getSettingInt(h.db, "sample_interval", 5)) * time.Minute
+	d := time.Duration(getSettingInt(h.db, "sample_interval", 10)) * time.Second
 	h.siCached = d
 	h.siReadAt = time.Now()
 	return d

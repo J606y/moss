@@ -12,7 +12,8 @@ type AgentInfo struct {
 	SwapTotal      uint64 `json:"swapTotal"`
 	DiskTotal      uint64 `json:"diskTotal"`
 	AgentVersion   string `json:"agentVersion"`
-	IP             string `json:"ip"`          // agent 自测的公网 IP，留空则 server 回退到连接来源 IP
+	IP             string `json:"ip"`          // agent 自测的公网 IPv4，留空则 server 回退到连接来源 IP
+	IPv6           string `json:"ipv6"`        // agent 自测的公网 IPv6，主机无 v6 时留空
 	CountryCode    string `json:"countryCode"` // ISO alpha-2 小写国家码，用于自动国旗
 }
 

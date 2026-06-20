@@ -77,6 +77,7 @@ export interface AdminServer {
   expireAt: string
   token: string
   ip: string
+  ipv6: string
   online: boolean
   lastSeen: number
   createdAt: number

@@ -23,6 +23,7 @@ type adminServer struct {
 	ExpireAt  string `json:"expireAt"`
 	Token     string `json:"token"`
 	IP        string `json:"ip"`
+	IPv6      string `json:"ipv6"`
 	Online    bool   `json:"online"`
 	LastSeen  int64  `json:"lastSeen"`
 	CreatedAt int64  `json:"createdAt"`
@@ -39,7 +40,7 @@ type serverForm struct {
 
 func (s *App) handleAdminServers(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(
-		`SELECT id, name, grp, region, flag, auto_flag, note, expire_at, token, ip, last_seen, created_at
+		`SELECT id, name, grp, region, flag, auto_flag, note, expire_at, token, ip, ipv6, last_seen, created_at
 		 FROM servers ORDER BY sort, created_at`)
 	if err != nil {
 		log.Printf("handleAdminServers query: %v", err)
@@ -51,7 +52,7 @@ func (s *App) handleAdminServers(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var a adminServer
 		if err := rows.Scan(&a.ID, &a.Name, &a.Group, &a.Region, &a.Flag, &a.AutoFlag, &a.Note,
-			&a.ExpireAt, &a.Token, &a.IP, &a.LastSeen, &a.CreatedAt); err != nil {
+			&a.ExpireAt, &a.Token, &a.IP, &a.IPv6, &a.LastSeen, &a.CreatedAt); err != nil {
 			log.Printf("handleAdminServers scan: %v", err)
 			writeErr(w, 500, "内部错误")
 			return
@@ -267,8 +268,8 @@ func (s *App) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		SiteName:       getSetting(s.db, "site_name", "Moss"),
 		SiteDesc:       getSetting(s.db, "site_desc", "轻量服务器监控"),
 		ReportInterval: getSettingInt(s.db, "report_interval", 2),
-		SampleInterval: getSettingInt(s.db, "sample_interval", 5),
-		HistoryDays:    getSettingInt(s.db, "history_days", 30),
+		SampleInterval: getSettingInt(s.db, "sample_interval", 10),
+		HistoryDays:    getSettingInt(s.db, "history_days", 7),
 		PingDays:       getSettingInt(s.db, "ping_days", 7),
 	})
 }
@@ -302,8 +303,8 @@ func (s *App) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	setSetting(s.db, "site_name", v.SiteName)
 	setSetting(s.db, "site_desc", v.SiteDesc)
 	setSetting(s.db, "report_interval", strconv.Itoa(clampInt(v.ReportInterval, 1, 60, 2)))
-	setSetting(s.db, "sample_interval", strconv.Itoa(clampInt(v.SampleInterval, 1, 60, 5)))
-	setSetting(s.db, "history_days", strconv.Itoa(clampInt(v.HistoryDays, 1, 365, 30)))
+	setSetting(s.db, "sample_interval", strconv.Itoa(clampInt(v.SampleInterval, 5, 3600, 10)))
+	setSetting(s.db, "history_days", strconv.Itoa(clampInt(v.HistoryDays, 1, 365, 7)))
 	setSetting(s.db, "ping_days", strconv.Itoa(clampInt(v.PingDays, 1, 90, 7)))
 	s.pushConfigAll()
 	s.hub.BroadcastMeta()

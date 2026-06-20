@@ -141,17 +141,21 @@ func (s *App) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			info := msg.Info
-			// 优先用 agent 自测的公网 IP；拿不到才回退到连接来源 IP
+			// 优先用 agent 自测的公网 IP；某一族拿不到才用连接来源 IP 按地址族兜底
 			// （Docker/反代下来源 IP 往往是网桥网关，如 172.17.0.1）。
-			realIP := info.IP
-			if realIP == "" {
-				realIP = ip
+			ipv4, ipv6 := info.IP, info.IPv6
+			if strings.Contains(ip, ":") {
+				if ipv6 == "" {
+					ipv6 = ip
+				}
+			} else if ipv4 == "" {
+				ipv4 = ip
 			}
 			if _, err := s.db.Exec(
 				`UPDATE servers SET os=?, arch=?, virt=?, cpu_model=?, cpu_cores=?, mem_total=?, swap_total=?,
-				 disk_total=?, agent_version=?, ip=?, last_seen=? WHERE id=?`,
+				 disk_total=?, agent_version=?, ip=?, ipv6=?, last_seen=? WHERE id=?`,
 				info.OS, info.Arch, info.Virtualization, info.CPUModel, info.CPUCores,
-				info.MemTotal, info.SwapTotal, info.DiskTotal, info.AgentVersion, realIP, time.Now().Unix(), serverID,
+				info.MemTotal, info.SwapTotal, info.DiskTotal, info.AgentVersion, ipv4, ipv6, time.Now().Unix(), serverID,
 			); err != nil {
 				log.Printf("更新主机信息失败: %v", err)
 			}

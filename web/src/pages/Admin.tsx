@@ -88,6 +88,11 @@ function CopyBtn({ text }: { text: string }) {
 
 function maskIp(ip: string) {
   if (!ip) return '—'
+  if (ip.includes(':')) {
+    // IPv6：保留前两段，其余打码
+    const g = ip.split(':')
+    return `${g[0]}:${g[1] || ''}:····`
+  }
   const parts = ip.split('.')
   if (parts.length !== 4) return '…'
   return `${parts[0]}.${parts[1]}.*.*`
@@ -319,14 +324,19 @@ function ServersTab({ toast }: { toast: Toast }) {
                     <StatusPill online={s.online} />
                   </td>
                   <td className={`${td} tabular-nums text-zinc-500`}>
-                    <span className="inline-flex items-center gap-1">
-                      {shown ? s.ip || '—' : maskIp(s.ip)}
-                      {s.ip && (
+                    <div className="flex items-start gap-1">
+                      <div className="flex flex-col leading-tight">
+                        <span>{shown ? s.ip || '—' : maskIp(s.ip)}</span>
+                        {s.ipv6 && (
+                          <span className="text-[11px] text-zinc-400">{shown ? s.ipv6 : maskIp(s.ipv6)}</span>
+                        )}
+                      </div>
+                      {(s.ip || s.ipv6) && (
                         <button className={iconBtn} onClick={() => toggleReveal(s.id)} title={shown ? '隐藏' : '显示'}>
                           {shown ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
                         </button>
                       )}
-                    </span>
+                    </div>
                   </td>
                   <td className={`${td} text-zinc-500`}>{s.expireAt || '长期'}</td>
                   <td className={`${td} text-right`}>
@@ -886,8 +896,8 @@ function SettingsTab({ toast }: { toast: Toast }) {
             <input className={input} type="number" min={1} value={s.reportInterval} onChange={num('reportInterval')} />
           </div>
           <div>
-            <label className={formLabel}>历史采样间隔（分钟）</label>
-            <input className={input} type="number" min={1} value={s.sampleInterval} onChange={num('sampleInterval')} />
+            <label className={formLabel}>历史采样间隔（秒）</label>
+            <input className={input} type="number" min={5} value={s.sampleInterval} onChange={num('sampleInterval')} />
           </div>
           <div>
             <label className={formLabel}>历史数据保留（天）</label>
