@@ -91,7 +91,7 @@ docker run -d --name moss -p 8787:8787 \
 **省事 —— 一键反代脚本 [`nginx-rp`](https://github.com/J606y/nginx-rp)**(自动装 Nginx + acme.sh 签发并续期证书,支持 HTTP-01 / DNS API / 泛域名):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/J606y/nginx-rp/main/nginx-rp.sh | sudo bash
+bash <(curl -fsSL https://raw.githubusercontent.com/J606y/nginx-rp/main/nginx-rp.sh)
 ```
 
 按提示:**反代目标**填 `http://127.0.0.1:8787`,**缓存模式务必选「无缓存 none」**(Moss 源站自管缓存,选普通/分片缓存会导致发版后卡旧版),域名与证书方式按引导走即可。脚本生成的配置已自带 WebSocket 升级头,`/api/ws`、`/api/agent/ws`(实时曲线 + agent 上报)开箱即用。

@@ -91,7 +91,7 @@ Put Nginx in front to terminate TLS and serve HTTPS / wss. First run the Moss co
 **Easy path — the [`nginx-rp`](https://github.com/J606y/nginx-rp) one-liner** (auto-installs Nginx + acme.sh, issues and auto-renews certs; supports HTTP-01 / DNS API / wildcard):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/J606y/nginx-rp/main/nginx-rp.sh | sudo bash
+bash <(curl -fsSL https://raw.githubusercontent.com/J606y/nginx-rp/main/nginx-rp.sh)
 ```
 
 When prompted: set the **upstream target** to `http://127.0.0.1:8787`, **choose cache mode "none"** (Moss manages its own caching — "normal" / "slice" caching will pin stale HTML after an upgrade), then follow the guide for the domain and cert method. The generated config already ships the WebSocket upgrade headers, so `/api/ws` and `/api/agent/ws` (live charts + agent reporting) work out of the box.
