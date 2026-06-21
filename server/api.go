@@ -153,8 +153,7 @@ func (s *App) handlePing(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	since := time.Now().Add(-time.Duration(parseHours(r)) * time.Hour).UnixMilli()
 
-	taskRows, err := s.db.Query(
-		`SELECT id, name FROM ping_tasks WHERE server_id = '' OR server_id = ? ORDER BY id`, id)
+	taskRows, err := s.db.Query(`SELECT id, name, server_id FROM ping_tasks ORDER BY id`)
 	if err != nil {
 		log.Printf("handlePing tasks (server=%s): %v", id, err)
 		writeErr(w, 500, "内部错误")
@@ -164,7 +163,8 @@ func (s *App) handlePing(w http.ResponseWriter, r *http.Request) {
 	tasks := []pingTaskMeta{}
 	for taskRows.Next() {
 		var t pingTaskMeta
-		if err := taskRows.Scan(&t.ID, &t.Name); err == nil {
+		var sid string
+		if err := taskRows.Scan(&t.ID, &t.Name, &sid); err == nil && taskAppliesTo(sid, id) {
 			tasks = append(tasks, t)
 		}
 	}

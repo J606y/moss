@@ -30,12 +30,23 @@ func (s *App) clientIP(r *http.Request) string {
 	return host
 }
 
+// taskAppliesTo 判断探测任务是否应用于指定服务器。
+// taskServerID 为空字符串表示「全部服务器」，否则为逗号分隔的服务器 ID 列表。
+func taskAppliesTo(taskServerID, serverID string) bool {
+	if taskServerID == "" {
+		return true
+	}
+	for _, id := range strings.Split(taskServerID, ",") {
+		if id == serverID {
+			return true
+		}
+	}
+	return false
+}
+
 // tasksForServer 查询应用到某服务器的启用探测任务。
 func tasksForServer(db *sql.DB, serverID string) []protocol.PingTask {
-	rows, err := db.Query(
-		`SELECT id, type, target, interval FROM ping_tasks WHERE enabled = 1 AND (server_id = '' OR server_id = ?)`,
-		serverID,
-	)
+	rows, err := db.Query(`SELECT id, type, target, interval, server_id FROM ping_tasks WHERE enabled = 1`)
 	if err != nil {
 		log.Printf("查询探测任务失败: %v", err)
 		return nil
@@ -44,7 +55,8 @@ func tasksForServer(db *sql.DB, serverID string) []protocol.PingTask {
 	var out []protocol.PingTask
 	for rows.Next() {
 		var t protocol.PingTask
-		if err := rows.Scan(&t.ID, &t.Type, &t.Target, &t.Interval); err == nil {
+		var sid string
+		if err := rows.Scan(&t.ID, &t.Type, &t.Target, &t.Interval, &sid); err == nil && taskAppliesTo(sid, serverID) {
 			out = append(out, t)
 		}
 	}

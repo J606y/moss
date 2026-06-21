@@ -4,6 +4,8 @@ import { Link, useNavigate } from 'react-router-dom'
 import {
   Bell,
   Check,
+  ChevronDown,
+  ChevronUp,
   Copy,
   Eye,
   EyeOff,
@@ -41,7 +43,7 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4 backdrop-blur-sm" onClick={onClose}>
       <div
-        className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-2xl border border-white/50 bg-white/80 p-5 shadow-2xl backdrop-blur-2xl dark:border-white/10 dark:bg-zinc-900/80"
+        className="glass-sheen max-h-[85vh] w-full max-w-md overflow-y-auto rounded-2xl border border-white/50 bg-white/80 p-5 shadow-2xl backdrop-blur-2xl dark:border-white/10 dark:bg-zinc-900/80"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-4 flex items-center justify-between">
@@ -66,6 +68,120 @@ function Switch({ on, onChange }: { on: boolean; onChange: (v: boolean) => void 
         className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${on ? 'left-[18px]' : 'left-0.5'}`}
       />
     </button>
+  )
+}
+
+/** 液态玻璃下拉选择，替代原生 <select>，下拉面板与弹窗同款毛玻璃质感 */
+function Select<T extends string>({
+  value,
+  options,
+  onChange,
+}: {
+  value: T
+  options: Array<{ value: T; label: string }>
+  onChange: (v: T) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [open])
+  const current = options.find((o) => o.value === value)
+  return (
+    <div ref={ref} className="relative">
+      <button type="button" onClick={() => setOpen((v) => !v)} className={`${input} flex items-center justify-between text-left`}>
+        <span>{current?.label ?? value}</span>
+        <ChevronDown className={`h-4 w-4 shrink-0 text-zinc-400 transition ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="glass-sheen absolute z-20 mt-1 w-full overflow-hidden rounded-xl border border-white/50 bg-white/80 p-1 shadow-2xl backdrop-blur-2xl dark:border-white/10 dark:bg-zinc-900/80">
+          {options.map((o) => {
+            const active = o.value === value
+            return (
+              <button
+                key={o.value}
+                type="button"
+                onClick={() => {
+                  onChange(o.value)
+                  setOpen(false)
+                }}
+                className={`flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-sm transition hover:bg-white/55 dark:hover:bg-white/10 ${
+                  active ? 'font-medium text-emerald-600 dark:text-emerald-400' : ''
+                }`}
+              >
+                {o.label}
+                {active && <Check className="h-3.5 w-3.5" />}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** 液态玻璃勾选框（纯展示，点击交给外层容器处理）：未选=毛玻璃，选中=祖母绿 */
+function CheckBox({ checked }: { checked: boolean }) {
+  return (
+    <span
+      className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-[5px] border transition ${
+        checked
+          ? 'border-emerald-400/40 bg-emerald-500/85 text-white shadow-sm shadow-emerald-500/20'
+          : 'glass-control'
+      }`}
+    >
+      {checked && <Check className="h-3 w-3" strokeWidth={3} />}
+    </span>
+  )
+}
+
+/** 数字输入：原生上下箭头已全局隐藏，这里补一组液态玻璃风格的步进按钮 */
+function NumberInput({
+  value,
+  onChange,
+  min,
+  max,
+  step = 1,
+}: {
+  value: number
+  onChange: (v: number) => void
+  min?: number
+  max?: number
+  step?: number
+}) {
+  const clamp = (v: number) => {
+    if (min !== undefined && v < min) v = min
+    if (max !== undefined && v > max) v = max
+    return v
+  }
+  const bump = (d: number) => onChange(clamp((Number(value) || 0) + d))
+  const stepBtn =
+    'flex flex-1 items-center justify-center rounded-md px-1 text-zinc-400 transition hover:bg-white/55 hover:text-zinc-700 dark:hover:bg-white/10 dark:hover:text-zinc-200'
+  return (
+    <div className="relative">
+      <input
+        className={`${input} pr-8`}
+        type="number"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value) || 0)}
+      />
+      <div className="absolute inset-y-1 right-1 flex w-6 flex-col gap-px">
+        <button type="button" tabIndex={-1} title="增加" onClick={() => bump(step)} className={stepBtn}>
+          <ChevronUp className="h-3 w-3" />
+        </button>
+        <button type="button" tabIndex={-1} title="减少" onClick={() => bump(-step)} className={stepBtn}>
+          <ChevronDown className="h-3 w-3" />
+        </button>
+      </div>
+    </div>
   )
 }
 
@@ -325,10 +441,16 @@ function ServersTab({ toast }: { toast: Toast }) {
                   </td>
                   <td className={`${td} tabular-nums text-zinc-500`}>
                     <div className="flex items-start gap-1">
-                      <div className="flex flex-col leading-tight">
-                        <span>{shown ? s.ip || '—' : maskIp(s.ip)}</span>
+                      <div className="flex flex-col gap-0.5 leading-tight">
+                        <span className="inline-flex items-center gap-1">
+                          {shown ? s.ip || '—' : maskIp(s.ip)}
+                          {s.ip && <CopyBtn text={s.ip} />}
+                        </span>
                         {s.ipv6 && (
-                          <span className="text-[11px] text-zinc-400">{shown ? s.ipv6 : maskIp(s.ipv6)}</span>
+                          <span className="inline-flex items-center gap-1 text-[11px] text-zinc-400">
+                            {shown ? s.ipv6 : maskIp(s.ipv6)}
+                            <CopyBtn text={s.ipv6} />
+                          </span>
                         )}
                       </div>
                       {(s.ip || s.ipv6) && (
@@ -365,12 +487,21 @@ function ServersTab({ toast }: { toast: Toast }) {
           init={emptyServerForm}
           onClose={() => setModal(null)}
           onSubmit={async (f) => {
+            const tempId = `tmp-${Date.now()}`
+            const optimistic: AdminServer = {
+              id: tempId, name: f.name, group: f.group, region: f.region, flag: f.flag,
+              autoFlag: '', note: f.note, expireAt: f.expireAt, token: '',
+              ip: '', ipv6: '', online: false, lastSeen: 0, createdAt: 0,
+            }
+            setList((l) => [...l, optimistic])
+            setModal(null)
             try {
               const res = await post<{ id: string; token: string }>('/api/admin/servers', f)
-              setModal(null)
-              load()
+              setList((l) => l.map((x) => (x.id === tempId ? { ...optimistic, id: res.id, token: res.token } : x)))
               setInstall({ name: f.name, token: res.token })
+              load() // 后台对账，补齐服务端计算的 autoFlag 等字段
             } catch (e) {
+              setList((l) => l.filter((x) => x.id !== tempId))
               toast(errMsg(e))
             }
           }}
@@ -389,12 +520,15 @@ function ServersTab({ toast }: { toast: Toast }) {
           }}
           onClose={() => setModal(null)}
           onSubmit={async (f) => {
+            const id = modal.id
+            const prev = list
+            setList((l) => l.map((x) => (x.id === id ? { ...x, ...f } : x)))
+            setModal(null)
             try {
-              await put(`/api/admin/servers/${modal.id}`, f)
-              setModal(null)
-              load()
+              await put(`/api/admin/servers/${id}`, f)
               toast('已保存')
             } catch (e) {
+              setList(prev)
               toast(errMsg(e))
             }
           }}
@@ -434,15 +568,17 @@ function ServersTab({ toast }: { toast: Toast }) {
             </button>
             <button
               className={btnDanger}
-              onClick={async () => {
-                try {
-                  await del(`/api/admin/servers/${confirmDel.id}`)
-                  setConfirmDel(null)
-                  load()
-                  toast('已删除')
-                } catch (e) {
-                  toast(errMsg(e))
-                }
+              onClick={() => {
+                const target = confirmDel
+                const prev = list
+                setList((l) => l.filter((x) => x.id !== target.id))
+                setConfirmDel(null)
+                del(`/api/admin/servers/${target.id}`)
+                  .then(() => toast('已删除'))
+                  .catch((e) => {
+                    setList(prev)
+                    toast(errMsg(e))
+                  })
               }}
             >
               删除
@@ -471,6 +607,46 @@ interface TaskFormData {
 }
 
 const emptyTaskForm: TaskFormData = { name: '', type: 'icmp', target: '', interval: 60, serverId: '' }
+
+/** 应用范围多选：value 为空字符串=全部服务器，否则为逗号分隔的服务器 ID 列表 */
+function ServerPicker({
+  servers,
+  value,
+  onChange,
+}: {
+  servers: AdminServer[]
+  value: string
+  onChange: (v: string) => void
+}) {
+  const all = value === ''
+  const picked = new Set(value ? value.split(',') : [])
+  const toggle = (id: string) => {
+    const next = new Set(picked)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    onChange(next.size === 0 ? '' : servers.filter((s) => next.has(s.id)).map((s) => s.id).join(','))
+  }
+  const row =
+    'flex w-full cursor-pointer select-none items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition hover:bg-white/50 dark:hover:bg-white/10'
+  return (
+    <div className="glass-sheen max-h-44 space-y-0.5 overflow-y-auto rounded-xl border border-white/50 bg-white/45 p-1.5 dark:border-white/10 dark:bg-zinc-900/40">
+      <button type="button" role="checkbox" aria-checked={all} className={row} onClick={() => onChange('')}>
+        <CheckBox checked={all} />
+        <span className={all ? 'font-medium' : ''}>全部服务器</span>
+      </button>
+      {servers.map((s) => {
+        const on = !all && picked.has(s.id)
+        return (
+          <button key={s.id} type="button" role="checkbox" aria-checked={on} className={row} onClick={() => toggle(s.id)}>
+            <CheckBox checked={on} />
+            <span>{s.name}</span>
+          </button>
+        )
+      })}
+      {servers.length === 0 && <p className="px-2 py-1.5 text-sm text-zinc-400">暂无服务器</p>}
+    </div>
+  )
+}
 
 function TaskFormModal({
   title,
@@ -504,21 +680,19 @@ function TaskFormModal({
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className={formLabel}>类型</label>
-            <select className={input} value={f.type} onChange={(e) => setF({ ...f, type: e.target.value as PingTask['type'] })}>
-              <option value="icmp">ICMP</option>
-              <option value="tcp">TCP</option>
-              <option value="http">HTTP</option>
-            </select>
+            <Select
+              value={f.type}
+              options={[
+                { value: 'icmp', label: 'ICMP' },
+                { value: 'tcp', label: 'TCP' },
+                { value: 'http', label: 'HTTP' },
+              ]}
+              onChange={(v) => setF({ ...f, type: v })}
+            />
           </div>
           <div>
             <label className={formLabel}>间隔（秒）</label>
-            <input
-              className={input}
-              type="number"
-              min={10}
-              value={f.interval}
-              onChange={(e) => setF({ ...f, interval: Number(e.target.value) || 60 })}
-            />
+            <NumberInput min={10} value={f.interval} onChange={(v) => setF({ ...f, interval: v })} />
           </div>
         </div>
         <div>
@@ -532,14 +706,7 @@ function TaskFormModal({
         </div>
         <div>
           <label className={formLabel}>应用于</label>
-          <select className={input} value={f.serverId} onChange={(e) => setF({ ...f, serverId: e.target.value })}>
-            <option value="">全部服务器</option>
-            {servers.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
+          <ServerPicker servers={servers} value={f.serverId} onChange={(v) => setF({ ...f, serverId: v })} />
         </div>
         <div className="flex justify-end gap-2 pt-2">
           <button className={btnGhost} onClick={onClose}>
@@ -569,6 +736,7 @@ function TasksTab({ toast }: { toast: Toast }) {
   const [tasks, setTasks] = useState<PingTask[]>([])
   const [servers, setServers] = useState<AdminServer[]>([])
   const [modal, setModal] = useState<'add' | PingTask | null>(null)
+  const [confirmDel, setConfirmDel] = useState<PingTask | null>(null)
 
   const load = useCallback(() => {
     get<PingTask[]>('/api/admin/tasks')
@@ -580,7 +748,13 @@ function TasksTab({ toast }: { toast: Toast }) {
   }, [toast])
   useEffect(load, [load])
 
-  const serverName = (id: string) => (id ? (servers.find((s) => s.id === id)?.name ?? id) : '全部服务器')
+  const serverNames = (ids: string) =>
+    ids
+      ? ids
+          .split(',')
+          .map((id) => servers.find((s) => s.id === id)?.name ?? id)
+          .join('、')
+      : '全部服务器'
 
   const toggle = async (t: PingTask, enabled: boolean) => {
     setTasks((prev) => prev.map((x) => (x.id === t.id ? { ...x, enabled } : x)))
@@ -632,7 +806,7 @@ function TasksTab({ toast }: { toast: Toast }) {
                 </td>
                 <td className={`${td} tabular-nums text-zinc-500`}>{t.target}</td>
                 <td className={`${td} tabular-nums text-zinc-500`}>{t.interval}s</td>
-                <td className={`${td} text-zinc-500`}>{serverName(t.serverId)}</td>
+                <td className={`${td} max-w-[220px] !whitespace-normal text-zinc-500`}>{serverNames(t.serverId)}</td>
                 <td className={td}>
                   <Switch on={t.enabled} onChange={(v) => toggle(t, v)} />
                 </td>
@@ -641,19 +815,7 @@ function TasksTab({ toast }: { toast: Toast }) {
                     <button className={iconBtn} title="编辑" onClick={() => setModal(t)}>
                       <Pencil className="h-3.5 w-3.5" />
                     </button>
-                    <button
-                      className={`${iconBtn} hover:!text-rose-500`}
-                      title="删除"
-                      onClick={async () => {
-                        try {
-                          await del(`/api/admin/tasks/${t.id}`)
-                          load()
-                          toast('已删除')
-                        } catch (e) {
-                          toast(errMsg(e))
-                        }
-                      }}
-                    >
+                    <button className={`${iconBtn} hover:!text-rose-500`} title="删除" onClick={() => setConfirmDel(t)}>
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>
                   </span>
@@ -671,12 +833,16 @@ function TasksTab({ toast }: { toast: Toast }) {
           servers={servers}
           onClose={() => setModal(null)}
           onSubmit={async (f) => {
+            const tempId = -Date.now()
+            const optimistic: PingTask = { ...f, id: tempId, enabled: true }
+            setTasks((t) => [...t, optimistic])
+            setModal(null)
             try {
-              await post('/api/admin/tasks', { ...f, enabled: true })
-              setModal(null)
-              load()
+              const res = await post<{ id: number }>('/api/admin/tasks', { ...f, enabled: true })
+              setTasks((t) => t.map((x) => (x.id === tempId ? { ...optimistic, id: res.id } : x)))
               toast('已添加，任务已下发给在线 Agent')
             } catch (e) {
+              setTasks((t) => t.filter((x) => x.id !== tempId))
               toast(errMsg(e))
             }
           }}
@@ -689,16 +855,51 @@ function TasksTab({ toast }: { toast: Toast }) {
           servers={servers}
           onClose={() => setModal(null)}
           onSubmit={async (f) => {
+            const id = modal.id
+            const enabled = modal.enabled
+            const prev = tasks
+            setTasks((t) => t.map((x) => (x.id === id ? { ...x, ...f, enabled } : x)))
+            setModal(null)
             try {
-              await put(`/api/admin/tasks/${modal.id}`, { ...f, enabled: modal.enabled })
-              setModal(null)
-              load()
+              await put(`/api/admin/tasks/${id}`, { ...f, enabled })
               toast('已保存')
             } catch (e) {
+              setTasks(prev)
               toast(errMsg(e))
             }
           }}
         />
+      )}
+
+      {confirmDel && (
+        <Modal title="删除探测任务" onClose={() => setConfirmDel(null)}>
+          <p className="text-sm">
+            确定删除任务 <span className="font-semibold">{confirmDel.name}</span>
+            ？其历史延迟数据将一并删除，且无法恢复。
+          </p>
+          <div className="mt-4 flex justify-end gap-2">
+            <button className={btnGhost} onClick={() => setConfirmDel(null)}>
+              取消
+            </button>
+            <button
+              className={btnDanger}
+              onClick={() => {
+                const target = confirmDel
+                const prev = tasks
+                setTasks((t) => t.filter((x) => x.id !== target.id))
+                setConfirmDel(null)
+                del(`/api/admin/tasks/${target.id}`)
+                  .then(() => toast('已删除'))
+                  .catch((e) => {
+                    setTasks(prev)
+                    toast(errMsg(e))
+                  })
+              }}
+            >
+              删除
+            </button>
+          </div>
+        </Modal>
       )}
     </div>
   )
@@ -708,15 +909,16 @@ function TasksTab({ toast }: { toast: Toast }) {
 
 function Toggle({ checked, label, onChange }: { checked: boolean; label: string; onChange: (v: boolean) => void }) {
   return (
-    <label className="flex cursor-pointer select-none items-center gap-2 text-sm">
-      <input
-        type="checkbox"
-        className="h-4 w-4 accent-emerald-600"
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-      />
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={checked}
+      onClick={() => onChange(!checked)}
+      className="flex cursor-pointer select-none items-center gap-2 text-left text-sm"
+    >
+      <CheckBox checked={checked} />
       {label}
-    </label>
+    </button>
   )
 }
 
@@ -732,8 +934,7 @@ function NotifyTab({ toast }: { toast: Toast }) {
 
   if (!n) return <p className="text-sm text-zinc-500">加载中…</p>
 
-  const num = (k: keyof NotifySettings) => (e: React.ChangeEvent<HTMLInputElement>) =>
-    setN({ ...n, [k]: Number(e.target.value) || 0 })
+  const num = (k: keyof NotifySettings) => (v: number) => setN({ ...n, [k]: v })
 
   const save = async () => {
     try {
@@ -791,7 +992,7 @@ function NotifyTab({ toast }: { toast: Toast }) {
         <Toggle checked={n.offlineOn} label="服务器离线时推送通知（恢复上线时同步通知）" onChange={(v) => setN({ ...n, offlineOn: v })} />
         <div>
           <label className={formLabel}>离线判定延迟（秒，30 ~ 3600）</label>
-          <input className={input} type="number" min={30} max={3600} value={n.offlineDelay} onChange={num('offlineDelay')} />
+          <NumberInput min={30} max={3600} value={n.offlineDelay} onChange={num('offlineDelay')} />
           <p className="mt-1 text-xs text-zinc-400">离线超过该时长才告警，避免网络抖动产生骚扰。</p>
         </div>
       </div>
@@ -802,19 +1003,19 @@ function NotifyTab({ toast }: { toast: Toast }) {
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className={formLabel}>CPU 阈值（%）</label>
-            <input className={input} type="number" min={1} max={100} value={n.cpuThreshold} onChange={num('cpuThreshold')} />
+            <NumberInput min={1} max={100} value={n.cpuThreshold} onChange={num('cpuThreshold')} />
           </div>
           <div>
             <label className={formLabel}>内存阈值（%）</label>
-            <input className={input} type="number" min={1} max={100} value={n.memThreshold} onChange={num('memThreshold')} />
+            <NumberInput min={1} max={100} value={n.memThreshold} onChange={num('memThreshold')} />
           </div>
           <div>
             <label className={formLabel}>硬盘阈值（%）</label>
-            <input className={input} type="number" min={1} max={100} value={n.diskThreshold} onChange={num('diskThreshold')} />
+            <NumberInput min={1} max={100} value={n.diskThreshold} onChange={num('diskThreshold')} />
           </div>
           <div>
             <label className={formLabel}>持续时间（分钟）</label>
-            <input className={input} type="number" min={1} max={120} value={n.loadMinutes} onChange={num('loadMinutes')} />
+            <NumberInput min={1} max={120} value={n.loadMinutes} onChange={num('loadMinutes')} />
           </div>
         </div>
         <p className="text-xs text-zinc-400">超阈值持续指定时间才告警；回落至阈值 5% 以下时发送恢复通知。</p>
@@ -844,8 +1045,7 @@ function SettingsTab({ toast }: { toast: Toast }) {
 
   if (!s) return <p className="text-sm text-zinc-500">加载中…</p>
 
-  const num = (k: keyof Settings) => (e: React.ChangeEvent<HTMLInputElement>) =>
-    setS({ ...s, [k]: Number(e.target.value) || 0 })
+  const num = (k: keyof Settings) => (v: number) => setS({ ...s, [k]: v })
 
   const save = async () => {
     try {
@@ -893,19 +1093,19 @@ function SettingsTab({ toast }: { toast: Toast }) {
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className={formLabel}>实时上报间隔（秒）</label>
-            <input className={input} type="number" min={1} value={s.reportInterval} onChange={num('reportInterval')} />
+            <NumberInput min={1} value={s.reportInterval} onChange={num('reportInterval')} />
           </div>
           <div>
             <label className={formLabel}>历史采样间隔（秒）</label>
-            <input className={input} type="number" min={5} value={s.sampleInterval} onChange={num('sampleInterval')} />
+            <NumberInput min={5} value={s.sampleInterval} onChange={num('sampleInterval')} />
           </div>
           <div>
             <label className={formLabel}>历史数据保留（天）</label>
-            <input className={input} type="number" min={1} value={s.historyDays} onChange={num('historyDays')} />
+            <NumberInput min={1} value={s.historyDays} onChange={num('historyDays')} />
           </div>
           <div>
             <label className={formLabel}>延迟数据保留（天）</label>
-            <input className={input} type="number" min={1} value={s.pingDays} onChange={num('pingDays')} />
+            <NumberInput min={1} value={s.pingDays} onChange={num('pingDays')} />
           </div>
         </div>
         <div className="flex justify-end">

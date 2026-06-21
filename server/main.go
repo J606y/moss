@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 )
 
-const serverVersion = "0.2.4"
+const serverVersion = "0.3"
 
 // App 聚合全局依赖。
 type App struct {

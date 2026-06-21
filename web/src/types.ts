@@ -90,7 +90,7 @@ export interface PingTask {
   target: string
   interval: number
   enabled: boolean
-  serverId: string // '' = 全部服务器
+  serverId: string // '' = 全部服务器；否则为逗号分隔的服务器 ID 列表
 }
 
 export interface NotifySettings {
