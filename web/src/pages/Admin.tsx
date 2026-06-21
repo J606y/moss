@@ -758,7 +758,7 @@ function NotifyTab({ toast }: { toast: Toast }) {
   }
 
   return (
-    <div className="max-w-xl space-y-4">
+    <div className="mx-auto max-w-xl space-y-4">
       <div className={`${card} space-y-3 p-4`}>
         <h3 className="text-sm font-semibold">Telegram 推送</h3>
         <div>
@@ -871,7 +871,7 @@ function SettingsTab({ toast }: { toast: Toast }) {
   }
 
   return (
-    <div className="max-w-xl space-y-4">
+    <div className="mx-auto max-w-xl space-y-4">
       <div className={`${card} space-y-3 p-4`}>
         <h3 className="text-sm font-semibold">站点信息</h3>
         <div>
