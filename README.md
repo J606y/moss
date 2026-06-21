@@ -54,7 +54,9 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/J606y/moss/main/deploy/moss.sh)
 ```
 
-装完即可用 `http://<服务器IP>:8787` 直接访问。以下为等价的手动方式:
+装完即可用 `http://<服务器IP>:8787` 直接访问。脚本还会注册全局命令 **`moss`** —— 以后在服务器上直接输入 `moss` 就能重开管理菜单(安装 / 更新 / 卸载 / 查看状态密码 / 日志),不必再记那串 curl。
+
+以下为等价的手动方式:
 
 ```bash
 # 方式一:用预构建镜像(GitHub Release / GHCR 发布后可用)

@@ -154,6 +154,7 @@ do_install(){
     echo "  管理员密码: 沿用原数据卷中的密码（本次未重置）"
     [ -f "$CRED" ] && echo "              上次安装记录: $(cat "$CRED")"
   fi
+  echo "  快捷命令:   以后在本机直接输入  moss  即可重开管理菜单"
   c_ylw "  ⚠ 当前为明文 HTTP，登录密码会明文传输；公网长期使用建议再上 nginx+TLS。"
   c_grn "=========================================================="
 }
@@ -242,7 +243,7 @@ main_menu(){
       3) do_uninstall ;;
       4) do_status ;;
       5) do_logs ;;
-      0) exit 0 ;;
+      0) ok "已退出 —— 下次直接输入  moss  即可再打开本菜单"; exit 0 ;;
       *) warn "无效选择，请输入 0-5" ;;
     esac
     pause
