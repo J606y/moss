@@ -86,7 +86,17 @@ docker run -d --name moss -p 8787:8787 \
 
 ### 反向代理 + TLS(Nginx,可选但生产推荐)
 
-前面挂一层 Nginx 终止 TLS,对外提供 HTTPS / wss。要点:容器用 `-p 127.0.0.1:8787:8787` 仅绑回环、并给 server 加 `--trust-proxy`(读取真实来源 IP + 在 HTTPS 下启用 Secure cookie);Nginx 反代到 `http://127.0.0.1:8787`,**务必带上 WebSocket 升级头**(`/api/ws`、`/api/agent/ws` 靠它,漏了实时曲线与 agent 都连不上)。完整可用配置见 [`deploy/nginx.example.conf`](deploy/nginx.example.conf),证书用 certbot / acme.sh 签发即可。
+前面挂一层 Nginx 终止 TLS、对外提供 HTTPS / wss。先让 Moss 容器**仅绑回环并开启 `--trust-proxy`**(`-p 127.0.0.1:8787:8787` + 启动参数加 `--trust-proxy`,用于读取真实来源 IP、在 HTTPS 下启用 Secure cookie),再用 Nginx 反代到 `http://127.0.0.1:8787`。
+
+**省事 —— 一键反代脚本 [`nginx-rp`](https://github.com/J606y/nginx-rp)**(自动装 Nginx + acme.sh 签发并续期证书,支持 HTTP-01 / DNS API / 泛域名):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/J606y/nginx-rp/main/nginx-rp.sh | sudo bash
+```
+
+按提示:**反代目标**填 `http://127.0.0.1:8787`,**缓存模式务必选「无缓存 none」**(Moss 源站自管缓存,选普通/分片缓存会导致发版后卡旧版),域名与证书方式按引导走即可。脚本生成的配置已自带 WebSocket 升级头,`/api/ws`、`/api/agent/ws`(实时曲线 + agent 上报)开箱即用。
+
+**想手工配** → 见 [`deploy/nginx.example.conf`](deploy/nginx.example.conf):一份 Moss 定制的完整示例,核心是 `location /` 带 WebSocket 升级头、传 `X-Forwarded-Proto`、并**切勿对 HTML 加缓存**。
 
 ### agent(install 脚本)
 

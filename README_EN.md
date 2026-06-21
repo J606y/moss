@@ -86,7 +86,17 @@ The database lives in the named volume `moss-data` (`/app/data` is owned by nonr
 
 ### Reverse proxy + TLS (Nginx, optional but recommended for production)
 
-Put Nginx in front to terminate TLS and serve HTTPS / wss. Key points: bind the container to loopback only with `-p 127.0.0.1:8787:8787`, add `--trust-proxy` to the server (reads the real client IP and enables Secure cookies under HTTPS), and reverse-proxy to `http://127.0.0.1:8787` — **be sure to pass the WebSocket upgrade headers** (`/api/ws` and `/api/agent/ws` depend on them; without them live charts and agents won't connect). A complete working config is in [`deploy/nginx.example.conf`](deploy/nginx.example.conf); issue certs with certbot / acme.sh.
+Put Nginx in front to terminate TLS and serve HTTPS / wss. First run the Moss container **bound to loopback with `--trust-proxy`** (`-p 127.0.0.1:8787:8787` plus the `--trust-proxy` flag — reads the real client IP and enables Secure cookies under HTTPS), then reverse-proxy to `http://127.0.0.1:8787`.
+
+**Easy path — the [`nginx-rp`](https://github.com/J606y/nginx-rp) one-liner** (auto-installs Nginx + acme.sh, issues and auto-renews certs; supports HTTP-01 / DNS API / wildcard):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/J606y/nginx-rp/main/nginx-rp.sh | sudo bash
+```
+
+When prompted: set the **upstream target** to `http://127.0.0.1:8787`, **choose cache mode "none"** (Moss manages its own caching — "normal" / "slice" caching will pin stale HTML after an upgrade), then follow the guide for the domain and cert method. The generated config already ships the WebSocket upgrade headers, so `/api/ws` and `/api/agent/ws` (live charts + agent reporting) work out of the box.
+
+**Prefer to configure by hand** → see [`deploy/nginx.example.conf`](deploy/nginx.example.conf): a complete Moss-tailored example. The essentials are the WebSocket upgrade headers on `location /`, passing `X-Forwarded-Proto`, and **never caching HTML**.
 
 ### agent (install script)
 
