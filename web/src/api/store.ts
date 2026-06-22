@@ -55,12 +55,14 @@ async function fetchServers() {
 
 export const pct = (used: number, total: number) => (total > 0 ? (used / total) * 100 : 0)
 
-function pushBuf(id: string, st: LiveStats) {
+function pushBuf(id: string, st: LiveStats, time?: number) {
   const meta = servers.find((s) => s.id === id)
   if (!meta) return
   const buf = bufs[id] ?? (bufs[id] = [])
   buf.push({
-    time: Date.now(),
+    // 优先用服务端落点时间（与 /recent、历史同源）；缺省才退回浏览器时钟。
+    // 统一时钟源后，实时点与回填点不再因服务端/浏览器时差出现 ~Δ 秒的空窗。
+    time: time ?? Date.now(),
     cpu: st.cpu,
     mem: pct(st.memUsed, meta.memTotal),
     disk: pct(st.diskUsed, meta.diskTotal),
@@ -79,6 +81,7 @@ interface WsMsg {
   id?: string
   stats?: LiveStats
   uptimeSec?: number
+  time?: number // 服务端落点时间（毫秒）；与 /recent、历史接口同源
 }
 
 let ws: WebSocket | null = null
@@ -117,7 +120,7 @@ function connect() {
         meta.online = true
         meta.uptimeSec = msg.uptimeSec ?? meta.uptimeSec
       }
-      pushBuf(msg.id, msg.stats)
+      pushBuf(msg.id, msg.stats, msg.time)
       emitStat(msg.id) // 只重渲染这一台的卡片/行/详情页
       emitAgg() // StatsBar 全局合计（单组件）
       if (flipped) {
