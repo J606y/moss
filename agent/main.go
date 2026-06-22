@@ -15,7 +15,7 @@ import (
 	"moss/internal/protocol"
 )
 
-const agentVersion = "0.4.3"
+const agentVersion = "0.4.4"
 
 func wsURL(endpoint, token string) (string, error) {
 	endpoint = strings.TrimRight(endpoint, "/")

@@ -6,6 +6,7 @@ import { pct, useLiveStats, useServers } from '../api/store'
 import StatsBar from '../components/StatsBar'
 import ServerCard, { StatusPill } from '../components/ServerCard'
 import Flag from '../components/Flag'
+import Ticker from '../components/Ticker'
 import { MiniBar } from '../components/ProgressBar'
 import { fmtBytes, fmtSpeed, fmtUptime } from '../utils/format'
 import { card, td, th } from '../ui'
@@ -44,7 +45,11 @@ const ServerRow = memo(function ServerRow({
         <MiniBar pct={pct(st.diskUsed, server.diskTotal)} />
       </td>
       <td className={`${td} tabular-nums text-zinc-600 dark:text-zinc-300`}>
-        {fmtSpeed(st.netUp)} / {fmtSpeed(st.netDown)}
+        <span className="inline-flex items-center gap-1">
+          <Ticker value={st.netUp} format={fmtSpeed} />
+          <span className="text-zinc-400 dark:text-zinc-500">/</span>
+          <Ticker value={st.netDown} format={fmtSpeed} />
+        </span>
       </td>
       <td className={`${td} tabular-nums text-zinc-600 dark:text-zinc-300`}>
         {fmtBytes(st.totalUp)} / {fmtBytes(st.totalDown)}
