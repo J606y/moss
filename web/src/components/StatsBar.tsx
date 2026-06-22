@@ -1,6 +1,6 @@
 import { Globe2, HardDriveDownload, Server, Wifi } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import { getLive, useServers } from '../api/store'
+import { getLive, useAllStatsVersion, useServers } from '../api/store'
 import { fmtBytes, fmtSpeed } from '../utils/format'
 import { card } from '../ui'
 
@@ -33,6 +33,7 @@ function Stat({
 
 export default function StatsBar() {
   const servers = useServers()
+  useAllStatsVersion() // 全局合计：任意一台 tick 都重算（仅本组件承担）
   const online = servers.filter((s) => s.online)
   let up = 0
   let down = 0

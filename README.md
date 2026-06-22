@@ -56,6 +56,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/J606y/moss/main/deploy/moss.
 
 装完即可用 `http://<服务器IP>:8787` 直接访问。脚本还会注册全局命令 **`moss`** —— 以后在服务器上直接输入 `moss` 就能重开管理菜单(安装 / 更新 / 卸载 / 查看状态密码 / 日志),不必再记那串 curl。
 
+> 安装时会询问**是否在反向代理(Nginx)后面运行**:选「是」则自动以 `--trust-proxy` 启动并仅绑回环 `127.0.0.1`,让应用层限流按**真实访客 IP**(最左 `X-Forwarded-For`)生效;选「否」为直连模式(限流按 socket 来源 IP)。该选择会被记住,`moss` 更新时自动沿用。
+
 以下为等价的手动方式:
 
 ```bash
@@ -86,7 +88,9 @@ docker run -d --name moss -p 8787:8787 \
 
 ### 反向代理 + TLS(Nginx,可选但生产推荐)
 
-前面挂一层 Nginx 终止 TLS、对外提供 HTTPS / wss。先让 Moss 容器**仅绑回环并开启 `--trust-proxy`**(`-p 127.0.0.1:8787:8787` + 启动参数加 `--trust-proxy`,用于读取真实来源 IP、在 HTTPS 下启用 Secure cookie),再用 Nginx 反代到 `http://127.0.0.1:8787`。
+前面挂一层 Nginx 终止 TLS、对外提供 HTTPS / wss。先让 Moss 容器**仅绑回环并开启 `--trust-proxy`**(`-p 127.0.0.1:8787:8787` + 启动参数加 `--trust-proxy`,用于读取真实来源 IP、在 HTTPS 下启用 Secure cookie),再用 Nginx 反代到 `http://127.0.0.1:8787`。用一键脚本安装时选「反代模式」即自动完成这两步。
+
+> **应用层限流(默认开启)**:Moss 按真实访客 IP 对 `/api` 限流(默认 **600** 次/IP/分钟)、对登录等敏感端点更严(默认 **10** 次/IP/分钟),超限返回 `429`。须开启 `--trust-proxy` 才会取最左 `X-Forwarded-For` 作为真实访客 IP(否则按 socket 来源 IP——多层反代下那会是回源 Nginx 的 IP,导致所有访客共用一个限流桶)。阈值用环境变量 `MOSS_RATELIMIT_PER_MIN` / `MOSS_RATELIMIT_AUTH_PER_MIN` 调整,设 `0` 关闭对应层。多层反代请确保**边缘 Nginx 覆盖 `X-Forwarded-For`**(丢弃客户端伪造值),最左段才是可信的真实访客。
 
 **省事 —— 一键反代脚本 [`nginx-rp`](https://github.com/J606y/nginx-rp)**(自动装 Nginx + acme.sh 签发并续期证书,支持 HTTP-01 / DNS API / 泛域名):
 

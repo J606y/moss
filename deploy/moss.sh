@@ -110,6 +110,23 @@ c_exists(){ docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINE
 c_running(){ docker ps    --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER"; }
 v_exists(){ docker volume inspect "$VOLUME" >/dev/null 2>&1; }
 cur_port(){ local PORT="$DEFAULT_PORT"; [ -f "$CONF" ] && . "$CONF"; echo "$PORT"; }
+cur_trust(){ local TRUST_PROXY=0; [ -f "$CONF" ] && . "$CONF"; echo "${TRUST_PROXY:-0}"; }
+
+# start_container <port> <trust:0|1> [额外 docker run 参数...]
+# 反代模式(trust=1)：仅绑回环 127.0.0.1，并以 --trust-proxy 让 Moss 按「真实访客 IP」(最左 XFF) 限流；
+# 直连模式(trust=0)：绑 0.0.0.0:port，沿用镜像默认参数（限流按 socket 来源 IP）。
+start_container(){
+  local port="$1" trust="$2"; shift 2
+  local args=( -d --name "$CONTAINER" --restart unless-stopped -v "${VOLUME}:/app/data" "$@" )
+  local cmd=()
+  if [ "$trust" = 1 ]; then
+    args+=( -p "127.0.0.1:${port}:8787" )
+    cmd=( --listen :8787 --data /app/data --trust-proxy )
+  else
+    args+=( -p "${port}:8787" )
+  fi
+  docker run "${args[@]}" "$IMAGE" "${cmd[@]}"
+}
 
 do_install(){
   need_docker || { pause; return; }
@@ -117,6 +134,13 @@ do_install(){
   local port; port="$(cur_port)"
   read -rp "对外访问端口 [默认 ${port}]: " p; [ -n "$p" ] && port="$p"
   case "$port" in ''|*[!0-9]*) err "端口必须是数字"; return;; esac
+
+  # 反代模式：在 Nginx 等反向代理后面运行时开启 —— 限流/日志按「真实访客 IP」(最左 XFF) 生效，
+  # 且端口仅绑回环，防止外部直连绕过反代伪造头部。直接用 http://IP:端口 访问的选 N。
+  local trust; trust="$(cur_trust)"
+  local def="N"; [ "$trust" = 1 ] && def="Y"
+  read -rp "是否在 Nginx 等反向代理后面运行？(y/N) [默认 ${def}]: " tp
+  case "${tp:-$def}" in [Yy]*) trust=1;; *) trust=0;; esac
 
   if c_exists; then
     warn "已存在 Moss 容器"
@@ -132,19 +156,25 @@ do_install(){
   info "拉取镜像 $IMAGE ..."
   docker pull "$IMAGE" || { err "拉取镜像失败（检查网络）"; pause; return; }
 
-  local args=( -d --name "$CONTAINER" --restart unless-stopped -p "${port}:8787" -v "${VOLUME}:/app/data" )
-  [ "$fresh" = 1 ] && args+=( -e "MOSS_ADMIN_PASSWORD=$pass" )
-  docker run "${args[@]}" "$IMAGE" >/dev/null || { err "启动容器失败"; pause; return; }
+  local extra=()
+  [ "$fresh" = 1 ] && extra+=( -e "MOSS_ADMIN_PASSWORD=$pass" )
+  start_container "$port" "$trust" "${extra[@]}" >/dev/null || { err "启动容器失败"; pause; return; }
 
-  echo "PORT=$port" > "$CONF"
-  open_firewall "$port"
+  printf 'PORT=%s\nTRUST_PROXY=%s\n' "$port" "$trust" > "$CONF"
+  [ "$trust" = 1 ] || open_firewall "$port" # 反代模式仅绑回环，无需放行公网端口
 
   sleep 2
   local ip; ip="$(detect_ip)"
   echo
   c_grn "=========================================================="
   if c_running; then ok "Moss 已启动"; else warn "容器已创建但未运行，请用菜单 [5] 查看日志排查"; fi
-  echo "  访问地址:   http://${ip}:${port}"
+  if [ "$trust" = 1 ]; then
+    echo "  运行模式:   反代模式（仅监听 127.0.0.1:${port}，按真实访客 IP 限流）"
+    echo "  访问地址:   由你的反向代理对外提供（反代目标填 http://127.0.0.1:${port}）"
+  else
+    echo "  运行模式:   直连模式"
+    echo "  访问地址:   http://${ip}:${port}"
+  fi
   echo "  管理员用户名: admin（可登录后在「站点设置」修改）"
   if [ "$fresh" = 1 ]; then
     printf '%s\n' "$pass" > "$CRED"; chmod 600 "$CRED" 2>/dev/null
@@ -155,7 +185,11 @@ do_install(){
     [ -f "$CRED" ] && echo "              上次安装记录: $(cat "$CRED")"
   fi
   echo "  快捷命令:   以后在本机直接输入  moss  即可重开管理菜单"
-  c_ylw "  ⚠ 当前为明文 HTTP，登录密码会明文传输；公网长期使用建议再上 nginx+TLS。"
+  if [ "$trust" = 1 ]; then
+    c_grn "  ✓ 已按真实访客 IP 启用应用层限流（默认 /api 600·登录 10 次/分钟，可用环境变量调整）。"
+  else
+    c_ylw "  ⚠ 当前为明文 HTTP，登录密码会明文传输；公网长期使用建议上 Nginx+TLS 并以「反代模式」重装。"
+  fi
   c_grn "=========================================================="
 }
 
@@ -163,11 +197,15 @@ do_update(){
   c_exists || { warn "尚未安装，请先选 [1] 安装"; return; }
   need_docker || return
   local port; port="$(cur_port)"
+  local trust; trust="$(cur_trust)" # 沿用安装时选定的运行模式
   info "拉取最新镜像..."
   docker pull "$IMAGE" || { err "拉取失败"; return; }
   docker rm -f "$CONTAINER" >/dev/null 2>&1
-  docker run -d --name "$CONTAINER" --restart unless-stopped -p "${port}:8787" -v "${VOLUME}:/app/data" "$IMAGE" >/dev/null \
-    && ok "已更新到最新版并重启（数据与密码保留）" || err "更新失败"
+  if start_container "$port" "$trust" >/dev/null; then
+    ok "已更新到最新版并重启（数据与密码保留，模式：$([ "$trust" = 1 ] && echo 反代 || echo 直连)）"
+  else
+    err "更新失败"
+  fi
 }
 
 do_uninstall(){
@@ -194,7 +232,13 @@ do_status(){
     warn "尚未安装"; return
   fi
   local port; port="$(cur_port)"
-  echo "访问地址:   http://$(detect_ip):${port}"
+  if [ "$(cur_trust)" = 1 ]; then
+    echo "运行模式:   反代模式（仅监听 127.0.0.1:${port}）"
+    echo "访问地址:   经你的反向代理访问（反代目标 http://127.0.0.1:${port}）"
+  else
+    echo "运行模式:   直连模式"
+    echo "访问地址:   http://$(detect_ip):${port}"
+  fi
   echo "管理员用户名: admin（如已在后台修改请以新的为准）"
   if [ -f "$CRED" ]; then
     echo "管理员密码: $(cat "$CRED")"
@@ -221,7 +265,7 @@ banner(){
   |_|  |_|\___/|___/___/
 EOF
   echo "  镜像: $IMAGE"
-  printf "  状态: %s     端口: %s\n" "$st" "$(cur_port)"
+  printf "  状态: %s   端口: %s   模式: %s\n" "$st" "$(cur_port)" "$([ "$(cur_trust)" = 1 ] && echo 反代 || echo 直连)"
   echo "----------------------------------------------------------"
 }
 

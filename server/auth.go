@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"sync"
@@ -30,18 +29,6 @@ var (
 	loginMu       sync.Mutex
 	loginAttempts = make(map[string]*loginAttempt)
 )
-
-// loginClientIP 仅取 r.RemoteAddr 的 host 部分；刻意不信任
-// X-Forwarded-For/X-Real-IP（代理信任由独立环节处理），否则攻击者可伪造
-// 头部使每次请求看似来自不同 IP 从而绕过限流。注意与 agent_ws.go 中信任
-// 反代头的 clientIP 区分用途。
-func loginClientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
-}
 
 // loginLocked 判断该 IP 当前是否处于锁定期。需在持有 loginMu 时调用。
 func loginLocked(ip string, now time.Time) bool {
@@ -109,7 +96,7 @@ func (s *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "请求格式错误")
 		return
 	}
-	ip := loginClientIP(r)
+	ip := realIP(r, s.trustProxy) // 真实访客 IP（--trust-proxy 下取最左 XFF）
 
 	// 锁定期内直接拒绝，不去比对密码。
 	loginMu.Lock()

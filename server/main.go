@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 )
 
-const serverVersion = "0.3"
+const serverVersion = "0.4"
 
 // App 聚合全局依赖。
 type App struct {
@@ -17,6 +17,9 @@ type App struct {
 	hub        *Hub
 	notifier   *Notifier
 	trustProxy bool // 是否信任反代转发头获取真实来源 IP
+
+	globalLimiter *limiter // 全局 /api 限流（按真实访客 IP）
+	authLimiter   *limiter // 登录等敏感端点的更严限流
 }
 
 func main() {
@@ -38,6 +41,9 @@ func main() {
 	app := &App{db: db, hub: newHub(db), trustProxy: *trustProxy}
 	app.notifier = newNotifier(db)
 	app.hub.notifier = app.notifier
+	// 应用层限流：按真实访客 IP 计数（env 可调，设 0 关闭对应层）
+	app.globalLimiter = newLimiter(envInt("MOSS_RATELIMIT_PER_MIN", 600))
+	app.authLimiter = newLimiter(envInt("MOSS_RATELIMIT_AUTH_PER_MIN", 10))
 	app.ensurePassword()
 	go cleanupLoop(db)
 	go app.notifier.Run()
@@ -54,7 +60,7 @@ func main() {
 	mux.HandleFunc("GET /api/agent/ws", app.handleAgentWS)
 
 	// 认证
-	mux.HandleFunc("POST /api/login", app.handleLogin)
+	mux.Handle("POST /api/login", app.limit(app.authLimiter, http.HandlerFunc(app.handleLogin)))
 	mux.HandleFunc("POST /api/logout", app.handleLogout)
 	mux.HandleFunc("GET /api/admin/me", app.requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]bool{"ok": true})
@@ -85,7 +91,7 @@ func main() {
 	mux.Handle("/", spaHandler(*webDir))
 
 	log.Printf("Moss server v%s 启动，监听 %s", serverVersion, *listen)
-	if err := http.ListenAndServe(*listen, mux); err != nil {
+	if err := http.ListenAndServe(*listen, app.apiRateLimit(mux)); err != nil {
 		log.Fatalf("服务退出: %v", err)
 	}
 }

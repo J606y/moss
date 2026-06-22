@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react'
+import { memo, useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { LayoutGrid, List } from 'lucide-react'
-import { getLive, pct, useLive, useServers } from '../api/store'
+import type { ServerMeta } from '../types'
+import { pct, useLiveStats, useServers } from '../api/store'
 import StatsBar from '../components/StatsBar'
 import ServerCard, { StatusPill } from '../components/ServerCard'
 import Flag from '../components/Flag'
@@ -9,10 +10,54 @@ import { MiniBar } from '../components/ProgressBar'
 import { fmtBytes, fmtSpeed, fmtUptime } from '../utils/format'
 import { card, td, th } from '../ui'
 
+/** 表格行：自订阅单台 stats，A 上报只重渲染 A 行（memo 化） */
+const ServerRow = memo(function ServerRow({
+  server,
+  onOpen,
+}: {
+  server: ServerMeta
+  onOpen: (id: string) => void
+}) {
+  const st = useLiveStats(server.id)
+  return (
+    <tr
+      onClick={() => onOpen(server.id)}
+      className={`cursor-pointer border-b border-zinc-500/10 transition last:border-0 hover:bg-white/40 dark:border-white/5 dark:hover:bg-white/5 ${
+        server.online ? '' : 'opacity-60'
+      }`}
+    >
+      <td className={td}>
+        <StatusPill online={server.online} />
+      </td>
+      <td className={`${td} font-medium`}>
+        <Flag code={server.flag} className="mr-1.5" />
+        {server.name}
+      </td>
+      <td className={`${td} text-zinc-500`}>{server.os}</td>
+      <td className={td}>
+        <MiniBar pct={st.cpu} />
+      </td>
+      <td className={td}>
+        <MiniBar pct={pct(st.memUsed, server.memTotal)} />
+      </td>
+      <td className={td}>
+        <MiniBar pct={pct(st.diskUsed, server.diskTotal)} />
+      </td>
+      <td className={`${td} tabular-nums text-zinc-600 dark:text-zinc-300`}>
+        {fmtSpeed(st.netUp)} / {fmtSpeed(st.netDown)}
+      </td>
+      <td className={`${td} tabular-nums text-zinc-600 dark:text-zinc-300`}>
+        {fmtBytes(st.totalUp)} / {fmtBytes(st.totalDown)}
+      </td>
+      <td className={`${td} tabular-nums text-zinc-500`}>{fmtUptime(server.uptimeSec)}</td>
+    </tr>
+  )
+})
+
 export default function Dashboard() {
-  useLive()
   const servers = useServers()
   const navigate = useNavigate()
+  const onOpen = useCallback((id: string) => navigate(`/server/${id}`), [navigate])
   const [group, setGroup] = useState('全部')
   const [view, setView] = useState<'grid' | 'table'>(
     () => (localStorage.getItem('moss-view') as 'grid' | 'table') || 'grid',
@@ -91,43 +136,9 @@ export default function Dashboard() {
               </tr>
             </thead>
             <tbody>
-              {list.map((s) => {
-                const st = getLive(s.id)
-                return (
-                  <tr
-                    key={s.id}
-                    onClick={() => navigate(`/server/${s.id}`)}
-                    className={`cursor-pointer border-b border-zinc-500/10 transition last:border-0 hover:bg-white/40 dark:border-white/5 dark:hover:bg-white/5 ${
-                      s.online ? '' : 'opacity-60'
-                    }`}
-                  >
-                    <td className={td}>
-                      <StatusPill online={s.online} />
-                    </td>
-                    <td className={`${td} font-medium`}>
-                      <Flag code={s.flag} className="mr-1.5" />
-                      {s.name}
-                    </td>
-                    <td className={`${td} text-zinc-500`}>{s.os}</td>
-                    <td className={td}>
-                      <MiniBar pct={st.cpu} />
-                    </td>
-                    <td className={td}>
-                      <MiniBar pct={pct(st.memUsed, s.memTotal)} />
-                    </td>
-                    <td className={td}>
-                      <MiniBar pct={pct(st.diskUsed, s.diskTotal)} />
-                    </td>
-                    <td className={`${td} tabular-nums text-zinc-600 dark:text-zinc-300`}>
-                      {fmtSpeed(st.netUp)} / {fmtSpeed(st.netDown)}
-                    </td>
-                    <td className={`${td} tabular-nums text-zinc-600 dark:text-zinc-300`}>
-                      {fmtBytes(st.totalUp)} / {fmtBytes(st.totalDown)}
-                    </td>
-                    <td className={`${td} tabular-nums text-zinc-500`}>{fmtUptime(s.uptimeSec)}</td>
-                  </tr>
-                )
-              })}
+              {list.map((s) => (
+                <ServerRow key={s.id} server={s} onOpen={onOpen} />
+              ))}
             </tbody>
           </table>
         </div>

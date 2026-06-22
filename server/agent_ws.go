@@ -3,7 +3,6 @@ package main
 import (
 	"database/sql"
 	"log"
-	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -11,24 +10,6 @@ import (
 	"github.com/gorilla/websocket"
 	"moss/internal/protocol"
 )
-
-// clientIP 取真实来源 IP。仅当 --trust-proxy 开启时才信任反代转发头
-// (X-Real-IP/X-Forwarded-For)，否则一律取 r.RemoteAddr 的 host，防止伪造。
-func (s *App) clientIP(r *http.Request) string {
-	if s.trustProxy {
-		if v := r.Header.Get("X-Real-IP"); v != "" {
-			return v
-		}
-		if v := r.Header.Get("X-Forwarded-For"); v != "" {
-			return strings.TrimSpace(strings.Split(v, ",")[0])
-		}
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
-}
 
 // taskAppliesTo 判断探测任务是否应用于指定服务器。
 // taskServerID 为空字符串表示「全部服务器」，否则为逗号分隔的服务器 ID 列表。
@@ -99,7 +80,7 @@ func (s *App) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ac := &agentConn{conn: conn}
-	ip := s.clientIP(r)
+	ip := realIP(r, s.trustProxy)
 	log.Printf("agent 已连接: %s (%s)", serverID, ip)
 
 	s.hub.RegisterAgent(serverID, ac)

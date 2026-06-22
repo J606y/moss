@@ -379,16 +379,16 @@ function ServersTab({ toast }: { toast: Toast }) {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        <button className={btnPrimary} onClick={() => setModal('add')}>
+        <button className={`${btnPrimary} shrink-0 whitespace-nowrap`} onClick={() => setModal('add')}>
           <Plus className="h-4 w-4" /> 添加服务器
         </button>
       </div>
 
-      <p className="text-xs text-zinc-400">
+      <p className="hidden text-xs text-zinc-400 md:block">
         拖拽行首 <GripVertical className="inline h-3 w-3 align-text-bottom" /> 可调整服务器顺序，首页按此顺序展示{search ? '（搜索时暂不可拖拽）' : ''}
       </p>
 
-      <div className={`${card} overflow-x-auto`}>
+      <div className={`${card} hidden overflow-x-auto md:block`}>
         <table className="w-full min-w-[760px]">
           <thead className="border-b border-zinc-500/15 dark:border-white/10">
             <tr>
@@ -479,6 +479,70 @@ function ServersTab({ toast }: { toast: Toast }) {
             })}
           </tbody>
         </table>
+      </div>
+
+      {/* 移动端卡片列表：纵向堆叠各字段，避免表格横向滚动截断信息 */}
+      <div className="space-y-2 md:hidden">
+        {filtered.length === 0 && (
+          <div className={`${card} p-4 text-center text-sm text-zinc-400`}>
+            暂无服务器，点击右上角「添加服务器」开始
+          </div>
+        )}
+        {filtered.map((s) => {
+          const shown = revealed.has(s.id)
+          return (
+            <div key={s.id} className={`${card} space-y-2.5 p-3.5`}>
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-1.5 font-medium">
+                  {(s.flag || s.autoFlag) && <Flag code={s.flag || s.autoFlag} />}
+                  <span className="truncate">{s.name}</span>
+                </div>
+                <StatusPill online={s.online} />
+              </div>
+              <dl className="space-y-1.5 text-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="shrink-0 text-zinc-400">分组</dt>
+                  <dd className="truncate text-zinc-600 dark:text-zinc-300">{s.group || '—'}</dd>
+                </div>
+                <div className="flex items-start justify-between gap-3">
+                  <dt className="shrink-0 text-zinc-400">IP 地址</dt>
+                  <dd className="flex min-w-0 flex-col items-end gap-0.5 tabular-nums text-zinc-600 dark:text-zinc-300">
+                    <span className="inline-flex items-center gap-1">
+                      {shown ? s.ip || '—' : maskIp(s.ip)}
+                      {s.ip && <CopyBtn text={s.ip} />}
+                      {(s.ip || s.ipv6) && (
+                        <button className={iconBtn} onClick={() => toggleReveal(s.id)} title={shown ? '隐藏' : '显示'}>
+                          {shown ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                        </button>
+                      )}
+                    </span>
+                    {s.ipv6 && (
+                      <span className="inline-flex items-center gap-1 text-[11px] text-zinc-400">
+                        {shown ? s.ipv6 : maskIp(s.ipv6)}
+                        <CopyBtn text={s.ipv6} />
+                      </span>
+                    )}
+                  </dd>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="shrink-0 text-zinc-400">到期</dt>
+                  <dd className="text-zinc-600 dark:text-zinc-300">{s.expireAt || '长期'}</dd>
+                </div>
+              </dl>
+              <div className="flex justify-end gap-0.5 border-t border-zinc-500/10 pt-2 dark:border-white/5">
+                <button className={iconBtn} title="安装命令" onClick={() => setInstall(s)}>
+                  <Terminal className="h-4 w-4" />
+                </button>
+                <button className={iconBtn} title="编辑" onClick={() => setModal(s)}>
+                  <Pencil className="h-4 w-4" />
+                </button>
+                <button className={`${iconBtn} hover:!text-rose-500`} title="删除" onClick={() => setConfirmDel(s)}>
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          )
+        })}
       </div>
 
       {modal === 'add' && (
@@ -768,14 +832,14 @@ function TasksTab({ toast }: { toast: Toast }) {
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <p className="text-sm text-zinc-500">对服务器下发 ICMP / TCP / HTTP 探测，生成延迟与可用性图表。</p>
-        <button className={btnPrimary} onClick={() => setModal('add')}>
+        <button className={`${btnPrimary} shrink-0 whitespace-nowrap`} onClick={() => setModal('add')}>
           <Plus className="h-4 w-4" /> 添加任务
         </button>
       </div>
 
-      <div className={`${card} overflow-x-auto`}>
+      <div className={`${card} hidden overflow-x-auto md:block`}>
         <table className="w-full min-w-[680px]">
           <thead className="border-b border-zinc-500/15 dark:border-white/10">
             <tr>
@@ -824,6 +888,48 @@ function TasksTab({ toast }: { toast: Toast }) {
             ))}
           </tbody>
         </table>
+      </div>
+
+      {/* 移动端卡片列表 */}
+      <div className="space-y-2 md:hidden">
+        {tasks.length === 0 && (
+          <div className={`${card} p-4 text-center text-sm text-zinc-400`}>暂无探测任务</div>
+        )}
+        {tasks.map((t) => (
+          <div key={t.id} className={`${card} space-y-2.5 p-3.5`}>
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-2 font-medium">
+                <span className="truncate">{t.name}</span>
+                <span className={`shrink-0 rounded-md px-2 py-0.5 text-xs font-medium uppercase ${typeBadge[t.type]}`}>
+                  {t.type}
+                </span>
+              </div>
+              <Switch on={t.enabled} onChange={(v) => toggle(t, v)} />
+            </div>
+            <dl className="space-y-1.5 text-sm">
+              <div className="flex items-start justify-between gap-3">
+                <dt className="shrink-0 text-zinc-400">目标</dt>
+                <dd className="break-all text-right tabular-nums text-zinc-600 dark:text-zinc-300">{t.target}</dd>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <dt className="shrink-0 text-zinc-400">间隔</dt>
+                <dd className="tabular-nums text-zinc-600 dark:text-zinc-300">{t.interval}s</dd>
+              </div>
+              <div className="flex items-start justify-between gap-3">
+                <dt className="shrink-0 text-zinc-400">应用于</dt>
+                <dd className="text-right text-zinc-600 dark:text-zinc-300">{serverNames(t.serverId)}</dd>
+              </div>
+            </dl>
+            <div className="flex justify-end gap-0.5 border-t border-zinc-500/10 pt-2 dark:border-white/5">
+              <button className={iconBtn} title="编辑" onClick={() => setModal(t)}>
+                <Pencil className="h-4 w-4" />
+              </button>
+              <button className={`${iconBtn} hover:!text-rose-500`} title="删除" onClick={() => setConfirmDel(t)}>
+                <Trash2 className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        ))}
       </div>
 
       {modal === 'add' && (
@@ -1229,8 +1335,8 @@ export default function Admin() {
       </div>
 
       <div className="flex gap-6">
-        {/* 桌面端侧边栏 */}
-        <aside className="hidden w-44 shrink-0 flex-col gap-1 md:flex">
+        {/* 桌面端侧边栏：粘性定位，随页面滚动时固定不动，仅右侧内容滚动 */}
+        <aside className="sticky top-20 hidden w-44 shrink-0 flex-col gap-1 self-start md:flex">
           {tabs.map((t) => (
             <TabButton key={t.key} t={t} />
           ))}

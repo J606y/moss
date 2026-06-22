@@ -13,7 +13,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { ensureBuf, getLive, getLiveBuf, pct, useLive, useServers } from '../api/store'
+import { ensureBuf, getLiveBuf, pct, useLiveStats, useServers } from '../api/store'
 import { get } from '../api/client'
 import type { HistoryPoint, PingData } from '../types'
 import { StatusPill } from '../components/ServerCard'
@@ -78,8 +78,8 @@ const pingPalette = ['#10b981', '#0ea5e9', '#f59e0b', '#8b5cf6', '#f43f5e', '#14
 
 export default function ServerDetail() {
   const { id } = useParams<{ id: string }>()
-  useLive()
   const serverList = useServers()
+  const st = useLiveStats(id) // 仅当前服务器 tick 驱动实时数字/图（hooks 须在 early return 前调用）
   const [hours, setHours] = useState(0) // 默认「实时」
   const [tab, setTab] = useState<'load' | 'ping'>('load')
   // 时间轴刷选窗口 [起, 止] 时间戳，null 为完整范围
@@ -145,7 +145,6 @@ export default function ServerDetail() {
     )
   }
 
-  const st = getLive(server.id)
   const tf = (t: number) => (isLive ? fmtTime(t) : fmtAxisTime(t, hours))
   // 刷选条拖动时两端显示的时间文字（短格式：月/日 时:分）
   const brushTf = (t: number) => {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -109,16 +110,35 @@ func parseHours(r *http.Request) int {
 	return h
 }
 
+// bucketMs 把所选时段切成约 targetPoints 个桶，返回每桶毫秒宽度，
+// 供 SQL 内 GROUP BY time/桶宽 聚合降采样：无论时段多长，每条曲线点数都被压到 ~targetPoints，
+// 避免前端 recharts 渲染上万点而卡顿。桶宽小于实际采样间隔时每桶至多一行，等价于不降采样，
+// 短时段保持原始精度。
+func bucketMs(hours int) int64 {
+	const targetPoints = 600
+	b := int64(hours) * 3600 * 1000 / targetPoints
+	if b < 1 {
+		b = 1
+	}
+	return b
+}
+
 func (s *App) handleRecent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, s.hub.Recent(r.PathValue("id")))
 }
 
 func (s *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	since := time.Now().Add(-time.Duration(parseHours(r)) * time.Hour).UnixMilli()
+	hours := parseHours(r)
+	since := time.Now().Add(-time.Duration(hours) * time.Hour).UnixMilli()
+	bucket := bucketMs(hours)
+	// 按时间桶聚合：每桶取各指标均值，把点数压到 ~600，整数列四舍五入回整数。
 	rows, err := s.db.Query(
-		`SELECT time, cpu, mem, swap, disk, load1, net_up, net_down, tcp, processes
-		 FROM history WHERE server_id = ? AND time >= ? ORDER BY time`, id, since)
+		`SELECT CAST(AVG(time) AS INTEGER), AVG(cpu), AVG(mem), AVG(swap), AVG(disk), AVG(load1),
+		        AVG(net_up), AVG(net_down),
+		        CAST(ROUND(AVG(tcp)) AS INTEGER), CAST(ROUND(AVG(processes)) AS INTEGER)
+		 FROM history WHERE server_id = ? AND time >= ?
+		 GROUP BY time / ? ORDER BY 1`, id, since, bucket)
 	if err != nil {
 		log.Printf("handleHistory query (server=%s): %v", id, err)
 		writeErr(w, 500, "内部错误")
@@ -151,7 +171,9 @@ type pingPt struct {
 
 func (s *App) handlePing(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	since := time.Now().Add(-time.Duration(parseHours(r)) * time.Hour).UnixMilli()
+	hours := parseHours(r)
+	since := time.Now().Add(-time.Duration(hours) * time.Hour).UnixMilli()
+	bucket := bucketMs(hours)
 
 	taskRows, err := s.db.Query(`SELECT id, name, server_id FROM ping_tasks ORDER BY id`)
 	if err != nil {
@@ -173,21 +195,25 @@ func (s *App) handlePing(w http.ResponseWriter, r *http.Request) {
 	for _, t := range tasks {
 		key := fmt.Sprint(t.ID)
 		series[key] = []pingPt{}
+		// 按时间桶聚合：每桶取成功探测(ms>=0)的均值；整桶全丢包则均值为 NULL → 该点记为丢包。
 		rows, err := s.db.Query(
-			`SELECT time, ms FROM ping_results WHERE server_id = ? AND task_id = ? AND time >= ? ORDER BY time`,
-			id, t.ID, since)
+			`SELECT CAST(AVG(time) AS INTEGER),
+			        CAST(ROUND(AVG(CASE WHEN ms >= 0 THEN ms END)) AS INTEGER)
+			 FROM ping_results WHERE server_id = ? AND task_id = ? AND time >= ?
+			 GROUP BY time / ? ORDER BY 1`,
+			id, t.ID, since, bucket)
 		if err != nil {
 			continue
 		}
 		for rows.Next() {
 			var tm int64
-			var ms int
+			var ms sql.NullInt64
 			if err := rows.Scan(&tm, &ms); err != nil {
 				continue
 			}
 			p := pingPt{Time: tm}
-			if ms >= 0 {
-				v := ms
+			if ms.Valid {
+				v := int(ms.Int64)
 				p.Ms = &v
 			}
 			series[key] = append(series[key], p)

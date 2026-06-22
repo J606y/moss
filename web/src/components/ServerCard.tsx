@@ -1,7 +1,8 @@
+import { memo } from 'react'
 import { Link } from 'react-router-dom'
 import { ArrowDown, ArrowUp } from 'lucide-react'
 import type { ServerMeta } from '../types'
-import { getLive, pct } from '../api/store'
+import { pct, useLiveStats } from '../api/store'
 import { fmtBytes, fmtPercent, fmtSpeed, fmtUptime } from '../utils/format'
 import { ProgressBar } from './ProgressBar'
 import Flag from './Flag'
@@ -23,8 +24,8 @@ export function StatusPill({ online }: { online: boolean }) {
   )
 }
 
-export default function ServerCard({ server }: { server: ServerMeta }) {
-  const st = getLive(server.id)
+function ServerCard({ server }: { server: ServerMeta }) {
+  const st = useLiveStats(server.id)
   const memPct = pct(st.memUsed, server.memTotal)
   const diskPct = pct(st.diskUsed, server.diskTotal)
 
@@ -92,3 +93,5 @@ export default function ServerCard({ server }: { server: ServerMeta }) {
     </Link>
   )
 }
+
+export default memo(ServerCard)

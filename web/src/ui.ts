@@ -12,8 +12,10 @@ export const btnDanger =
 export const iconBtn =
   'rounded-lg p-1.5 text-zinc-500 transition hover:bg-white/55 hover:text-zinc-800 dark:hover:bg-white/10 dark:hover:text-zinc-200'
 
+// text-base sm:text-sm：手机端用 16px 字体，避免 iOS Safari 聚焦输入框时自动放大页面；
+// 桌面端（≥640px）恢复 14px 紧凑观感。
 export const input =
-  'glass-sheen w-full rounded-xl border border-white/50 bg-white/45 px-3 py-1.5 text-sm shadow-sm outline-none backdrop-blur-md transition placeholder:text-zinc-400 focus:border-emerald-400/60 focus:ring-2 focus:ring-emerald-400/25 dark:border-white/10 dark:bg-zinc-900/40 dark:placeholder:text-zinc-600 dark:focus:border-emerald-500/50'
+  'glass-sheen w-full rounded-xl border border-white/50 bg-white/45 px-3 py-1.5 text-base shadow-sm outline-none backdrop-blur-md transition placeholder:text-zinc-400 focus:border-emerald-400/60 focus:ring-2 focus:ring-emerald-400/25 sm:text-sm dark:border-white/10 dark:bg-zinc-900/40 dark:placeholder:text-zinc-600 dark:focus:border-emerald-500/50'
 
 export const formLabel = 'mb-1 block text-xs font-medium text-zinc-500 dark:text-zinc-400'
 

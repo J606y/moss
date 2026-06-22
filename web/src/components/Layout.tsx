@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { Link, Outlet } from 'react-router-dom'
 import { Moon, Settings, Sun } from 'lucide-react'
 import { useTheme } from '../useTheme'
@@ -47,11 +47,13 @@ export default function Layout() {
           </div>
         </div>
       </header>
-      <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-6">
-        <Outlet />
+      <main className="mx-auto w-full max-w-7xl flex-1 px-3 py-5 sm:px-4 sm:py-6">
+        <Suspense fallback={<div className="flex items-center justify-center py-20 text-sm text-zinc-400">加载中…</div>}>
+          <Outlet />
+        </Suspense>
       </main>
       <footer className="py-5 text-center text-xs text-zinc-400 dark:text-zinc-600">
-        Moss v0.3 · 轻量服务器监控
+        Moss v0.4 · 轻量服务器监控
       </footer>
     </div>
   )

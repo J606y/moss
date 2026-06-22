@@ -1,8 +1,12 @@
 /**
  * 实时数据存储：HTTP 拉取服务器列表 + WebSocket 订阅实时上报。
- * 对页面暴露与原 mock 层一致的接口：useLive / getLive / getLiveBuf。
+ *
+ * 订阅按粒度拆三类，避免「任意一台上报 → 全首页重渲染」：
+ *   - statListeners：每台服务器各自一组，仅该台 tick 时通知（卡片/表格行/详情页自订阅）。
+ *   - listListeners：服务器增删、在线↔离线翻转时通知（列表排序/数量变化）。
+ *   - aggListeners ：任意 tick 都通知，单调版本号驱动（StatsBar 全局合计专用，单组件承担）。
  */
-import { useEffect, useState } from 'react'
+import { useCallback, useSyncExternalStore } from 'react'
 import type { LivePoint, LiveStats, ServerMeta } from '../types'
 
 const zeroStats: LiveStats = {
@@ -14,11 +18,24 @@ const zeroStats: LiveStats = {
 let servers: ServerMeta[] = []
 const stats: Record<string, LiveStats> = {}
 const bufs: Record<string, LivePoint[]> = {}
-const listeners = new Set<() => void>()
-let started = false
 
-function emit() {
-  listeners.forEach((f) => f())
+// 三类订阅注册表
+const statListeners = new Map<string, Set<() => void>>() // serverID → 监听者
+const listListeners = new Set<() => void>()
+const aggListeners = new Set<() => void>()
+let aggVersion = 0
+
+const emitStat = (id: string) => statListeners.get(id)?.forEach((f) => f())
+const emitList = () => listListeners.forEach((f) => f())
+const emitAgg = () => {
+  aggVersion++
+  aggListeners.forEach((f) => f())
+}
+// 列表/聚合 + 所有已订阅卡片一起刷新（整体拉取后用）
+const emitAll = () => {
+  emitList()
+  emitAgg()
+  statListeners.forEach((set) => set.forEach((f) => f()))
 }
 
 async function fetchServers() {
@@ -30,7 +47,7 @@ async function fetchServers() {
       stats[meta.id] = st
       return meta as ServerMeta
     })
-    emit()
+    emitAll()
   } catch {
     // 拉取失败时保留旧数据，等待下次刷新
   }
@@ -92,14 +109,21 @@ function connect() {
       return
     }
     if (msg.type === 'stats' && msg.id && msg.stats) {
-      stats[msg.id] = msg.stats
+      stats[msg.id] = msg.stats // 每次都是新对象，作为 useLiveStats 的快照
       const meta = servers.find((s) => s.id === msg.id)
+      let flipped = false
       if (meta) {
+        if (!meta.online) flipped = true // 识别 离线→在线 翻转
         meta.online = true
         meta.uptimeSec = msg.uptimeSec ?? meta.uptimeSec
       }
       pushBuf(msg.id, msg.stats)
-      emit()
+      emitStat(msg.id) // 只重渲染这一台的卡片/行/详情页
+      emitAgg() // StatsBar 全局合计（单组件）
+      if (flipped) {
+        servers = [...servers] // 翻转：换数组引用，让 useServers 重排序
+        emitList()
+      }
     } else {
       // online / offline / meta：服务器列表或状态变化，整体刷新
       fetchServers()
@@ -125,6 +149,7 @@ if (typeof document !== 'undefined') {
   })
 }
 
+let started = false
 function ensureStarted() {
   if (started) return
   started = true
@@ -132,24 +157,53 @@ function ensureStarted() {
   connect()
 }
 
-/** 订阅实时数据，每次上报触发重渲染 */
-export function useLive(): number {
-  const [v, setV] = useState(0)
-  useEffect(() => {
-    ensureStarted()
-    const f = () => setV((x) => x + 1)
-    listeners.add(f)
-    return () => {
-      listeners.delete(f)
-    }
-  }, [])
-  return v
+/** 订阅单台服务器的实时 stats；id 缺省时返回零值且不订阅 */
+export function useLiveStats(id?: string): LiveStats {
+  const subscribe = useCallback(
+    (cb: () => void) => {
+      ensureStarted()
+      if (!id) return () => {}
+      let set = statListeners.get(id)
+      if (!set) {
+        set = new Set()
+        statListeners.set(id, set)
+      }
+      set.add(cb)
+      return () => {
+        set!.delete(cb)
+        if (set!.size === 0) statListeners.delete(id) // 清理空 Set，防 Map 泄漏
+      }
+    },
+    [id],
+  )
+  const getSnapshot = useCallback(() => (id ? getLive(id) : zeroStats), [id])
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
 }
 
-/** 服务器列表（随实时数据一起更新） */
+/** 服务器列表：仅增删 / 在线翻转 / 整体刷新时变化 */
 export function useServers(): ServerMeta[] {
-  useLive()
-  return servers
+  const subscribe = useCallback((cb: () => void) => {
+    ensureStarted()
+    listListeners.add(cb)
+    return () => {
+      listListeners.delete(cb)
+    }
+  }, [])
+  const getSnapshot = useCallback(() => servers, [])
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+}
+
+/** 任意一台 tick 都自增的版本号，供需要全局合计的组件（StatsBar）订阅 */
+export function useAllStatsVersion(): number {
+  const subscribe = useCallback((cb: () => void) => {
+    ensureStarted()
+    aggListeners.add(cb)
+    return () => {
+      aggListeners.delete(cb)
+    }
+  }, [])
+  const getSnapshot = useCallback(() => aggVersion, [])
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
 }
 
 export const getLive = (id: string): LiveStats => stats[id] ?? zeroStats
@@ -165,7 +219,7 @@ export async function ensureBuf(id: string) {
     const existing = bufs[id] ?? []
     const lastTime = recent.length ? recent[recent.length - 1].time : 0
     bufs[id] = [...recent, ...existing.filter((p) => p.time > lastTime)].slice(-90)
-    emit()
+    emitStat(id) // 只刷新当前详情页对应的订阅者
   } catch {
     // 忽略，等 WS 慢慢填充
   }

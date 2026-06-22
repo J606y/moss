@@ -13,12 +13,15 @@ services:
     container_name: moss-server
     restart: unless-stopped
     ports:
-      - "8787:8787" # 阶段5 接 nginx 后可改为仅内网暴露
+      - "8787:8787" # 直连模式。接反向代理后改为仅绑回环： "127.0.0.1:8787:8787"
     environment:
       MOSS_ADMIN_PASSWORD: "${MOSS_ADMIN_PASSWORD:-}" # 仅首次（库无密码）生效，之后忽略
+      # 应用层限流（按真实访客 IP，默认开启；设 0 关闭对应层）：
+      MOSS_RATELIMIT_PER_MIN: "${MOSS_RATELIMIT_PER_MIN:-600}"          # 全局 /api 每 IP 每分钟
+      MOSS_RATELIMIT_AUTH_PER_MIN: "${MOSS_RATELIMIT_AUTH_PER_MIN:-10}" # 登录等敏感端点 每 IP 每分钟
     volumes:
       - moss-data:/app/data # 命名卷，继承镜像内 /app/data 的 nonroot(65532) 属主，免手动 chown
-    # 阶段5 在反代之后启用真实来源 IP：
+    # 在反代之后启用真实来源 IP（限流/日志按最左 XFF 取真实访客 IP）；同时把上面 ports 改成 127.0.0.1：
     # command: ["--listen", ":8787", "--data", "/app/data", "--trust-proxy"]
 
 volumes:
