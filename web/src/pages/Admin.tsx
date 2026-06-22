@@ -1312,8 +1312,9 @@ export default function Admin() {
   )
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
+    // 桌面端做成固定外壳：标题 + 左栏不动，仅右侧内容区内部滚动；移动端仍为整页滚动
+    <div className="space-y-4 md:flex md:h-[calc(100dvh-11rem)] md:flex-col md:gap-4 md:space-y-0">
+      <div className="flex items-center justify-between md:shrink-0">
         <h1 className="text-xl font-bold">管理后台</h1>
         <div className="flex items-center gap-2">
           <Link to="/" className={btnGhost}>
@@ -1334,15 +1335,16 @@ export default function Admin() {
         ))}
       </div>
 
-      <div className="flex gap-6">
-        {/* 桌面端侧边栏：粘性定位，随页面滚动时固定不动，仅右侧内容滚动 */}
-        <aside className="sticky top-20 hidden w-44 shrink-0 flex-col gap-1 self-start md:flex">
+      <div className="flex gap-6 md:min-h-0 md:flex-1">
+        {/* 桌面端侧边栏：在不滚动的外壳里，始终固定不动 */}
+        <aside className="hidden w-44 shrink-0 flex-col gap-1 md:flex">
           {tabs.map((t) => (
             <TabButton key={t.key} t={t} />
           ))}
         </aside>
 
-        <div className="min-w-0 flex-1">
+        {/* 仅此区域在桌面端内部纵向滚动 */}
+        <div className="min-w-0 flex-1 md:overflow-y-auto md:pr-1">
           {tab === 'servers' && <ServersTab toast={showToast} />}
           {tab === 'tasks' && <TasksTab toast={showToast} />}
           {tab === 'notify' && <NotifyTab toast={showToast} />}
