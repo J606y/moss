@@ -15,7 +15,7 @@ import (
 	"moss/internal/protocol"
 )
 
-const agentVersion = "0.4.4"
+const agentVersion = "0.4.5"
 
 func wsURL(endpoint, token string) (string, error) {
 	endpoint = strings.TrimRight(endpoint, "/")
@@ -59,14 +59,21 @@ func main() {
 		log.Fatalf("地址解析失败: %v", err)
 	}
 
-	backoff := 3 * time.Second
+	const baseBackoff = 3 * time.Second
+	backoff := baseBackoff
 	for {
+		start := time.Now()
 		if err := runOnce(target); err != nil {
 			log.Printf("连接中断: %v，%v 后重连", err, backoff)
 		}
+		// 维持过一段在线再断（如服务端重启/部署）属正常掉线 → 退避归零，下次快速重连；
+		// 只有持续连不上（拨号失败/连上即断）才指数退避到 60s，避免雪崩。
+		if time.Since(start) >= 30*time.Second {
+			backoff = baseBackoff
+		}
 		time.Sleep(backoff)
 		if backoff < 60*time.Second {
-			backoff += 3 * time.Second
+			backoff += baseBackoff
 		}
 	}
 }
