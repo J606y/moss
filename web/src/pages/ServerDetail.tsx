@@ -13,7 +13,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { ensureBuf, getLiveBuf, pct, useLiveStats, useServers } from '../api/store'
+import { ensureBuf, getLiveBuf, pct, serversReady, useLiveStats, useServers } from '../api/store'
 import { get } from '../api/client'
 import type { HistoryPoint, PingData } from '../types'
 import { StatusPill } from '../components/ServerCard'
@@ -133,6 +133,10 @@ export default function ServerDetail() {
   }, [id])
 
   if (!server) {
+    // 列表尚未首次拉取完成时先显示「加载中」，避免刷新瞬间 serverList 为空被误判为「未找到」
+    if (!serversReady()) {
+      return <div className="py-20 text-center text-sm text-zinc-400">加载中…</div>
+    }
     return (
       <div className="py-20 text-center text-zinc-500">
         未找到该服务器

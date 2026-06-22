@@ -16,6 +16,7 @@ const zeroStats: LiveStats = {
 }
 
 let servers: ServerMeta[] = []
+let serversLoaded = false // /api/servers 是否已成功拉取过至少一次（用于区分「加载中」与「真的没这台」）
 const stats: Record<string, LiveStats> = {}
 const bufs: Record<string, LivePoint[]> = {}
 
@@ -47,6 +48,7 @@ async function fetchServers() {
       stats[meta.id] = st
       return meta as ServerMeta
     })
+    serversLoaded = true
     emitAll()
   } catch {
     // 拉取失败时保留旧数据，等待下次刷新
@@ -208,6 +210,9 @@ export function useAllStatsVersion(): number {
   const getSnapshot = useCallback(() => aggVersion, [])
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
 }
+
+/** 列表是否已首次加载完成；false 时调用方应显示「加载中」而非「未找到」 */
+export const serversReady = () => serversLoaded
 
 export const getLive = (id: string): LiveStats => stats[id] ?? zeroStats
 
