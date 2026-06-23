@@ -111,17 +111,21 @@ c_running(){ docker ps    --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAIN
 v_exists(){ docker volume inspect "$VOLUME" >/dev/null 2>&1; }
 cur_port(){ local PORT="$DEFAULT_PORT"; [ -f "$CONF" ] && . "$CONF"; echo "$PORT"; }
 cur_trust(){ local TRUST_PROXY=0; [ -f "$CONF" ] && . "$CONF"; echo "${TRUST_PROXY:-0}"; }
+cur_proxies(){ local TRUSTED_PROXIES=""; [ -f "$CONF" ] && . "$CONF"; echo "${TRUSTED_PROXIES:-}"; }
 
-# start_container <port> <trust:0|1> [额外 docker run 参数...]
-# 反代模式(trust=1)：仅绑回环 127.0.0.1，并以 --trust-proxy 让 Moss 按「真实访客 IP」(最左 XFF) 限流；
+# start_container <port> <trust:0|1> <trusted-proxies> [额外 docker run 参数...]
+# 反代模式(trust=1)：仅绑回环 127.0.0.1，并以 --trust-proxy 让 Moss 按「真实访客 IP」限流；
+#   多层反代(边缘→回源)再用 --trusted-proxies 列出边缘节点公网 IP，Moss 从 XFF 最右往左
+#   跳过可信代理取真实客户端，杜绝伪造 XFF 绕过限流/登录锁定。
 # 直连模式(trust=0)：绑 0.0.0.0:port，沿用镜像默认参数（限流按 socket 来源 IP）。
 start_container(){
-  local port="$1" trust="$2"; shift 2
+  local port="$1" trust="$2" proxies="$3"; shift 3
   local args=( -d --name "$CONTAINER" --restart unless-stopped -v "${VOLUME}:/app/data" "$@" )
   local cmd=()
   if [ "$trust" = 1 ]; then
     args+=( -p "127.0.0.1:${port}:8787" )
     cmd=( --listen :8787 --data /app/data --trust-proxy )
+    [ -n "$proxies" ] && cmd+=( --trusted-proxies "$proxies" )
   else
     args+=( -p "${port}:8787" )
   fi
@@ -142,6 +146,18 @@ do_install(){
   read -rp "是否在 Nginx 等反向代理后面运行？(y/N) [默认 ${def}]: " tp
   case "${tp:-$def}" in [Yy]*) trust=1;; *) trust=0;; esac
 
+  # 多层反代(边缘→回源)：须列出边缘节点公网 IP，Moss 才能从追加式 XFF 里跳过可信代理
+  # 取真实访客 IP，否则伪造的最左 XFF 会绕过限流/登录锁定。单层(仅本机一台 nginx)留空即可。
+  local proxies; proxies="$(cur_proxies)"
+  if [ "$trust" = 1 ]; then
+    echo "  多层反代(边缘CDN/前置节点 → 本机回源 → Moss)请填【边缘节点公网IP】，逗号分隔，"
+    echo "  支持 CIDR(如 203.0.113.10,198.51.100.0/24)。单层反代直接回车留空。"
+    read -rp "可信代理名单 --trusted-proxies [默认 ${proxies:-空}]: " pin
+    [ -n "$pin" ] && proxies="$pin"
+  else
+    proxies=""
+  fi
+
   if c_exists; then
     warn "已存在 Moss 容器"
     read -rp "重新创建容器？(数据保留) (y/N): " yn
@@ -158,9 +174,9 @@ do_install(){
 
   local extra=()
   [ "$fresh" = 1 ] && extra+=( -e "MOSS_ADMIN_PASSWORD=$pass" )
-  start_container "$port" "$trust" "${extra[@]}" >/dev/null || { err "启动容器失败"; pause; return; }
+  start_container "$port" "$trust" "$proxies" "${extra[@]}" >/dev/null || { err "启动容器失败"; pause; return; }
 
-  printf 'PORT=%s\nTRUST_PROXY=%s\n' "$port" "$trust" > "$CONF"
+  printf 'PORT=%s\nTRUST_PROXY=%s\nTRUSTED_PROXIES=%q\n' "$port" "$trust" "$proxies" > "$CONF"
   [ "$trust" = 1 ] || open_firewall "$port" # 反代模式仅绑回环，无需放行公网端口
 
   sleep 2
@@ -198,10 +214,11 @@ do_update(){
   need_docker || return
   local port; port="$(cur_port)"
   local trust; trust="$(cur_trust)" # 沿用安装时选定的运行模式
+  local proxies; proxies="$(cur_proxies)" # 沿用安装时填的可信代理名单
   info "拉取最新镜像..."
   docker pull "$IMAGE" || { err "拉取失败"; return; }
   docker rm -f "$CONTAINER" >/dev/null 2>&1
-  if start_container "$port" "$trust" >/dev/null; then
+  if start_container "$port" "$trust" "$proxies" >/dev/null; then
     ok "已更新到最新版并重启（数据与密码保留，模式：$([ "$trust" = 1 ] && echo 反代 || echo 直连)）"
   else
     err "更新失败"

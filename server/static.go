@@ -79,8 +79,8 @@ func spaFromDisk(webDir string) http.Handler {
 			w.Write([]byte("Moss API 运行中。前端构建产物未找到，请先执行 cd web && npm run build，或开发模式下访问 Vite 端口。\n"))
 			return
 		}
-		rel := filepath.Clean(strings.TrimPrefix(r.URL.Path, "/"))
-		p := filepath.Join(webDir, rel)
+		rel := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+		p := filepath.Join(webDir, filepath.FromSlash(rel))
 		if st, err := os.Stat(p); err == nil && !st.IsDir() {
 			setStaticCache(w, filepath.ToSlash(rel))
 			http.ServeFile(w, r, p)

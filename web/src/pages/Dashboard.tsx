@@ -9,6 +9,7 @@ import Flag from '../components/Flag'
 import Ticker from '../components/Ticker'
 import { MiniBar } from '../components/ProgressBar'
 import { fmtBytes, fmtSpeed, fmtUptime } from '../utils/format'
+import { safeLocalGet, safeLocalSet } from '../utils/storage'
 import { card, td, th } from '../ui'
 
 /** 表格行：自订阅单台 stats，A 上报只重渲染 A 行（memo 化） */
@@ -65,13 +66,17 @@ export default function Dashboard() {
   const onOpen = useCallback((id: string) => navigate(`/server/${id}`), [navigate])
   const [group, setGroup] = useState('全部')
   const [view, setView] = useState<'grid' | 'table'>(
-    () => (localStorage.getItem('moss-view') as 'grid' | 'table') || 'grid',
+    () => (safeLocalGet('moss-view') as 'grid' | 'table') || 'grid',
   )
   useEffect(() => {
-    localStorage.setItem('moss-view', view)
+    safeLocalSet('moss-view', view)
   }, [view])
 
-  const groups = ['全部', ...Array.from(new Set(servers.map((s) => s.group)))]
+  // 真实分组去重并排除空值；再剔除恰好叫「全部」的分组，避免与硬编码项 key 重复、筛选错乱
+  const real = Array.from(new Set(servers.map((s) => s.group).filter(Boolean))).filter(
+    (g) => g !== '全部',
+  )
+  const groups = ['全部', ...real]
   const list = [...servers]
     .filter((s) => group === '全部' || s.group === group)
     .sort((a, b) => Number(b.online) - Number(a.online))

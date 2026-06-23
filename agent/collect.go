@@ -227,6 +227,16 @@ func netRates() (totalUp, totalDown uint64, up, down float64) {
 	return
 }
 
+// resetNetRates 将网速基准清零，使下一拍按"首样本"处理（只初始化基准、不输出速率）。
+// 每次重连成功后调用，避免断线期间的 dt 拉出虚高毛刺。
+func resetNetRates() {
+	netMu.Lock()
+	prevNetTime = time.Time{}
+	prevSent = 0
+	prevRecv = 0
+	netMu.Unlock()
+}
+
 func connCount(kind string) int {
 	conns, err := gnet.Connections(kind)
 	if err != nil {
@@ -250,7 +260,6 @@ func collectStats() (protocol.Stats, uint64) {
 	_, s.DiskUsed = diskTotals()
 	s.TotalUp, s.TotalDown, s.NetUp, s.NetDown = netRates()
 	s.TCP = connCount("tcp")
-	s.UDP = connCount("udp")
 	if pids, err := process.Pids(); err == nil {
 		s.Processes = len(pids)
 	}

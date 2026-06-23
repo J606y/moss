@@ -172,14 +172,25 @@ func getSettingInt(db *sql.DB, key string, fallback int) int {
 const tokenChars = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 func randString(n int) string {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		panic(err)
+	// 无偏采样：拒绝落在 [limit, 256) 区间的字节，避免取模偏置使前若干字符概率偏高。
+	limit := 256 - (256 % len(tokenChars))
+	out := make([]byte, 0, n)
+	buf := make([]byte, n)
+	for len(out) < n {
+		if _, err := rand.Read(buf); err != nil {
+			panic(err)
+		}
+		for _, b := range buf {
+			if int(b) >= limit {
+				continue
+			}
+			out = append(out, tokenChars[int(b)%len(tokenChars)])
+			if len(out) == n {
+				break
+			}
+		}
 	}
-	for i := range b {
-		b[i] = tokenChars[int(b[i])%len(tokenChars)]
-	}
-	return string(b)
+	return string(out)
 }
 
 func newToken() string { return "mk_" + randString(16) }
@@ -199,6 +210,7 @@ func cleanupLoop(db *sql.DB) {
 		if _, err := db.Exec(`DELETE FROM sessions WHERE expires < ?`, now.Unix()); err != nil {
 			log.Printf("清理 sessions 失败: %v", err)
 		}
+		gcLoginAttempts(now) // 回收登录失败限流的内存 map，防无界增长
 		time.Sleep(time.Hour)
 	}
 }

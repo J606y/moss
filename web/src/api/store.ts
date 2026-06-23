@@ -12,7 +12,7 @@ import type { LivePoint, LiveStats, ServerMeta } from '../types'
 const zeroStats: LiveStats = {
   cpu: 0, memUsed: 0, swapUsed: 0, diskUsed: 0,
   netUp: 0, netDown: 0, totalUp: 0, totalDown: 0,
-  tcp: 0, udp: 0, processes: 0, load1: 0, load5: 0, load15: 0,
+  tcp: 0, processes: 0, load1: 0, load5: 0, load15: 0,
 }
 
 let servers: ServerMeta[] = []
@@ -39,11 +39,17 @@ const emitAll = () => {
   statListeners.forEach((set) => set.forEach((f) => f()))
 }
 
+// latest-wins：fetchServers 会被多处并发触发（ensureStarted/scheduleReconnect/
+// visibilitychange/每条 online·offline·meta），后到的旧响应不得覆盖新响应。
+let fetchSeq = 0
+
 async function fetchServers() {
+  const seq = ++fetchSeq
   try {
     const res = await fetch('/api/servers', { cache: 'no-store' })
     if (!res.ok) return
     const data: Array<ServerMeta & { stats: LiveStats }> = await res.json()
+    if (seq !== fetchSeq) return // 已有更新的拉取在途，丢弃这次结果
     servers = data.map(({ stats: st, ...meta }) => {
       stats[meta.id] = st
       return meta as ServerMeta
@@ -69,7 +75,6 @@ function pushBuf(id: string, st: LiveStats, time?: number) {
     mem: pct(st.memUsed, meta.memTotal),
     disk: pct(st.diskUsed, meta.diskTotal),
     swap: pct(st.swapUsed, meta.swapTotal),
-    load1: st.load1,
     netUp: st.netUp,
     netDown: st.netDown,
     tcp: st.tcp,
@@ -89,6 +94,14 @@ interface WsMsg {
 let ws: WebSocket | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
+/** 取消挂起的重连定时器，避免「补连后定时器到点又重复 fetch+connect」 */
+function clearReconnect() {
+  if (reconnectTimer != null) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+}
+
 /** 断开后 3 秒重连；后台标签页暂不重连，回到前台再连，避免无限空转 */
 function scheduleReconnect() {
   if (reconnectTimer != null) return
@@ -103,6 +116,7 @@ function scheduleReconnect() {
 function connect() {
   // 单实例保护：已有连接（连接中/已连接）时不再叠加新 socket
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
+  clearReconnect() // 已主动建连，撤销任何挂起的重连，防重复
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   const sock = new WebSocket(`${proto}://${location.host}/api/ws`)
   ws = sock
@@ -148,6 +162,7 @@ if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
     // 回到前台且当前无活动连接时，立刻补连
     if (!document.hidden && started && !ws) {
+      clearReconnect() // 先撤销挂起的重连，避免 3s 后又重复跑一次
       fetchServers()
       connect()
     }
@@ -227,6 +242,9 @@ export async function ensureBuf(id: string) {
     const existing = bufs[id] ?? []
     const lastTime = recent.length ? recent[recent.length - 1].time : 0
     bufs[id] = [...recent, ...existing.filter((p) => p.time > lastTime)].slice(-90)
+    // useLiveStats 的快照读 stats[id]，回填 bufs 不改其引用 → useSyncExternalStore
+    // 会跳过重渲染。换成新引用（仅换引用、不改数值）以触发一次重渲染，让回填立即上图。
+    stats[id] = { ...getLive(id) }
     emitStat(id) // 只刷新当前详情页对应的订阅者
   } catch {
     // 忽略，等 WS 慢慢填充

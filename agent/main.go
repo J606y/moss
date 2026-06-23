@@ -15,7 +15,7 @@ import (
 	"moss/internal/protocol"
 )
 
-const agentVersion = "0.4.5"
+const agentVersion = "0.4.6"
 
 func wsURL(endpoint, token string) (string, error) {
 	endpoint = strings.TrimRight(endpoint, "/")
@@ -86,6 +86,7 @@ func runOnce(target string) error {
 	}
 	defer conn.Close()
 	log.Printf("已连接服务端")
+	resetNetRates() // 重连后重置网速基准，避免断线期 dt 产生虚高毛刺
 
 	c := &client{conn: conn}
 

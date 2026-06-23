@@ -80,7 +80,7 @@ func (s *App) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ac := &agentConn{conn: conn}
-	ip := realIP(r, s.trustProxy)
+	ip := realIP(r, s.trustProxy, s.trustedProxies)
 	log.Printf("agent 已连接: %s (%s)", serverID, ip)
 
 	s.hub.RegisterAgent(serverID, ac)

@@ -30,7 +30,6 @@ export interface LiveStats {
   totalUp: number
   totalDown: number
   tcp: number
-  udp: number
   processes: number
   load1: number
   load5: number
@@ -43,7 +42,6 @@ export interface LivePoint {
   mem: number
   disk: number
   swap: number
-  load1: number
   netUp: number
   netDown: number
   tcp: number
@@ -79,8 +77,6 @@ export interface AdminServer {
   ip: string
   ipv6: string
   online: boolean
-  lastSeen: number
-  createdAt: number
 }
 
 export interface PingTask {

@@ -55,12 +55,10 @@ export function SeriesChips({ items }: { items: Array<{ name: string; color: str
 export function ChartCard({
   title,
   right,
-  height = 'h-56',
   children,
 }: {
   title: string
   right?: ReactNode
-  height?: string
   children: ReactNode
 }) {
   return (
@@ -69,7 +67,7 @@ export function ChartCard({
         <h3 className="text-sm font-medium text-zinc-700 dark:text-zinc-200">{title}</h3>
         {right}
       </div>
-      <div className={height}>{children}</div>
+      <div className="h-56">{children}</div>
     </div>
   )
 }

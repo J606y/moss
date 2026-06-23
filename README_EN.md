@@ -88,6 +88,12 @@ The database lives in the named volume `moss-data` (`/app/data` is owned by nonr
 
 Put Nginx in front to terminate TLS and serve HTTPS / wss. First run the Moss container **bound to loopback with `--trust-proxy`** (`-p 127.0.0.1:8787:8787` plus the `--trust-proxy` flag — reads the real client IP and enables Secure cookies under HTTPS), then reverse-proxy to `http://127.0.0.1:8787`.
 
+> **Rate limiting + login lockout (on by default)**: Moss rate-limits `/api` per real client IP (default **600**/IP/min), with a stricter limit on sensitive endpoints like login (default **10**/IP/min, plus per-IP lockout on failed logins); over the limit returns `429`. Tune via env vars `MOSS_RATELIMIT_PER_MIN` / `MOSS_RATELIMIT_AUTH_PER_MIN`, set `0` to disable a layer.
+>
+> **Identifying the real client IP (security)**: `--trust-proxy` is required to read `X-Forwarded-For` (otherwise the socket peer IP is used — which under multi-layer proxying is the origin Nginx's IP, lumping all visitors into one bucket). Each Nginx layer **appends** with `$proxy_add_x_forwarded_for`, and Moss **no longer trusts the left-most XFF entry** (the client can forge it and bypass rate limiting / login lockout). Instead it walks XFF **right-to-left** and returns the first address not in your trusted-proxy list:
+> - **Single layer** (one Nginx directly in front of Moss): no extra config — Moss takes the right-most XFF entry (the peer IP that this Nginx appended, which clients can't forge).
+> - **Multi-layer** (visitor → edge Nginx → origin Nginx → Moss): list your own edge nodes' public IPs via `--trusted-proxies` (comma-separated CIDRs or bare IPs, e.g. `--trusted-proxies 203.0.113.10,198.51.100.0/24`). Moss skips listed and loopback addresses from the right, and the first non-trusted address is the real client; the attacker-forged left-most segment can't reach that position.
+
 **Easy path — the [`nginx-rp`](https://github.com/J606y/nginx-rp) one-liner** (auto-installs Nginx + acme.sh, issues and auto-renews certs; supports HTTP-01 / DNS API / wildcard):
 
 ```bash

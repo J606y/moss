@@ -56,7 +56,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/J606y/moss/main/deploy/moss.
 
 装完即可用 `http://<服务器IP>:8787` 直接访问。脚本还会注册全局命令 **`moss`** —— 以后在服务器上直接输入 `moss` 就能重开管理菜单(安装 / 更新 / 卸载 / 查看状态密码 / 日志),不必再记那串 curl。
 
-> 安装时会询问**是否在反向代理(Nginx)后面运行**:选「是」则自动以 `--trust-proxy` 启动并仅绑回环 `127.0.0.1`,让应用层限流按**真实访客 IP**(最左 `X-Forwarded-For`)生效;选「否」为直连模式(限流按 socket 来源 IP)。该选择会被记住,`moss` 更新时自动沿用。
+> 安装时会询问**是否在反向代理(Nginx)后面运行**:选「是」则自动以 `--trust-proxy` 启动并仅绑回环 `127.0.0.1`,让应用层限流按**真实访客 IP**生效;选「否」为直连模式(限流按 socket 来源 IP)。该选择会被记住,`moss` 更新时自动沿用。多层反代(边缘→回源)还需手动补 `--trusted-proxies`,详见下方[反向代理小节](#反向代理--tlsnginx可选但生产推荐)。
 
 以下为等价的手动方式:
 
@@ -90,7 +90,11 @@ docker run -d --name moss -p 8787:8787 \
 
 前面挂一层 Nginx 终止 TLS、对外提供 HTTPS / wss。先让 Moss 容器**仅绑回环并开启 `--trust-proxy`**(`-p 127.0.0.1:8787:8787` + 启动参数加 `--trust-proxy`,用于读取真实来源 IP、在 HTTPS 下启用 Secure cookie),再用 Nginx 反代到 `http://127.0.0.1:8787`。用一键脚本安装时选「反代模式」即自动完成这两步。
 
-> **应用层限流(默认开启)**:Moss 按真实访客 IP 对 `/api` 限流(默认 **600** 次/IP/分钟)、对登录等敏感端点更严(默认 **10** 次/IP/分钟),超限返回 `429`。须开启 `--trust-proxy` 才会取最左 `X-Forwarded-For` 作为真实访客 IP(否则按 socket 来源 IP——多层反代下那会是回源 Nginx 的 IP,导致所有访客共用一个限流桶)。阈值用环境变量 `MOSS_RATELIMIT_PER_MIN` / `MOSS_RATELIMIT_AUTH_PER_MIN` 调整,设 `0` 关闭对应层。多层反代请确保**边缘 Nginx 覆盖 `X-Forwarded-For`**(丢弃客户端伪造值),最左段才是可信的真实访客。
+> **应用层限流 + 登录锁定(默认开启)**:Moss 按真实访客 IP 对 `/api` 限流(默认 **600** 次/IP/分钟)、对登录等敏感端点更严(默认 **10** 次/IP/分钟,并对失败登录按 IP 锁定),超限返回 `429`。阈值用环境变量 `MOSS_RATELIMIT_PER_MIN` / `MOSS_RATELIMIT_AUTH_PER_MIN` 调整,设 `0` 关闭对应层。
+>
+> **如何识别真实访客 IP(安全要点)**:须开启 `--trust-proxy` 才会读取 `X-Forwarded-For`(否则按 socket 来源 IP——多层反代下那会是回源 Nginx 的 IP,所有访客共用一个限流桶)。各层 Nginx 用 `$proxy_add_x_forwarded_for`**追加**转发,Moss **不再信任 XFF 最左段**(那段客户端可任意伪造,会绕过限流/登录锁定),而是按**可信代理名单从右往左**取第一个非可信地址作为真实访客:
+> - **单层**(仅一台 Nginx 直连 Moss):无需额外配置,Moss 默认取 XFF 最右段(＝该 Nginx 追加的对端 IP,客户端伪造不到)。
+> - **多层**(访客 → 边缘 Nginx → 回源 Nginx → Moss):用 `--trusted-proxies` 列出你自己的边缘节点公网 IP(逗号分隔的 CIDR 或裸 IP,如 `--trusted-proxies 203.0.113.10,198.51.100.0/24`)。Moss 从 XFF 最右往左跳过名单内地址与环回地址,取到的第一个非可信地址即真实访客;攻击者伪造的最左段够不到该位置,无法绕过。
 
 **省事 —— 一键反代脚本 [`nginx-rp`](https://github.com/J606y/nginx-rp)**(自动装 Nginx + acme.sh 签发并续期证书,支持 HTTP-01 / DNS API / 泛域名):
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -23,6 +24,7 @@ const (
 type loginAttempt struct {
 	fails     int       // 连续失败次数
 	lockUntil time.Time // 锁定到期时间，零值表示未锁定
+	lastFail  time.Time // 最近一次失败时间，供 gcLoginAttempts 回收陈旧条目
 }
 
 var (
@@ -44,6 +46,7 @@ func recordLoginFail(ip string, now time.Time) {
 		loginAttempts[ip] = a
 	}
 	a.fails++
+	a.lastFail = now
 	if a.fails >= loginMaxFails {
 		a.lockUntil = now.Add(loginLockDur)
 	}
@@ -52,6 +55,23 @@ func recordLoginFail(ip string, now time.Time) {
 // clearLoginFail 登录成功后清除该 IP 的失败记录。
 func clearLoginFail(ip string) {
 	delete(loginAttempts, ip)
+}
+
+// gcLoginAttempts 周期回收 loginAttempts，防止只失败从不成功的 IP 条目无界堆积。
+// 删除「当前未处于锁定期 且 最近一次失败已足够陈旧」的条目；仍在锁定中的条目保留，
+// 不影响现有锁定/计数行为。阈值取锁定时长的若干倍，确保过期记录最终被清。
+func gcLoginAttempts(now time.Time) {
+	loginMu.Lock()
+	defer loginMu.Unlock()
+	const staleAfter = 4 * loginLockDur
+	for ip, a := range loginAttempts {
+		if now.Before(a.lockUntil) {
+			continue // 仍在锁定期，保留
+		}
+		if now.Sub(a.lastFail) >= staleAfter {
+			delete(loginAttempts, ip)
+		}
+	}
 }
 
 // ensurePassword 首次启动时初始化管理密码。
@@ -96,7 +116,7 @@ func (s *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "请求格式错误")
 		return
 	}
-	ip := realIP(r, s.trustProxy) // 真实访客 IP（--trust-proxy 下取最左 XFF）
+	ip := realIP(r, s.trustProxy, s.trustedProxies) // 真实访客 IP（--trust-proxy 下按可信代理名单从右取）
 
 	// 锁定期内直接拒绝，不去比对密码。
 	loginMu.Lock()
@@ -110,7 +130,11 @@ func (s *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// 轻量防爆破：固定延迟提高单次试探成本。
 	time.Sleep(300 * time.Millisecond)
 	wantUser := getSetting(s.db, "username", "admin")
-	if body.Username != wantUser || !s.checkPassword(body.Password) {
+	// 恒定成本校验：无论用户名是否正确都执行一次 bcrypt 比较，
+	// 用户名用常量时间比较，避免用户名枚举的计时侧信道。
+	userOK := subtle.ConstantTimeCompare([]byte(body.Username), []byte(wantUser)) == 1
+	passOK := s.checkPassword(body.Password)
+	if !userOK || !passOK {
 		loginMu.Lock()
 		recordLoginFail(ip, time.Now())
 		locked := loginLocked(ip, time.Now())

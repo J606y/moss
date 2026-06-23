@@ -8,13 +8,9 @@ import { useEffect, useRef, useState } from 'react'
 export default function Ticker({
   value,
   format,
-  duration = 700,
-  className = '',
 }: {
   value: number
   format: (n: number) => string
-  duration?: number
-  className?: string
 }) {
   const [shown, setShown] = useState(value)
   const shownRef = useRef(value)
@@ -28,14 +24,14 @@ export default function Ticker({
     let start = 0
     const tick = (ts: number) => {
       if (!start) start = ts
-      const t = Math.min(1, (ts - start) / duration)
+      const t = Math.min(1, (ts - start) / 700)
       const eased = 1 - Math.pow(1 - t, 3) // easeOutCubic：先快后慢，落点平稳
       setShown(from + (to - from) * eased)
       if (t < 1) raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
-  }, [value, duration])
+  }, [value])
 
-  return <span className={`tabular-nums ${className}`}>{format(shown)}</span>
+  return <span className="tabular-nums">{format(shown)}</span>
 }

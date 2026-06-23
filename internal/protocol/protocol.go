@@ -28,7 +28,6 @@ type Stats struct {
 	TotalUp   uint64  `json:"totalUp"`
 	TotalDown uint64  `json:"totalDown"`
 	TCP       int     `json:"tcp"`
-	UDP       int     `json:"udp"`
 	Processes int     `json:"processes"`
 	Load1     float64 `json:"load1"`
 	Load5     float64 `json:"load5"`
@@ -50,7 +49,7 @@ type AgentMsg struct {
 	Stats     *Stats     `json:"stats,omitempty"`
 	UptimeSec uint64     `json:"uptimeSec,omitempty"`
 	TaskID    int64      `json:"taskId,omitempty"`
-	Ms        int        `json:"ms"` // -1 表示探测失败/丢包；0 也是有效值（环回 <1ms）
+	Ms        int        `json:"ms"` // -1 表示探测失败/丢包；agent 将 <1ms 记为 1ms，故 0 不会出现
 }
 
 // ServerMsg server → agent。

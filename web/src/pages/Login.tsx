@@ -18,7 +18,7 @@ export default function Login() {
       await post('/api/login', { username: user, password: pwd })
       navigate('/admin')
     } catch (e) {
-      setErr(e instanceof Error && e.message !== 'HTTP 401' ? e.message : '用户名或密码错误')
+      setErr(e instanceof Error ? e.message : '登录失败，请稍后重试')
     } finally {
       setBusy(false)
     }

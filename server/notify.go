@@ -148,7 +148,7 @@ func (n *Notifier) OnReport(id string, cpu, mem, disk float64) {
 				fires = append(fires, fire{fmt.Sprintf("⚠️ 负载告警\n%%NAME%% %s 使用率 %.1f%%，已持续 %d 分钟（阈值 %d%%）",
 					metric, val, cfg.LoadMinutes, threshold)})
 			}
-		} else if val < th-5 { // 迟滞带，避免在阈值附近反复告警
+		} else if val < th*0.9 { // 按比例迟滞带（恢复回差），低阈值也可达，避免在阈值附近反复告警
 			if st.highAlerted[metric] {
 				st.highAlerted[metric] = false
 				fires = append(fires, fire{fmt.Sprintf("✅ 负载恢复\n%%NAME%% %s 已回落至 %.1f%%", metric, val)})
@@ -178,7 +178,9 @@ func (n *Notifier) Forget(id string) {
 
 // Run 离线检查循环：离线超过 OfflineDelay 且未告警 → 推送。
 func (n *Notifier) Run() {
-	for range time.Tick(15 * time.Second) {
+	t := time.NewTicker(15 * time.Second)
+	defer t.Stop()
+	for range t.C {
 		n.mu.Lock()
 		cfg := n.cfg
 		type pending struct{ id string }

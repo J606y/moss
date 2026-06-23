@@ -172,6 +172,7 @@ function NumberInput({
         step={step}
         value={value}
         onChange={(e) => onChange(Number(e.target.value) || 0)}
+        onBlur={() => onChange(clamp(value))}
       />
       <div className="absolute inset-y-1 right-1 flex w-6 flex-col gap-px">
         <button type="button" tabIndex={-1} title="增加" onClick={() => bump(step)} className={stepBtn}>
@@ -555,7 +556,7 @@ function ServersTab({ toast }: { toast: Toast }) {
             const optimistic: AdminServer = {
               id: tempId, name: f.name, group: f.group, region: f.region, flag: f.flag,
               autoFlag: '', note: f.note, expireAt: f.expireAt, token: '',
-              ip: '', ipv6: '', online: false, lastSeen: 0, createdAt: 0,
+              ip: '', ipv6: '', online: false,
             }
             setList((l) => [...l, optimistic])
             setModal(null)
@@ -1045,6 +1046,8 @@ function NotifyTab({ toast }: { toast: Toast }) {
   const save = async () => {
     try {
       await put('/api/admin/notify', n)
+      const saved = await get<NotifySettings>('/api/admin/notify')
+      setN(saved)
       toast('通知设置已保存')
     } catch (e) {
       toast(errMsg(e))
@@ -1156,6 +1159,8 @@ function SettingsTab({ toast }: { toast: Toast }) {
   const save = async () => {
     try {
       await put('/api/admin/settings', s)
+      const saved = await get<Settings>('/api/admin/settings')
+      setS(saved)
       toast('设置已保存')
     } catch (e) {
       toast(errMsg(e))
@@ -1163,6 +1168,10 @@ function SettingsTab({ toast }: { toast: Toast }) {
   }
 
   const changePwd = async () => {
+    if (pwd.new1.length < 6) {
+      toast('新密码至少 6 位')
+      return
+    }
     if (!pwd.new1 || pwd.new1 !== pwd.new2) {
       toast('两次输入的新密码不一致')
       return

@@ -275,6 +275,9 @@ func (s *App) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func clampInt(v, min, max, fallback int) int {
+	// 注意：v==0 被视为「未设→回退 fallback」，因此 notify 的 CPU/内存/硬盘阈值
+	// 无法用 0 单独禁用某一项告警，应使用 LoadOn 主开关整体关闭；
+	// 若需逐项禁用，须把 API 改为指针/presence 判断（区分「显式 0」与「缺省」）。
 	if v == 0 {
 		return fallback
 	}

@@ -13,30 +13,67 @@ import (
 
 // realIP 取用于限流与日志的「真实访客 IP」。
 //
-// 仅当 --trust-proxy 开启时才信任反代头：取 X-Forwarded-For 的最左段。
-// 部署拓扑为 访客 → 边缘 nginx → 回源 nginx → Moss(仅听 127.0.0.1)；边缘 nginx
-// 会覆盖 XFF 为真实客户端 IP(丢弃客户端伪造值)，回源再追加它看到的边缘 IP，
-// 因此 Moss 收到的 XFF = 真实客户端, 边缘…，最左段即真实访客。
-// 又因 Moss 只监听回环、外部无法绕过边缘直连，所以此处取最左 XFF 不会被伪造绕过。
+// 各层 nginx 用 $proxy_add_x_forwarded_for「追加」转发，到 Moss 时 XFF 形如：
 //
-// 刻意不用 X-Real-IP：多层反代下回源处的 X-Real-IP=$remote_addr 等于「边缘 IP」而非访客。
-// 未开 --trust-proxy 时回退 r.RemoteAddr 的 host，防止直连伪造头部。
-func realIP(r *http.Request, trustProxy bool) string {
-	if trustProxy {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			if i := strings.IndexByte(xff, ','); i >= 0 {
-				xff = xff[:i] // 最左段
-			}
-			if ip := strings.TrimSpace(xff); ip != "" {
-				return ip
-			}
+//	[客户端可伪造段...], 真实客户端, 边缘IP   ← 经边缘节点（多层）
+//	[客户端可伪造段...], 真实客户端          ← 直连回源（单层）
+//
+// 跳数可变（用户可能经边缘也可能直连回源），所以「取最左」可被客户端伪造、
+// 「取最右」会把边缘后所有访客并成一个 IP，都不对。正确做法是用可信代理名单
+// （--trusted-proxies，列出自家边缘/回源节点公网 IP）从 XFF **最右往左**遍历，
+// 跳过属于名单或环回的地址，返回第一个非可信地址 = 真实客户端。攻击者只能控制
+// 名单左侧的伪造段，够不到这个位置，故不可伪造。
+//
+// 未开 --trust-proxy → 忽略 XFF，回退 RemoteAddr 的 host（安全默认，防直连伪造头）。
+// 开了但名单为空 → 取 XFF 最右段（单跳安全默认：那是与 Moss 直接握手的可信反代
+// 所追加的对端 IP，客户端伪造不到）。
+func realIP(r *http.Request, trustProxy bool, trustedProxies []*net.IPNet) string {
+	host := hostOnly(r.RemoteAddr)
+	if !trustProxy {
+		return host
+	}
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff == "" {
+		return host
+	}
+	var parts []string
+	for _, p := range strings.Split(xff, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			parts = append(parts, p)
 		}
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
+	if len(parts) == 0 {
+		return host
 	}
-	return host
+	if len(trustedProxies) == 0 {
+		return parts[len(parts)-1] // 最右段：直接对端，不可伪造
+	}
+	for i := len(parts) - 1; i >= 0; i-- {
+		ip := net.ParseIP(parts[i])
+		if ip == nil || ip.IsLoopback() || ipInNets(ip, trustedProxies) {
+			continue // 解析失败 / 环回 / 可信代理 → 继续往左找
+		}
+		return parts[i] // 第一个非可信地址即真实客户端
+	}
+	return parts[0] // 全是可信代理：回退最左段
+}
+
+// hostOnly 去掉 host:port 中的端口，返回纯 host（IPv6 安全）；无端口时原样返回。
+func hostOnly(addr string) string {
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
+	}
+	return addr
+}
+
+// ipInNets 判断 ip 是否落在任一网段内。
+func ipInNets(ip net.IP, nets []*net.IPNet) bool {
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // limiter 是按 IP 计数的固定 1 分钟窗口限流器（单进程内存版）。
@@ -104,7 +141,7 @@ func (s *App) limit(lim *limiter, next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !lim.allow(realIP(r, s.trustProxy)) {
+		if !lim.allow(realIP(r, s.trustProxy, s.trustedProxies)) {
 			tooMany(w)
 			return
 		}
@@ -119,7 +156,7 @@ func (s *App) apiRateLimit(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") && !s.globalLimiter.allow(realIP(r, s.trustProxy)) {
+		if strings.HasPrefix(r.URL.Path, "/api/") && !s.globalLimiter.allow(realIP(r, s.trustProxy, s.trustedProxies)) {
 			tooMany(w)
 			return
 		}

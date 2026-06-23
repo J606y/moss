@@ -17,7 +17,7 @@ export function fmtUptime(sec: number): string {
   return `${m} 分钟`
 }
 
-export const fmtPercent = (n: number) => `${n.toFixed(1)}%`
+export const fmtPercent = (n: number) => `${(Number.isFinite(n) ? n : 0).toFixed(1)}%`
 
 export function fmtTime(ts: number): string {
   return new Date(ts).toLocaleTimeString('zh-CN', { hour12: false })

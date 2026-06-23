@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"log"
+	"math"
 	"net/http"
 	"sync"
 	"time"
@@ -41,7 +42,7 @@ type liveState struct {
 	accN                                            int
 	accCPU, accMem, accSwap, accDisk, accLoad1      float64
 	accUp, accDown                                  float64
-	accTCP, accProc                                 int
+	accTCP, accProc                                 float64
 	lastSample                                      time.Time
 }
 
@@ -205,8 +206,8 @@ func (h *Hub) HandleReport(id string, s *protocol.Stats, uptime uint64, _ time.D
 	st.accLoad1 += point.Load1
 	st.accUp += point.NetUp
 	st.accDown += point.NetDown
-	st.accTCP += point.TCP
-	st.accProc += point.Processes
+	st.accTCP += float64(point.TCP)
+	st.accProc += float64(point.Processes)
 
 	var sample *LivePoint
 	if now.Sub(st.lastSample) >= sampleInterval && st.accN > 0 {
@@ -220,8 +221,8 @@ func (h *Hub) HandleReport(id string, s *protocol.Stats, uptime uint64, _ time.D
 			Load1:     st.accLoad1 / n,
 			NetUp:     st.accUp / n,
 			NetDown:   st.accDown / n,
-			TCP:       st.accTCP / st.accN,
-			Processes: st.accProc / st.accN,
+			TCP:       int(math.Round(st.accTCP / n)),
+			Processes: int(math.Round(st.accProc / n)),
 		}
 		st.accN, st.accCPU, st.accMem, st.accSwap, st.accDisk = 0, 0, 0, 0, 0
 		st.accLoad1, st.accUp, st.accDown, st.accTCP, st.accProc = 0, 0, 0, 0, 0
