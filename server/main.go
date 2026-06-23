@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-const serverVersion = "0.4.6"
+const serverVersion = "0.5.0"
 
 // App 聚合全局依赖。
 type App struct {
