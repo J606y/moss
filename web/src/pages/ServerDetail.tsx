@@ -270,7 +270,7 @@ export default function ServerDetail() {
           <Info k="操作系统" v={server.os} />
           <Info k="架构 / 虚拟化" v={`${server.arch} / ${server.virtualization}`} />
           <Info k="CPU" v={`${server.cpuModel} (${server.cpuCores} 核)`} />
-          <Info k="内存 / 交换" v={`${fmtBytes(server.memTotal, 0)} / ${fmtBytes(server.swapTotal, 0)}`} />
+          <Info k="内存 / 交换" v={`${fmtBytes(server.memTotal, 0)} / ${server.swapTotal > 0 ? fmtBytes(server.swapTotal, 0) : 'off'}`} />
           <Info k="硬盘" v={fmtBytes(server.diskTotal, 0)} />
           <Info k="Agent 版本" v={`v${server.agentVersion} · ${server.intervalSec}s 上报`} />
           <Info k="分组" v={server.group} />
@@ -339,7 +339,7 @@ export default function ServerDetail() {
                   />
                   <ProgressBar
                     label="交换"
-                    right={`${fmtBytes(st.swapUsed)} / ${fmtBytes(server.swapTotal)}`}
+                    right={server.swapTotal > 0 ? `${fmtBytes(st.swapUsed)} / ${fmtBytes(server.swapTotal)}` : 'off'}
                     pct={pct(st.swapUsed, server.swapTotal)}
                   />
                 </div>
