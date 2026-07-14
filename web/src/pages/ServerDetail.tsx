@@ -107,7 +107,8 @@ export default function ServerDetail() {
     }
   }, [id, hours])
 
-  // 延迟探测是周期上报、没有 WS 实时流，实时模式下展示最近 1 小时；
+  // 延迟探测是周期上报、没有 WS 实时流；服务端最小粒度为 1 小时（parseHours 下限），
+  // 实时模式下前端再把每条曲线裁到最近 5 分钟（见下方 liveTrim）。
   // 「实时」按站点设置的「实时上报间隔」轮询刷新，与负载页实时节奏一致。
   const pollSec = server?.intervalSec ?? 2
   useEffect(() => {
@@ -226,8 +227,19 @@ export default function ServerDetail() {
     </div>
   )
 
+  // 实时模式：延迟图只展示最近 5 分钟。锚定到最新数据点的时间（而非浏览器 Date.now），
+  // 避免浏览器与服务端时钟偏差导致窗口整体错位、把点全滤掉。
+  const LIVE_PING_WIN_MS = 5 * 60_000
+  let pingMaxTime = 0
+  if (isLive)
+    for (const k in pingData.series)
+      for (const p of pingData.series[k]) if (p.time > pingMaxTime) pingMaxTime = p.time
+  const liveCut = pingMaxTime - LIVE_PING_WIN_MS
+  const liveTrim = <T extends { time: number }>(arr: T[]): T[] =>
+    isLive && pingMaxTime ? arr.filter((d) => d.time >= liveCut) : arr
+
   const pingStats = pingData.tasks.map((t, i) => {
-    const pts = winFilter(pingData.series[String(t.id)] ?? [])
+    const pts = liveTrim(winFilter(pingData.series[String(t.id)] ?? []))
     const vals = pts.map((p) => p.ms).filter((v): v is number => v != null)
     return {
       id: t.id,
