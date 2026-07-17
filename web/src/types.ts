@@ -99,6 +99,11 @@ export interface NotifySettings {
   memThreshold: number
   diskThreshold: number
   loadMinutes: number
+  netOn: boolean
+  netThreshold: number
+  netSeconds: number
+  expireOn: boolean
+  expireDays: number
 }
 
 export interface Settings {

@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+<body style="margin:0">
+<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180" viewBox="0 0 180 180">
+  <defs>
+    <linearGradient id="cb" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fdfdfd"/>
+      <stop offset="1" stop-color="#e4e4e7"/>
+    </linearGradient>
+    <radialGradient id="hl">
+      <stop offset="0" stop-color="#f472b6" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#f472b6" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="co" cx="0.4" cy="0.38" r="0.65">
+      <stop offset="0" stop-color="#fce7f3"/>
+      <stop offset="0.45" stop-color="#f472b6"/>
+      <stop offset="1" stop-color="#db2777"/>
+    </radialGradient>
+    <radialGradient id="gs">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="cc"><rect x="27" y="10" width="46" height="80" rx="10"/></clipPath>
+    <filter id="blur" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="26"/></filter>
+    <filter id="sh" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#000" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+
+  <!-- 底：主页同款浅色背景 + 四角彩色光斑 -->
+  <rect width="180" height="180" fill="#f4f4f5"/>
+  <g>
+    <circle cx="18" cy="18" r="70" fill="#34d399" opacity="0.4" filter="url(#blur)"/>
+    <circle cx="172" cy="62" r="70" fill="#38bdf8" opacity="0.45" filter="url(#blur)"/>
+    <circle cx="52" cy="172" r="70" fill="#a78bfa" opacity="0.4" filter="url(#blur)"/>
+    <circle cx="164" cy="168" r="64" fill="#f472b6" opacity="0.4" filter="url(#blur)"/>
+  </g>
+
+  <!-- 机柜：亮色主题版，居中放大 -->
+  <g transform="translate(15 15) scale(1.5)" filter="url(#sh)">
+    <rect x="27" y="10" width="46" height="80" rx="10" fill="url(#cb)" stroke="rgba(113,113,122,0.4)" stroke-width="1.5"/>
+    <g clip-path="url(#cc)">
+      <ellipse cx="39" cy="19" rx="27" ry="13" fill="url(#gs)" transform="rotate(-16 39 19)" opacity="0.6"/>
+    </g>
+    <circle cx="50" cy="36" r="15" fill="url(#hl)"/>
+    <circle cx="50" cy="36" r="7.5" fill="url(#co)"/>
+    <circle cx="47.5" cy="33" r="2" fill="#fff" opacity="0.75"/>
+    <line x1="33" y1="60" x2="67" y2="60" stroke="rgba(113,113,122,0.35)" stroke-width="2" stroke-linecap="round"/>
+    <line x1="33" y1="75" x2="67" y2="75" stroke="rgba(113,113,122,0.35)" stroke-width="2" stroke-linecap="round"/>
+    <circle cx="36.5" cy="67.5" r="2.3" fill="#0284c7"/>
+    <line x1="44" y1="67.5" x2="64" y2="67.5" stroke="rgba(113,113,122,0.35)" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="36.5" cy="82.5" r="2.3" fill="#0284c7" opacity="0.55"/>
+    <line x1="44" y1="82.5" x2="64" y2="82.5" stroke="rgba(113,113,122,0.35)" stroke-width="3" stroke-linecap="round"/>
+  </g>
+</svg>
+</body>
+</html>

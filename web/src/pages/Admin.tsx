@@ -802,6 +802,7 @@ function TasksTab({ toast }: { toast: Toast }) {
   const [servers, setServers] = useState<AdminServer[]>([])
   const [modal, setModal] = useState<'add' | PingTask | null>(null)
   const [confirmDel, setConfirmDel] = useState<PingTask | null>(null)
+  const [dragId, setDragId] = useState<number | null>(null)
 
   const load = useCallback(() => {
     get<PingTask[]>('/api/admin/tasks')
@@ -820,6 +821,24 @@ function TasksTab({ toast }: { toast: Toast }) {
           .map((id) => servers.find((s) => s.id === id)?.name ?? id)
           .join('、')
       : '全部服务器'
+
+  // 拖拽重排：把 fromId 移动到 toId 的位置，乐观更新后持久化 sort
+  const reorder = async (fromId: number, toId: number) => {
+    if (fromId === toId) return
+    const from = tasks.findIndex((t) => t.id === fromId)
+    const to = tasks.findIndex((t) => t.id === toId)
+    if (from < 0 || to < 0) return
+    const next = [...tasks]
+    const [moved] = next.splice(from, 1)
+    next.splice(to, 0, moved)
+    setTasks(next)
+    try {
+      await post('/api/admin/tasks/reorder', next.map((t) => t.id))
+    } catch (e) {
+      toast(errMsg(e))
+      load()
+    }
+  }
 
   const toggle = async (t: PingTask, enabled: boolean) => {
     setTasks((prev) => prev.map((x) => (x.id === t.id ? { ...x, enabled } : x)))
@@ -840,10 +859,15 @@ function TasksTab({ toast }: { toast: Toast }) {
         </button>
       </div>
 
+      <p className="hidden text-xs text-zinc-400 md:block">
+        拖拽行首 <GripVertical className="inline h-3 w-3 align-text-bottom" /> 可调整任务顺序，延迟图表按此顺序展示
+      </p>
+
       <div className={`${card} hidden overflow-x-auto md:block`}>
         <table className="w-full min-w-[680px]">
           <thead className="border-b border-zinc-500/15 dark:border-white/10">
             <tr>
+              <th className={`${th} w-8`} />
               <th className={th}>名称</th>
               <th className={th}>类型</th>
               <th className={th}>目标</th>
@@ -856,13 +880,30 @@ function TasksTab({ toast }: { toast: Toast }) {
           <tbody>
             {tasks.length === 0 && (
               <tr>
-                <td className={`${td} text-center text-zinc-400`} colSpan={7}>
+                <td className={`${td} text-center text-zinc-400`} colSpan={8}>
                   暂无探测任务
                 </td>
               </tr>
             )}
             {tasks.map((t) => (
-              <tr key={t.id} className="border-b border-zinc-500/10 last:border-0 dark:border-white/5">
+              <tr
+                key={t.id}
+                draggable
+                onDragStart={() => setDragId(t.id)}
+                onDragOver={(e) => dragId !== null && e.preventDefault()}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  if (dragId !== null) reorder(dragId, t.id)
+                  setDragId(null)
+                }}
+                onDragEnd={() => setDragId(null)}
+                className={`border-b border-zinc-500/10 transition last:border-0 dark:border-white/5 ${
+                  dragId === t.id ? 'opacity-40' : ''
+                }`}
+              >
+                <td className={`${td} text-zinc-300 dark:text-zinc-600`}>
+                  <GripVertical className="h-4 w-4 cursor-grab active:cursor-grabbing" />
+                </td>
                 <td className={`${td} font-medium`}>{t.name}</td>
                 <td className={td}>
                   <span className={`rounded-md px-2 py-0.5 text-xs font-medium uppercase ${typeBadge[t.type]}`}>
@@ -1128,6 +1169,37 @@ function NotifyTab({ toast }: { toast: Toast }) {
           </div>
         </div>
         <p className="text-xs text-zinc-400">超阈值持续指定时间才告警；回落至阈值 5% 以下时发送恢复通知。</p>
+
+        <div className="space-y-3 border-t border-zinc-500/10 pt-3 dark:border-white/5">
+          <Toggle
+            checked={n.netOn}
+            label="单台服务器网速持续超阈值时推送通知"
+            onChange={(v) => setN({ ...n, netOn: v })}
+          />
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className={formLabel}>网速阈值（MB/s）</label>
+              <NumberInput min={1} max={100000} value={n.netThreshold} onChange={num('netThreshold')} />
+            </div>
+            <div>
+              <label className={formLabel}>持续时间（秒，10 ~ 3600）</label>
+              <NumberInput min={10} max={3600} value={n.netSeconds} onChange={num('netSeconds')} />
+            </div>
+          </div>
+          <p className="text-xs text-zinc-400">上行或下行任一方向超过阈值并持续指定时长即告警，与上方开关相互独立。</p>
+        </div>
+      </div>
+
+      <div className={`${card} space-y-3 p-4`}>
+        <h3 className="text-sm font-semibold">到期提醒</h3>
+        <Toggle checked={n.expireOn} label="服务器临近到期时推送通知" onChange={(v) => setN({ ...n, expireOn: v })} />
+        <div>
+          <label className={formLabel}>提前天数（1 ~ 7）</label>
+          <NumberInput min={1} max={7} value={n.expireDays} onChange={num('expireDays')} />
+          <p className="mt-1 text-xs text-zinc-400">
+            到期时间需为 YYYY-MM-DD 格式方可识别；每个到期日只提醒一次，续期修改日期后会按新日期重新提醒。
+          </p>
+        </div>
       </div>
 
       <div className="flex justify-end">

@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-const serverVersion = "0.6.1"
+const serverVersion = "1.0.0"
 
 // App 聚合全局依赖。
 type App struct {
@@ -104,6 +104,7 @@ func main() {
 	mux.HandleFunc("DELETE /api/admin/servers/{id}", app.requireAuth(app.handleDeleteServer))
 	mux.HandleFunc("GET /api/admin/tasks", app.requireAuth(app.handleAdminTasks))
 	mux.HandleFunc("POST /api/admin/tasks", app.requireAuth(app.handleAddTask))
+	mux.HandleFunc("POST /api/admin/tasks/reorder", app.requireAuth(app.handleReorderTasks))
 	mux.HandleFunc("PUT /api/admin/tasks/{id}", app.requireAuth(app.handleUpdateTask))
 	mux.HandleFunc("DELETE /api/admin/tasks/{id}", app.requireAuth(app.handleDeleteTask))
 	mux.HandleFunc("GET /api/admin/notify", app.requireAuth(app.handleGetNotify))

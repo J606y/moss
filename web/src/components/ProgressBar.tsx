@@ -33,7 +33,8 @@ export function MiniBar({ pct }: { pct: number }) {
       <div className="h-1.5 w-14 overflow-hidden rounded-full bg-zinc-500/15 dark:bg-white/10">
         <div className="h-full rounded-full" style={{ width: `${p}%`, background: barColor(p) }} />
       </div>
-      <span className="text-xs tabular-nums text-zinc-600 dark:text-zinc-300">{p.toFixed(0)}%</span>
+      {/* 固定宽度：位数变化（9%↔10%↔100%）不再影响表格列宽 */}
+      <span className="w-8 shrink-0 text-right text-xs tabular-nums text-zinc-600 dark:text-zinc-300">{p.toFixed(0)}%</span>
     </div>
   )
 }

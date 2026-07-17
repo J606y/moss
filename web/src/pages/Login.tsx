@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { post } from '../api/client'
+import MossEye from '../components/MossEye'
 import { btnPrimary, card, formLabel, input } from '../ui'
 
 export default function Login() {
@@ -34,7 +35,7 @@ export default function Login() {
         }}
       >
         <div className="mb-6 text-center">
-          <div className="text-3xl">🌿</div>
+          <MossEye className="mx-auto h-10 w-10" />
           <h1 className="mt-2 text-lg font-bold">Moss 管理后台</h1>
         </div>
         <label className={formLabel}>用户名</label>

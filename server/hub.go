@@ -241,7 +241,7 @@ func (h *Hub) HandleReport(id string, s *protocol.Stats, uptime uint64, _ time.D
 		}
 	}
 
-	h.notifier.OnReport(id, point.CPU, point.Mem, point.Disk)
+	h.notifier.OnReport(id, point.CPU, point.Mem, point.Disk, point.NetUp, point.NetDown)
 	// time 用服务端落点时刻：与 /recent、历史接口同源，浏览器据此打点，
 	// 避免「实时点用浏览器时钟、回填点用服务端时钟」导致两段曲线间出现时钟偏差造成的空窗。
 	h.broadcast(map[string]any{"type": "stats", "id": id, "stats": s, "uptimeSec": uptime, "time": point.Time})

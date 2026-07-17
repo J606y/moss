@@ -24,6 +24,11 @@ type notifyConfig struct {
 	MemThreshold  int    `json:"memThreshold"`  // %
 	DiskThreshold int    `json:"diskThreshold"` // %
 	LoadMinutes   int    `json:"loadMinutes"`   // 持续超阈值多少分钟才告警
+	NetOn         bool   `json:"netOn"`
+	NetThreshold  int    `json:"netThreshold"` // MB/s（1MB=1024KB，与面板展示同口径），上/下行任一方向
+	NetSeconds    int    `json:"netSeconds"`   // 持续超阈值多少秒才告警
+	ExpireOn      bool   `json:"expireOn"`
+	ExpireDays    int    `json:"expireDays"` // 到期前几天提醒，1~7
 }
 
 func loadNotifyConfig(db *sql.DB) notifyConfig {
@@ -37,6 +42,11 @@ func loadNotifyConfig(db *sql.DB) notifyConfig {
 		MemThreshold:  getSettingInt(db, "notify_mem", 90),
 		DiskThreshold: getSettingInt(db, "notify_disk", 95),
 		LoadMinutes:   getSettingInt(db, "notify_load_min", 5),
+		NetOn:         getSetting(db, "notify_net", "0") == "1",
+		NetThreshold:  getSettingInt(db, "notify_net_mb", 50),
+		NetSeconds:    getSettingInt(db, "notify_net_sec", 60),
+		ExpireOn:      getSetting(db, "notify_expire", "0") == "1",
+		ExpireDays:    getSettingInt(db, "notify_expire_days", 3),
 	}
 }
 
@@ -120,11 +130,12 @@ func (n *Notifier) OnOffline(id string) {
 	n.mu.Unlock()
 }
 
-// OnReport 负载告警：超阈值持续 LoadMinutes 分钟才告警，回落 5%（迟滞）后发恢复。
-func (n *Notifier) OnReport(id string, cpu, mem, disk float64) {
+// OnReport 负载/网速告警：超阈值持续指定时长才告警，回落 10%（迟滞）后发恢复。
+// netUp/netDown 单位 B/s。
+func (n *Notifier) OnReport(id string, cpu, mem, disk, netUp, netDown float64) {
 	n.mu.Lock()
 	cfg := n.cfg
-	if !cfg.LoadOn {
+	if !cfg.LoadOn && !cfg.NetOn {
 		n.mu.Unlock()
 		return
 	}
@@ -156,9 +167,37 @@ func (n *Notifier) OnReport(id string, cpu, mem, disk float64) {
 			delete(st.highSince, metric)
 		}
 	}
-	check("CPU", cpu, cfg.CPUThreshold)
-	check("内存", mem, cfg.MemThreshold)
-	check("硬盘", disk, cfg.DiskThreshold)
+	if cfg.LoadOn {
+		check("CPU", cpu, cfg.CPUThreshold)
+		check("内存", mem, cfg.MemThreshold)
+		check("硬盘", disk, cfg.DiskThreshold)
+	}
+
+	// 网速：上/下行任一方向超阈值即计时，独立的持续时长（秒），复用同一状态机与迟滞逻辑
+	if cfg.NetOn && cfg.NetThreshold > 0 {
+		const mb = 1024 * 1024 // 与面板展示同口径（1MB = 1024KB）
+		th := float64(cfg.NetThreshold) * mb
+		speed := netUp
+		if netDown > speed {
+			speed = netDown
+		}
+		if speed >= th {
+			if st.highSince["net"].IsZero() {
+				st.highSince["net"] = now
+			}
+			if !st.highAlerted["net"] && now.Sub(st.highSince["net"]) >= time.Duration(cfg.NetSeconds)*time.Second {
+				st.highAlerted["net"] = true
+				fires = append(fires, fire{fmt.Sprintf("⚠️ 网速告警\n%%NAME%% 上行 %.1f MB/s / 下行 %.1f MB/s，已持续 %d 秒（阈值 %d MB/s）",
+					netUp/mb, netDown/mb, cfg.NetSeconds, cfg.NetThreshold)})
+			}
+		} else if speed < th*0.9 {
+			if st.highAlerted["net"] {
+				st.highAlerted["net"] = false
+				fires = append(fires, fire{fmt.Sprintf("✅ 网速恢复\n%%NAME%% 网速已回落至 ↑ %.1f / ↓ %.1f MB/s", netUp/mb, netDown/mb)})
+			}
+			delete(st.highSince, "net")
+		}
+	}
 	n.mu.Unlock()
 
 	if len(fires) > 0 {
@@ -199,6 +238,56 @@ func (n *Notifier) Run() {
 		for _, p := range due {
 			n.send(cfg, fmt.Sprintf("🔴 服务器离线\n%s 已离线超过 %d 秒", n.serverName(p.id), cfg.OfflineDelay))
 		}
+
+		if cfg.ExpireOn {
+			n.checkExpiry(cfg)
+		}
+	}
+}
+
+// checkExpiry 到期提醒：到期日在 ExpireDays 天内且尚未就该日期提醒过的服务器推送通知。
+// 已提醒的到期日持久化在 servers.expire_notified（防重启重发）；改到期时间后按新日期重新提醒。
+func (n *Notifier) checkExpiry(cfg notifyConfig) {
+	rows, err := n.db.Query(
+		`SELECT id, name, expire_at FROM servers WHERE expire_at != '' AND expire_at != expire_notified`)
+	if err != nil {
+		log.Printf("checkExpiry query: %v", err)
+		return
+	}
+	defer rows.Close()
+	type due struct {
+		id, name, expireAt string
+		daysLeft           int
+	}
+	var dues []due
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
+	for rows.Next() {
+		var d due
+		if err := rows.Scan(&d.id, &d.name, &d.expireAt); err != nil {
+			continue
+		}
+		exp, err := time.ParseInLocation("2006-01-02", d.expireAt, time.Local)
+		if err != nil {
+			continue // 非 YYYY-MM-DD 格式无法判定，跳过
+		}
+		d.daysLeft = int(exp.Sub(today).Hours() / 24)
+		if d.daysLeft < 0 || d.daysLeft > cfg.ExpireDays {
+			continue
+		}
+		dues = append(dues, d)
+	}
+	for _, d := range dues {
+		// 先落标记再推送：宁可推送失败漏一条（有日志），不因发送阻塞/失败反复轰炸
+		if _, err := n.db.Exec(`UPDATE servers SET expire_notified = ? WHERE id = ?`, d.expireAt, d.id); err != nil {
+			log.Printf("checkExpiry mark (id=%s): %v", d.id, err)
+			continue
+		}
+		left := fmt.Sprintf("剩余 %d 天", d.daysLeft)
+		if d.daysLeft == 0 {
+			left = "今天到期"
+		}
+		n.send(cfg, fmt.Sprintf("📅 到期提醒\n%s 将于 %s 到期（%s）", d.name, d.expireAt, left))
 	}
 }
 
@@ -265,6 +354,11 @@ func (s *App) handlePutNotify(w http.ResponseWriter, r *http.Request) {
 	setSetting(s.db, "notify_mem", strconv.Itoa(clampInt(v.MemThreshold, 1, 100, 90)))
 	setSetting(s.db, "notify_disk", strconv.Itoa(clampInt(v.DiskThreshold, 1, 100, 95)))
 	setSetting(s.db, "notify_load_min", strconv.Itoa(clampInt(v.LoadMinutes, 1, 120, 5)))
+	setSetting(s.db, "notify_net", b2s(v.NetOn))
+	setSetting(s.db, "notify_net_mb", strconv.Itoa(clampInt(v.NetThreshold, 1, 100000, 50)))
+	setSetting(s.db, "notify_net_sec", strconv.Itoa(clampInt(v.NetSeconds, 10, 3600, 60)))
+	setSetting(s.db, "notify_expire", b2s(v.ExpireOn))
+	setSetting(s.db, "notify_expire_days", strconv.Itoa(clampInt(v.ExpireDays, 1, 7, 3)))
 	s.notifier.Reload()
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }

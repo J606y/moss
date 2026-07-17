@@ -175,7 +175,7 @@ func (s *App) handlePing(w http.ResponseWriter, r *http.Request) {
 	since := time.Now().Add(-time.Duration(hours) * time.Hour).UnixMilli()
 	bucket := bucketMs(hours)
 
-	taskRows, err := s.db.Query(`SELECT id, name, server_id FROM ping_tasks ORDER BY id`)
+	taskRows, err := s.db.Query(`SELECT id, name, server_id FROM ping_tasks ORDER BY sort, id`)
 	if err != nil {
 		log.Printf("handlePing tasks (server=%s): %v", id, err)
 		writeErr(w, 500, "内部错误")

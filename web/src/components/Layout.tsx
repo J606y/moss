@@ -1,6 +1,7 @@
 import { Suspense, useEffect, useState } from 'react'
 import { Link, Outlet } from 'react-router-dom'
 import { Moon, Settings, Sun } from 'lucide-react'
+import MossEye from './MossEye'
 import { useTheme } from '../useTheme'
 import { iconBtn } from '../ui'
 
@@ -32,7 +33,7 @@ export default function Layout() {
       <header className="sticky top-3 z-40 px-3 sm:px-4">
         <div className="glass mx-auto flex h-14 max-w-7xl items-center justify-between rounded-2xl px-4">
           <Link to="/" className="flex items-center gap-2">
-            <span className="text-xl">🌿</span>
+            <MossEye className="h-6 w-6" />
             <span className="text-lg font-bold tracking-tight">Moss</span>
             <span className="mt-0.5 hidden text-xs text-zinc-500 sm:inline">轻量服务器监控</span>
           </Link>
@@ -53,7 +54,7 @@ export default function Layout() {
         </Suspense>
       </main>
       <footer className="py-5 text-center text-xs text-zinc-400 dark:text-zinc-600">
-        Moss v0.6.1 · 轻量服务器监控
+        Moss v1.0.0 · 轻量服务器监控
       </footer>
     </div>
   )

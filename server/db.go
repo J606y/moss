@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS servers (
 	ip TEXT NOT NULL DEFAULT '',
 	ipv6 TEXT NOT NULL DEFAULT '',
 	last_seen INTEGER NOT NULL DEFAULT 0,
-	auto_flag TEXT NOT NULL DEFAULT ''
+	auto_flag TEXT NOT NULL DEFAULT '',
+	expire_notified TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS history (
 	server_id TEXT NOT NULL,
@@ -65,7 +66,8 @@ CREATE TABLE IF NOT EXISTS ping_tasks (
 	target TEXT NOT NULL,
 	interval INTEGER NOT NULL DEFAULT 60,
 	enabled INTEGER NOT NULL DEFAULT 1,
-	server_id TEXT NOT NULL DEFAULT ''
+	server_id TEXT NOT NULL DEFAULT '',
+	sort INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, expires INTEGER NOT NULL);
@@ -97,6 +99,14 @@ func openDB(path string) (*sql.DB, error) {
 		return nil, err
 	}
 	if err := ensureColumn(db, "servers", "ipv6", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, err
+	}
+	// 老库全为 0，ORDER BY sort, id 仍保持原有按 id 的顺序
+	if err := ensureColumn(db, "ping_tasks", "sort", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return nil, err
+	}
+	// 到期提醒去重标记：记录已就哪个到期日提醒过，防重启/每轮检查重复推送
+	if err := ensureColumn(db, "servers", "expire_notified", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
 	// sample_interval 单位由「分钟」改为「秒」：老库存的是分钟值，首次升级一次性 ×60 迁移，

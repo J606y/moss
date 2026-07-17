@@ -1,4 +1,4 @@
-# 🌿 Moss
+# Moss
 
 > A lightweight, self-hosted server monitor — single binary, embedded frontend, SQLite storage. No MySQL/Redis, up and running in 5 minutes. It does the few things you actually need, without feature bloat.
 
@@ -22,8 +22,8 @@
 - 📈 **Realtime** — WebSocket push (2s by default), live-scrolling charts, smooth per-digit network-speed counter
 - 🕐 **History** — hours-to-days of load history, second-level adjustable sampling, stored in SQLite
 - 🛰️ **Probes** — ICMP / TCP / HTTP probe tasks, latency curves + packet loss
-- 🔔 **Alerts** — offline alerts and load-threshold alerts via Telegram (with recovery notices)
-- ⚙️ **Admin** — drag-to-reorder servers, one-click install commands, single-admin password login
+- 🔔 **Alerts** — offline / load-threshold / network-speed-threshold alerts and server expiry reminders via Telegram (with recovery notices)
+- ⚙️ **Admin** — drag-to-reorder servers and probe tasks, one-click install commands, single-admin password login
 - 🚀 **Dead-simple deploy** — server single binary (frontend embedded) + agent single binary, works on Linux / macOS / Windows
 
 > Deliberately out of scope: OAuth / 2FA / multi-user, WebSSH, theme marketplace, i18n. Stay light, stay simple.

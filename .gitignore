@@ -15,6 +15,9 @@
 *.db-wal
 *.log
 
+# ---- 构建缓存 ----
+*.tsbuildinfo
+
 # ---- Go ----
 *.exe
 *.test

@@ -45,11 +45,17 @@ const ServerRow = memo(function ServerRow({
       <td className={td}>
         <MiniBar pct={pct(st.diskUsed, server.diskTotal)} />
       </td>
+      {/* 网速文本长度逐帧变化，自动布局表格会随之重算列宽引起外框/滚动条抖动：
+          两侧各固定最小宽度并向斜杠对齐，让列宽保持稳定 */}
       <td className={`${td} tabular-nums text-zinc-600 dark:text-zinc-300`}>
         <span className="inline-flex items-center gap-1">
-          <Ticker value={st.netUp} format={fmtSpeed} />
+          <span className="inline-block min-w-[5rem] text-right">
+            <Ticker value={st.netUp} format={fmtSpeed} />
+          </span>
           <span className="text-zinc-400 dark:text-zinc-500">/</span>
-          <Ticker value={st.netDown} format={fmtSpeed} />
+          <span className="inline-block min-w-[5rem]">
+            <Ticker value={st.netDown} format={fmtSpeed} />
+          </span>
         </span>
       </td>
       <td className={`${td} tabular-nums text-zinc-600 dark:text-zinc-300`}>
