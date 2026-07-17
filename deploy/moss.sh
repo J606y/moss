@@ -112,14 +112,21 @@ v_exists(){ docker volume inspect "$VOLUME" >/dev/null 2>&1; }
 cur_port(){ local PORT="$DEFAULT_PORT"; [ -f "$CONF" ] && . "$CONF"; echo "$PORT"; }
 cur_trust(){ local TRUST_PROXY=0; [ -f "$CONF" ] && . "$CONF"; echo "${TRUST_PROXY:-0}"; }
 cur_proxies(){ local TRUSTED_PROXIES=""; [ -f "$CONF" ] && . "$CONF"; echo "${TRUSTED_PROXIES:-}"; }
+cur_bind(){ local BIND="0.0.0.0"; [ -f "$CONF" ] && . "$CONF"; echo "${BIND:-0.0.0.0}"; }
+mode_desc(){
+  if [ "$(cur_trust)" = 1 ]; then echo "反代"
+  elif [ "$(cur_bind)" = "127.0.0.1" ]; then echo "直连·仅本机"
+  else echo "直连"; fi
+}
 
-# start_container <port> <trust:0|1> <trusted-proxies> [额外 docker run 参数...]
+# start_container <port> <trust:0|1> <trusted-proxies> <bind> [额外 docker run 参数...]
 # 反代模式(trust=1)：仅绑回环 127.0.0.1，并以 --trust-proxy 让 Moss 按「真实访客 IP」限流；
 #   多层反代(边缘→回源)再用 --trusted-proxies 列出边缘节点公网 IP，Moss 从 XFF 最右往左
 #   跳过可信代理取真实客户端，杜绝伪造 XFF 绕过限流/登录锁定。
-# 直连模式(trust=0)：绑 0.0.0.0:port，沿用镜像默认参数（限流按 socket 来源 IP）。
+# 直连模式(trust=0)：绑 <bind>:port（0.0.0.0 公网可达 / 127.0.0.1 仅本机），
+#   沿用镜像默认参数（限流按 socket 来源 IP）。
 start_container(){
-  local port="$1" trust="$2" proxies="$3"; shift 3
+  local port="$1" trust="$2" proxies="$3" bind="$4"; shift 4
   local args=( -d --name "$CONTAINER" --restart unless-stopped -v "${VOLUME}:/app/data" "$@" )
   local cmd=()
   if [ "$trust" = 1 ]; then
@@ -127,7 +134,7 @@ start_container(){
     cmd=( --listen :8787 --data /app/data --trust-proxy )
     [ -n "$proxies" ] && cmd+=( --trusted-proxies "$proxies" )
   else
-    args+=( -p "${port}:8787" )
+    args+=( -p "${bind}:${port}:8787" )
   fi
   docker run "${args[@]}" "$IMAGE" "${cmd[@]}"
 }
@@ -158,6 +165,19 @@ do_install(){
     proxies=""
   fi
 
+  # 直连模式的监听地址：0.0.0.0 公网可直接访问；127.0.0.1 仅本机可达（内网/SSH 隧道场景，
+  # 不暴露公网端口也无需放行防火墙）。反代模式固定绑回环，不询问。
+  local bind; bind="$(cur_bind)"
+  if [ "$trust" = 0 ]; then
+    local bdef="1"; [ "$bind" = "127.0.0.1" ] && bdef="2"
+    echo "  1) 0.0.0.0   —— 公网可直接访问 http://IP:端口"
+    echo "  2) 127.0.0.1 —— 仅本机可访问（内网/SSH 隧道场景，不暴露公网）"
+    read -rp "监听地址 (1/2) [默认 ${bdef}]: " bsel
+    case "${bsel:-$bdef}" in 2) bind="127.0.0.1";; *) bind="0.0.0.0";; esac
+  else
+    bind="127.0.0.1"
+  fi
+
   if c_exists; then
     warn "已存在 Moss 容器"
     read -rp "重新创建容器？(数据保留) (y/N): " yn
@@ -174,10 +194,11 @@ do_install(){
 
   local extra=()
   [ "$fresh" = 1 ] && extra+=( -e "MOSS_ADMIN_PASSWORD=$pass" )
-  start_container "$port" "$trust" "$proxies" "${extra[@]}" >/dev/null || { err "启动容器失败"; pause; return; }
+  start_container "$port" "$trust" "$proxies" "$bind" "${extra[@]}" >/dev/null || { err "启动容器失败"; pause; return; }
 
-  printf 'PORT=%s\nTRUST_PROXY=%s\nTRUSTED_PROXIES=%q\n' "$port" "$trust" "$proxies" > "$CONF"
-  [ "$trust" = 1 ] || open_firewall "$port" # 反代模式仅绑回环，无需放行公网端口
+  printf 'PORT=%s\nTRUST_PROXY=%s\nTRUSTED_PROXIES=%q\nBIND=%s\n' "$port" "$trust" "$proxies" "$bind" > "$CONF"
+  # 反代/仅本机模式只绑回环，无需放行公网端口
+  if [ "$trust" = 0 ] && [ "$bind" = "0.0.0.0" ]; then open_firewall "$port"; fi
 
   sleep 2
   local ip; ip="$(detect_ip)"
@@ -187,6 +208,10 @@ do_install(){
   if [ "$trust" = 1 ]; then
     echo "  运行模式:   反代模式（仅监听 127.0.0.1:${port}，按真实访客 IP 限流）"
     echo "  访问地址:   由你的反向代理对外提供（反代目标填 http://127.0.0.1:${port}）"
+  elif [ "$bind" = "127.0.0.1" ]; then
+    echo "  运行模式:   直连模式·仅本机（监听 127.0.0.1:${port}，公网无法直接访问）"
+    echo "  访问地址:   本机 http://127.0.0.1:${port}"
+    echo "              远程访问可用 SSH 隧道: ssh -N -L ${port}:127.0.0.1:${port} 用户@${ip}"
   else
     echo "  运行模式:   直连模式"
     echo "  访问地址:   http://${ip}:${port}"
@@ -203,6 +228,8 @@ do_install(){
   echo "  快捷命令:   以后在本机直接输入  moss  即可重开管理菜单"
   if [ "$trust" = 1 ]; then
     c_grn "  ✓ 已按真实访客 IP 启用应用层限流（默认 /api 600·登录 10 次/分钟，可用环境变量调整）。"
+  elif [ "$bind" = "127.0.0.1" ]; then
+    c_grn "  ✓ 端口仅绑定本机回环 127.0.0.1，未暴露公网。"
   else
     c_ylw "  ⚠ 当前为明文 HTTP，登录密码会明文传输；公网长期使用建议上 Nginx+TLS 并以「反代模式」重装。"
   fi
@@ -215,11 +242,12 @@ do_update(){
   local port; port="$(cur_port)"
   local trust; trust="$(cur_trust)" # 沿用安装时选定的运行模式
   local proxies; proxies="$(cur_proxies)" # 沿用安装时填的可信代理名单
+  local bind; bind="$(cur_bind)" # 沿用安装时选的监听地址
   info "拉取最新镜像..."
   docker pull "$IMAGE" || { err "拉取失败"; return; }
   docker rm -f "$CONTAINER" >/dev/null 2>&1
-  if start_container "$port" "$trust" "$proxies" >/dev/null; then
-    ok "已更新到最新版并重启（数据与密码保留，模式：$([ "$trust" = 1 ] && echo 反代 || echo 直连)）"
+  if start_container "$port" "$trust" "$proxies" "$bind" >/dev/null; then
+    ok "已更新到最新版并重启（数据与密码保留，模式：$(mode_desc)）"
   else
     err "更新失败"
   fi
@@ -252,6 +280,9 @@ do_status(){
   if [ "$(cur_trust)" = 1 ]; then
     echo "运行模式:   反代模式（仅监听 127.0.0.1:${port}）"
     echo "访问地址:   经你的反向代理访问（反代目标 http://127.0.0.1:${port}）"
+  elif [ "$(cur_bind)" = "127.0.0.1" ]; then
+    echo "运行模式:   直连模式·仅本机（监听 127.0.0.1:${port}，公网无法直接访问）"
+    echo "访问地址:   本机 http://127.0.0.1:${port}（远程可 SSH 隧道: ssh -N -L ${port}:127.0.0.1:${port} 用户@服务器）"
   else
     echo "运行模式:   直连模式"
     echo "访问地址:   http://$(detect_ip):${port}"
@@ -261,6 +292,47 @@ do_status(){
     echo "管理员密码: $(cat "$CRED")"
   else
     echo "管理员密码: 安装时已显示；若复用旧数据，请用你已知道的密码"
+  fi
+}
+
+# 已安装后切换监听地址（公网 0.0.0.0 / 仅本机 127.0.0.1）：端口映射写死在容器上，
+# 需要以相同镜像+数据卷重建容器，数据与密码不受影响。
+do_change_bind(){
+  c_exists || { warn "尚未安装，请先选 [1] 安装"; return; }
+  need_docker || return
+  local port trust proxies bind
+  port="$(cur_port)"; trust="$(cur_trust)"; proxies="$(cur_proxies)"; bind="$(cur_bind)"
+  if [ "$trust" = 1 ]; then
+    warn "当前为反代模式，端口固定仅绑 127.0.0.1，不存在公网直绑；"
+    echo "    如需改为公网直连，请用菜单 [1] 重装并在「反向代理」一问选 N。"
+    return
+  fi
+  echo "当前监听地址: ${bind}:${port}"
+  echo "  1) 0.0.0.0   —— 公网可直接访问 http://IP:端口"
+  echo "  2) 127.0.0.1 —— 仅本机可访问（内网/SSH 隧道场景，不暴露公网）"
+  read -rp "切换为 (1/2，直接回车取消): " bsel
+  local new=""
+  case "$bsel" in
+    1) new="0.0.0.0";;
+    2) new="127.0.0.1";;
+    *) warn "已取消，未做任何修改"; return;;
+  esac
+  [ "$new" = "$bind" ] && { ok "监听地址已经是 ${new}，无需修改"; return; }
+  info "正在以新监听地址重建容器（镜像与数据卷复用，数据与密码保留）..."
+  docker rm -f "$CONTAINER" >/dev/null 2>&1
+  if start_container "$port" "$trust" "$proxies" "$new" >/dev/null; then
+    mkdir -p "$WORKDIR"
+    printf 'PORT=%s\nTRUST_PROXY=%s\nTRUSTED_PROXIES=%q\nBIND=%s\n' "$port" "$trust" "$proxies" "$new" > "$CONF"
+    ok "已切换为监听 ${new}:${port}"
+    if [ "$new" = "0.0.0.0" ]; then
+      open_firewall "$port"
+      echo "访问地址: http://$(detect_ip):${port}"
+    else
+      echo "本机访问: http://127.0.0.1:${port}（远程可 SSH 隧道: ssh -N -L ${port}:127.0.0.1:${port} 用户@服务器）"
+      warn "原先放行的防火墙/安全组 ${port} 端口规则不再需要，可自行收回"
+    fi
+  else
+    err "重建容器失败，请用菜单 [5] 查看日志排查"
   fi
 }
 
@@ -282,7 +354,7 @@ banner(){
   |_|  |_|\___/|___/___/
 EOF
   echo "  镜像: $IMAGE"
-  printf "  状态: %s   端口: %s   模式: %s\n" "$st" "$(cur_port)" "$([ "$(cur_trust)" = 1 ] && echo 反代 || echo 直连)"
+  printf "  状态: %s   端口: %s   模式: %s\n" "$st" "$(cur_port)" "$(mode_desc)"
   echo "----------------------------------------------------------"
 }
 
@@ -295,6 +367,7 @@ main_menu(){
     echo "  3) 卸载 Moss"
     echo "  4) 查看状态 / 访问地址 / 管理员密码"
     echo "  5) 查看运行日志"
+    echo "  6) 切换监听地址（公网 0.0.0.0 / 仅本机 127.0.0.1）"
     echo "  0) 退出脚本"
     echo "----------------------------------------------------------"
     read -rp "请输入序号: " choice
@@ -304,8 +377,9 @@ main_menu(){
       3) do_uninstall ;;
       4) do_status ;;
       5) do_logs ;;
+      6) do_change_bind ;;
       0) ok "已退出 —— 下次直接输入  moss  即可再打开本菜单"; exit 0 ;;
-      *) warn "无效选择，请输入 0-5" ;;
+      *) warn "无效选择，请输入 0-6" ;;
     esac
     pause
   done

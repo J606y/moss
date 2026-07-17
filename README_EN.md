@@ -54,7 +54,7 @@ Great for: anyone with a handful to a dozen VPSes who wants a good-looking, low-
 bash <(curl -fsSL https://raw.githubusercontent.com/J606y/moss/main/deploy/moss.sh)
 ```
 
-Then open `http://<server-ip>:8787`. The script also installs a global `moss` command — from then on just type `moss` on the server to reopen the management menu (install / update / uninstall / status & password / logs), no need to remember the curl line.
+Then open `http://<server-ip>:8787`. The script also installs a global `moss` command — from then on just type `moss` on the server to reopen the management menu (install / update / uninstall / status & password / logs / switch listen address), no need to remember the curl line.
 
 Equivalent manual options:
 
