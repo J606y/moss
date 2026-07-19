@@ -36,7 +36,11 @@ CREATE TABLE IF NOT EXISTS servers (
 	ipv6 TEXT NOT NULL DEFAULT '',
 	last_seen INTEGER NOT NULL DEFAULT 0,
 	auto_flag TEXT NOT NULL DEFAULT '',
-	expire_notified TEXT NOT NULL DEFAULT ''
+	expire_notified TEXT NOT NULL DEFAULT '',
+	gcp_enabled INTEGER NOT NULL DEFAULT 0,
+	gcp_project TEXT NOT NULL DEFAULT '',
+	gcp_zone TEXT NOT NULL DEFAULT '',
+	gcp_instance TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS history (
 	server_id TEXT NOT NULL,
@@ -108,6 +112,17 @@ func openDB(path string) (*sql.DB, error) {
 	// 到期提醒去重标记：记录已就哪个到期日提醒过，防重启/每轮检查重复推送
 	if err := ensureColumn(db, "servers", "expire_notified", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
+	}
+	// GCP Spot 自动开机：project 留空时用 SA JSON 里的 project_id
+	for col, def := range map[string]string{
+		"gcp_enabled":  "INTEGER NOT NULL DEFAULT 0",
+		"gcp_project":  "TEXT NOT NULL DEFAULT ''",
+		"gcp_zone":     "TEXT NOT NULL DEFAULT ''",
+		"gcp_instance": "TEXT NOT NULL DEFAULT ''",
+	} {
+		if err := ensureColumn(db, "servers", col, def); err != nil {
+			return nil, err
+		}
 	}
 	// sample_interval 单位由「分钟」改为「秒」：老库存的是分钟值，首次升级一次性 ×60 迁移，
 	// 保持原有落库节奏不变；同时把仍是旧默认(30 天)的历史保留期下调到 7 天，配合更细的采样控制体积。

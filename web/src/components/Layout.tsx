@@ -1,6 +1,6 @@
 import { Suspense, useEffect, useState } from 'react'
 import { Link, Outlet } from 'react-router-dom'
-import { Moon, Settings, Sun } from 'lucide-react'
+import { Monitor, Moon, Settings, Sun } from 'lucide-react'
 import MossEye from './MossEye'
 import { useTheme } from '../useTheme'
 import { iconBtn } from '../ui'
@@ -19,7 +19,8 @@ function Clock() {
 }
 
 export default function Layout() {
-  const { dark, toggle } = useTheme()
+  const { mode, cycle } = useTheme()
+  const themeTitle = mode === 'auto' ? '主题：跟随系统' : mode === 'light' ? '主题：浅色' : '主题：深色'
   return (
     <div className="flex min-h-screen flex-col">
       {/* 背景彩色光斑，透过玻璃面板产生液态质感 */}
@@ -39,8 +40,14 @@ export default function Layout() {
           </Link>
           <div className="flex items-center gap-2">
             <Clock />
-            <button onClick={toggle} className={iconBtn} title="切换主题">
-              {dark ? <Sun className="h-4.5 w-4.5" /> : <Moon className="h-4.5 w-4.5" />}
+            <button onClick={cycle} className={iconBtn} title={themeTitle}>
+              {mode === 'auto' ? (
+                <Monitor className="h-4.5 w-4.5" />
+              ) : mode === 'light' ? (
+                <Sun className="h-4.5 w-4.5" />
+              ) : (
+                <Moon className="h-4.5 w-4.5" />
+              )}
             </button>
             <Link to="/login" className={iconBtn} title="管理后台">
               <Settings className="h-4.5 w-4.5" />

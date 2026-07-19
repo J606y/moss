@@ -2,6 +2,12 @@
 
 本项目所有重要变更都会记录在此文件，遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## v1.1.0 - 2026-07-20
+
+### 新功能
+- **GCP Spot 自动开机（GCP 守护）**：Spot 实例被抢占停机后，面板确认节点离线即自动调用 Compute Engine API `instances.start` 重新拉起。后台新增「GCP 守护」页配置全局 Service Account 凭证（保存后不回显私钥，可一键测试连接）与总开关、离线确认延迟（默认 120s）、重试冷却（默认 300s）、最大尝试次数（默认 3）；每台节点在编辑弹窗里独立启用并填写 zone / 实例名（项目 ID 留空则用凭证的 `project_id`），启用后节点行出现 ▶ 手动立即开机按钮（忽略冷却）。守护逻辑：仅实例为 `TERMINATED` 才开机，`RUNNING` 但节点离线视为 agent / 网络故障只提醒不动实例；开机失败（如 Spot 容量不足）按冷却自动重试，达上限停手并通知，节点重新上线自动复位计数；成功 / 失败 / 放弃均推 Telegram。认证走 SA 的 OAuth2 JWT Bearer（RS256）标准库实现，零新增依赖；`servers` 表自动迁移 `gcp_*` 四列；新增 `GET/PUT /api/admin/gcp`、`POST /api/admin/gcp/test`、`POST /api/admin/servers/{id}/gcp-start`。凭证明文存库，README 附最小权限自定义角色（仅 `compute.instances.get` + `compute.instances.start`）建法与注意事项（面板勿部署在被守护实例上、人为关机前先关开关、Spot 终止操作须为 STOP）。
+- **主题跟随系统**：右上角主题按钮由亮 / 暗两态改为「跟随系统 → 浅色 → 深色」三态循环（自动档显示器图标），自动档实时响应系统亮暗切换，跨标签页同步保留。
+
 ## v1.0.0 - 2026-07-18
 
 功能面进入稳定形态（监控 / 探测 / 告警三大块齐备），定为 1.0。

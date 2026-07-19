@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-const serverVersion = "1.0.0"
+const serverVersion = "1.1.0"
 
 // App 聚合全局依赖。
 type App struct {
@@ -71,6 +71,10 @@ func main() {
 	app := &App{db: db, hub: newHub(db), trustProxy: *trustProxy, trustedProxies: parseTrustedProxies(*trustedProxies)}
 	app.notifier = newNotifier(db)
 	app.hub.notifier = app.notifier
+	app.notifier.isOnline = func(id string) bool {
+		_, _, online := app.hub.Snapshot(id)
+		return online
+	}
 	// 应用层限流：按真实访客 IP 计数（env 可调，设 0 关闭对应层）
 	app.globalLimiter = newLimiter(envInt("MOSS_RATELIMIT_PER_MIN", 600))
 	app.authLimiter = newLimiter(envInt("MOSS_RATELIMIT_AUTH_PER_MIN", 10))
@@ -110,6 +114,10 @@ func main() {
 	mux.HandleFunc("GET /api/admin/notify", app.requireAuth(app.handleGetNotify))
 	mux.HandleFunc("PUT /api/admin/notify", app.requireAuth(app.handlePutNotify))
 	mux.HandleFunc("POST /api/admin/notify/test", app.requireAuth(app.handleTestNotify))
+	mux.HandleFunc("GET /api/admin/gcp", app.requireAuth(app.handleGetGCP))
+	mux.HandleFunc("PUT /api/admin/gcp", app.requireAuth(app.handlePutGCP))
+	mux.HandleFunc("POST /api/admin/gcp/test", app.requireAuth(app.handleTestGCP))
+	mux.HandleFunc("POST /api/admin/servers/{id}/gcp-start", app.requireAuth(app.handleGCPManualStart))
 	mux.HandleFunc("GET /api/admin/settings", app.requireAuth(app.handleGetSettings))
 	mux.HandleFunc("PUT /api/admin/settings", app.requireAuth(app.handlePutSettings))
 	mux.HandleFunc("PUT /api/admin/password", app.requireAuth(app.handleChangePassword))

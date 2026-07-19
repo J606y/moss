@@ -77,6 +77,14 @@ export interface AdminServer {
   ip: string
   ipv6: string
   online: boolean
+  // GCP Spot 自动开机配置与运行态（运行态为内存值，面板重启归零）
+  gcpEnabled: boolean
+  gcpProject: string
+  gcpZone: string
+  gcpInstance: string
+  gcpTries: number
+  gcpLastTry: number
+  gcpLastErr: string
 }
 
 export interface PingTask {
@@ -104,6 +112,16 @@ export interface NotifySettings {
   netSeconds: number
   expireOn: boolean
   expireDays: number
+}
+
+export interface GcpSettings {
+  configured: boolean
+  clientEmail: string
+  projectId: string
+  autoOn: boolean
+  delay: number
+  cooldown: number
+  maxTries: number
 }
 
 export interface Settings {

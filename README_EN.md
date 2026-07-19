@@ -23,6 +23,7 @@
 - 🕐 **History** — hours-to-days of load history, second-level adjustable sampling, stored in SQLite
 - 🛰️ **Probes** — ICMP / TCP / HTTP probe tasks, latency curves + packet loss
 - 🔔 **Alerts** — offline / load-threshold / network-speed-threshold alerts and server expiry reminders via Telegram (with recovery notices)
+- ☁️ **GCP Spot guardian** — when a Spot instance gets preempted, the panel automatically calls the GCP API to start it again (with confirmation delay / retry cooldown / attempt cap)
 - ⚙️ **Admin** — drag-to-reorder servers and probe tasks, one-click install commands, single-admin password login
 - 🚀 **Dead-simple deploy** — server single binary (frontend embedded) + agent single binary, works on Linux / macOS / Windows
 
@@ -121,6 +122,38 @@ powershell -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((iwr -useb
 The script downloads the matching agent binary from GitHub Release (`J606y/moss`) and registers it as an auto-start service (systemd / launchd / Scheduled Task).
 
 > ICMP probes need admin on Windows / root or `CAP_NET_RAW` on Linux; TCP / HTTP probes don't.
+
+### GCP Spot auto-start (optional)
+
+GCP Spot instances are cheap but can be preempted at any time (the instance becomes `TERMINATED`; data is kept). Moss can act as a watchdog: once a node is confirmed offline, it calls the Compute Engine API `instances.start` to bring it back, with success / failure / give-up notices pushed via Telegram.
+
+**1. Create a least-privilege Service Account** (recommended — only "get status" + "start"):
+
+```bash
+PROJECT=your-project-id
+gcloud iam service-accounts create moss-starter --project=$PROJECT
+gcloud iam roles create mossSpotStarter --project=$PROJECT \
+  --permissions=compute.instances.get,compute.instances.start
+gcloud projects add-iam-policy-binding $PROJECT \
+  --member="serviceAccount:moss-starter@$PROJECT.iam.gserviceaccount.com" \
+  --role="projects/$PROJECT/roles/mossSpotStarter"
+gcloud iam service-accounts keys create moss-sa.json \
+  --iam-account=moss-starter@$PROJECT.iam.gserviceaccount.com
+```
+
+(The predefined `roles/compute.instanceAdmin.v1` also works but is far broader than needed.)
+
+**2. Panel setup**: paste the contents of `moss-sa.json` on the admin "GCP 守护" (GCP Guardian) tab → save & test the connection → enable the auto-start master switch; then edit the node on the "服务器" (Servers) tab, enable "GCP auto-start" and fill in the zone (e.g. `us-central1-a`) and instance name. A ▶ button appears on the node row for manual immediate start.
+
+**How it works**: after a node stays offline past the confirmation delay (default 120s), Moss queries the instance status — it only starts instances in `TERMINATED` state; `RUNNING` but offline means an agent / network problem, so Moss alerts without touching the instance. Failed starts (e.g. Spot capacity shortage) are retried after the cooldown (default 300s) up to the attempt cap (default 3), then Moss stops and notifies; counters reset automatically once the node comes back online.
+
+**Caveats**:
+
+- **Do not host the panel on a guarded Spot instance** — if the panel is preempted together with the instance, nothing is left to restart it.
+- **Disable the node's auto-start switch before intentional shutdowns** (or the master switch), or the instance will be pulled back up.
+- Keep the Spot instance's termination action at the default **STOP**; with **DELETE** the instance is gone after preemption and cannot be started.
+- The credential is stored in plaintext in the panel database — grant only the two minimal permissions above and bind only the necessary project.
+- `SUSPENDED` instances are not auto-resumed.
 
 ## 🏗 Architecture
 

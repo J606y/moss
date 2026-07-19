@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -27,20 +28,34 @@ type adminServer struct {
 	Online    bool   `json:"online"`
 	LastSeen  int64  `json:"lastSeen"`
 	CreatedAt int64  `json:"createdAt"`
+
+	// GCP Spot 自动开机配置与运行态（运行态为内存值，面板重启归零）
+	GcpEnabled  bool   `json:"gcpEnabled"`
+	GcpProject  string `json:"gcpProject"`
+	GcpZone     string `json:"gcpZone"`
+	GcpInstance string `json:"gcpInstance"`
+	GcpTries    int    `json:"gcpTries"`
+	GcpLastTry  int64  `json:"gcpLastTry"`
+	GcpLastErr  string `json:"gcpLastErr"`
 }
 
 type serverForm struct {
-	Name     string `json:"name"`
-	Group    string `json:"group"`
-	Region   string `json:"region"`
-	Flag     string `json:"flag"`
-	Note     string `json:"note"`
-	ExpireAt string `json:"expireAt"`
+	Name        string `json:"name"`
+	Group       string `json:"group"`
+	Region      string `json:"region"`
+	Flag        string `json:"flag"`
+	Note        string `json:"note"`
+	ExpireAt    string `json:"expireAt"`
+	GcpEnabled  bool   `json:"gcpEnabled"`
+	GcpProject  string `json:"gcpProject"` // 留空 = 用 SA JSON 的 project_id
+	GcpZone     string `json:"gcpZone"`
+	GcpInstance string `json:"gcpInstance"`
 }
 
 func (s *App) handleAdminServers(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(
-		`SELECT id, name, grp, region, flag, auto_flag, note, expire_at, token, ip, ipv6, last_seen, created_at
+		`SELECT id, name, grp, region, flag, auto_flag, note, expire_at, token, ip, ipv6, last_seen, created_at,
+		        gcp_enabled, gcp_project, gcp_zone, gcp_instance
 		 FROM servers ORDER BY sort, created_at`)
 	if err != nil {
 		log.Printf("handleAdminServers query: %v", err)
@@ -52,15 +67,28 @@ func (s *App) handleAdminServers(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var a adminServer
 		if err := rows.Scan(&a.ID, &a.Name, &a.Group, &a.Region, &a.Flag, &a.AutoFlag, &a.Note,
-			&a.ExpireAt, &a.Token, &a.IP, &a.IPv6, &a.LastSeen, &a.CreatedAt); err != nil {
+			&a.ExpireAt, &a.Token, &a.IP, &a.IPv6, &a.LastSeen, &a.CreatedAt,
+			&a.GcpEnabled, &a.GcpProject, &a.GcpZone, &a.GcpInstance); err != nil {
 			log.Printf("handleAdminServers scan: %v", err)
 			writeErr(w, 500, "内部错误")
 			return
 		}
 		_, _, a.Online = s.hub.Snapshot(a.ID)
+		a.GcpTries, a.GcpLastTry, a.GcpLastErr = s.notifier.GCPStatus(a.ID)
 		out = append(out, a)
 	}
 	writeJSON(w, 200, out)
+}
+
+// normalizeGCP 整理并校验表单里的 GCP 字段（启用时 zone/实例名必填），返回错误提示，空串为通过。
+func normalizeGCP(f *serverForm) string {
+	f.GcpProject = strings.TrimSpace(f.GcpProject)
+	f.GcpZone = strings.TrimSpace(f.GcpZone)
+	f.GcpInstance = strings.TrimSpace(f.GcpInstance)
+	if f.GcpEnabled && (f.GcpZone == "" || f.GcpInstance == "") {
+		return "GCP 自动开机需填写 zone 与实例名"
+	}
+	return ""
 }
 
 func (s *App) handleAddServer(w http.ResponseWriter, r *http.Request) {
@@ -72,15 +100,21 @@ func (s *App) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	if f.Group == "" {
 		f.Group = "默认"
 	}
+	if msg := normalizeGCP(&f); msg != "" {
+		writeErr(w, 400, msg)
+		return
+	}
 	id := randString(8)
 	token := newToken()
 	// 新服务器排到列表末尾：sort = 当前最大值 + 1
 	var maxSort int
 	s.db.QueryRow(`SELECT COALESCE(MAX(sort), 0) FROM servers`).Scan(&maxSort)
 	if _, err := s.db.Exec(
-		`INSERT INTO servers(id, token, name, grp, region, flag, note, expire_at, sort, created_at)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO servers(id, token, name, grp, region, flag, note, expire_at, sort, created_at,
+		                     gcp_enabled, gcp_project, gcp_zone, gcp_instance)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, token, f.Name, f.Group, f.Region, f.Flag, f.Note, f.ExpireAt, maxSort+1, time.Now().Unix(),
+		f.GcpEnabled, f.GcpProject, f.GcpZone, f.GcpInstance,
 	); err != nil {
 		log.Printf("handleAddServer insert (id=%s): %v", id, err)
 		writeErr(w, 500, "内部错误")
@@ -100,9 +134,15 @@ func (s *App) handleUpdateServer(w http.ResponseWriter, r *http.Request) {
 	if f.Group == "" {
 		f.Group = "默认"
 	}
+	if msg := normalizeGCP(&f); msg != "" {
+		writeErr(w, 400, msg)
+		return
+	}
 	res, err := s.db.Exec(
-		`UPDATE servers SET name=?, grp=?, region=?, flag=?, note=?, expire_at=? WHERE id=?`,
-		f.Name, f.Group, f.Region, f.Flag, f.Note, f.ExpireAt, id)
+		`UPDATE servers SET name=?, grp=?, region=?, flag=?, note=?, expire_at=?,
+		        gcp_enabled=?, gcp_project=?, gcp_zone=?, gcp_instance=? WHERE id=?`,
+		f.Name, f.Group, f.Region, f.Flag, f.Note, f.ExpireAt,
+		f.GcpEnabled, f.GcpProject, f.GcpZone, f.GcpInstance, id)
 	if err != nil {
 		log.Printf("handleUpdateServer (id=%s): %v", id, err)
 		writeErr(w, 500, "内部错误")

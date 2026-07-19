@@ -23,6 +23,7 @@
 - 🕐 **历史记录**:1 小时 ~ 数天负载历史,秒级可调采样,SQLite 存储
 - 🛰️ **延迟探测**:ICMP / TCP / HTTP 探测任务,延迟曲线 + 丢包率
 - 🔔 **通知告警**:离线 / 负载超阈值 / 网速超阈值 / 服务器到期提醒,Telegram 推送(含恢复通知)
+- ☁️ **GCP Spot 守护**:Spot 实例被抢占关机后,面板自动调用 GCP API 重新开机(带确认延迟 / 冷却重试 / 次数上限)
 - ⚙️ **管理后台**:服务器与探测任务拖拽排序、一键安装命令、单管理员密码登录
 - 🚀 **极简部署**:server 单二进制(已内嵌前端)+ agent 单二进制,三端(Linux/macOS/Windows)通用
 
@@ -123,6 +124,38 @@ powershell -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((iwr -useb
 脚本会从 GitHub Release(`J606y/moss`)下载对应平台的 agent 二进制,并注册为开机自启服务(systemd / launchd / 计划任务)。
 
 > ICMP 探测在 Windows 下需要管理员权限、Linux 下需要 root 或 `CAP_NET_RAW`;TCP / HTTP 探测无此要求。
+
+### GCP Spot 自动开机(可选)
+
+GCP 的 Spot 实例便宜但随时可能被抢占(实例变为 `TERMINATED`,数据不丢)。Moss 可以充当看门狗:节点确认离线后自动调用 Compute Engine API `instances.start` 把它拉起来,成功 / 失败 / 放弃都会走 Telegram 通知。
+
+**1. 创建最小权限的 Service Account**(推荐,只给「查状态 + 开机」两个权限):
+
+```bash
+PROJECT=你的项目ID
+gcloud iam service-accounts create moss-starter --project=$PROJECT
+gcloud iam roles create mossSpotStarter --project=$PROJECT \
+  --permissions=compute.instances.get,compute.instances.start
+gcloud projects add-iam-policy-binding $PROJECT \
+  --member="serviceAccount:moss-starter@$PROJECT.iam.gserviceaccount.com" \
+  --role="projects/$PROJECT/roles/mossSpotStarter"
+gcloud iam service-accounts keys create moss-sa.json \
+  --iam-account=moss-starter@$PROJECT.iam.gserviceaccount.com
+```
+
+(偷懒可以直接用预定义角色 `roles/compute.instanceAdmin.v1`,但权限过宽,不推荐。)
+
+**2. 面板配置**:后台「GCP 守护」页粘贴 `moss-sa.json` 内容 → 保存并测试连接 → 打开自动开机总开关;再到「服务器」页编辑对应节点,开启「GCP 自动开机」并填写 zone(如 `us-central1-a`)与实例名。节点行会出现 ▶ 按钮,可随时手动立即开机。
+
+**工作方式**:节点离线超过「确认延迟」(默认 120s)后查询实例状态——仅 `TERMINATED` 才开机;`RUNNING` 但离线说明是 agent / 网络问题,只提醒不动实例。开机失败(如 Spot 容量不足)按「冷却」(默认 300s)自动重试,达到「最大尝试次数」(默认 3 次)后停止并通知,节点重新上线自动复位计数。
+
+**注意事项**:
+
+- **面板不要部署在被守护的 Spot 实例上**——面板和实例一起被抢占就没人拉起了。
+- **人为关机前先关掉该节点的自动开机开关**(或总开关),否则会被自动拉起。
+- Spot 实例的「终止操作」需保持默认的 **停止(STOP)**;若设为「删除(DELETE)」,被抢占后实例直接消失,无法拉起。
+- 凭证以明文存于面板数据库,请务必只授予上述两个最小权限、只绑定必要项目。
+- 实例 `SUSPENDED`(挂起)状态暂不支持自动恢复。
 
 ## 🏗 架构
 
