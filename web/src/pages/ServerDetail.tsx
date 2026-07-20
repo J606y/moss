@@ -254,8 +254,9 @@ export default function ServerDetail() {
 
   return (
     <div className="space-y-4">
-      {/* 标题栏 */}
-      <div className="flex flex-wrap items-center gap-3">
+      {/* 标题栏：桌面单行（地区行内、时长靠右）；窄屏时地区+时长合并为一条副标题，
+          避免 flex-wrap 把「HK」与时长甩到第二行两端、中间空一片的散架观感 */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <Link
           to="/"
           className="glass rounded-xl p-1.5 text-zinc-500 transition hover:text-zinc-900 dark:hover:text-zinc-100"
@@ -265,13 +266,23 @@ export default function ServerDetail() {
         <Flag code={server.flag} className="text-xl" />
         <h1 className="text-xl font-bold">{server.name}</h1>
         <StatusPill online={server.online} />
-        <span className="text-sm text-zinc-500">
+        <span className="hidden text-sm text-zinc-500 sm:inline">
           {server.region}
           {server.note ? ` · ${server.note}` : ''}
         </span>
         {server.online && (
-          <span className="ml-auto text-sm tabular-nums text-zinc-500">
+          <span className="ml-auto hidden text-sm tabular-nums text-zinc-500 sm:inline">
             在线 {fmtUptime(server.uptimeSec)}
+          </span>
+        )}
+        {(server.region || server.note || server.online) && (
+          <span className="w-full truncate text-sm text-zinc-500 sm:hidden">
+            {[
+              [server.region, server.note].filter(Boolean).join(' · '),
+              server.online ? `在线 ${fmtUptime(server.uptimeSec)}` : '',
+            ]
+              .filter(Boolean)
+              .join(' · ')}
           </span>
         )}
       </div>
