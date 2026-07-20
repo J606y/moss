@@ -61,7 +61,7 @@ export default function Layout() {
         </Suspense>
       </main>
       <footer className="py-5 text-center text-xs text-zinc-400 dark:text-zinc-600">
-        Moss v1.0.0 · 轻量服务器监控
+        Moss v{__APP_VERSION__} · 轻量服务器监控
       </footer>
     </div>
   )

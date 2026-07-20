@@ -1,8 +1,13 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import pkg from './package.json'
 
 export default defineConfig({
+  // 页脚版本号来源，随 package.json 发版号自动同步，避免手改遗漏
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
   plugins: [react(), tailwindcss()],
   server: {
     host: true,
