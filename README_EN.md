@@ -127,6 +127,8 @@ The script downloads the matching agent binary from GitHub Release (`J606y/moss`
 
 GCP Spot instances are cheap but can be preempted at any time (the instance becomes `TERMINATED`; data is kept). Moss can act as a watchdog: once a node is confirmed offline, it calls the Compute Engine API `instances.start` to bring it back, with success / failure / give-up notices pushed via Telegram.
 
+> 📖 Step-by-step guide (walkthrough + multi-instance / cross-project + FAQ + troubleshooting): [docs/gcp-guard_EN.md](./docs/gcp-guard_EN.md)
+
 **1. Create a least-privilege Service Account** (recommended — only "get status" + "start"):
 
 ```bash

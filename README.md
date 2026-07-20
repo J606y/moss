@@ -129,6 +129,8 @@ powershell -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((iwr -useb
 
 GCP 的 Spot 实例便宜但随时可能被抢占(实例变为 `TERMINATED`,数据不丢)。Moss 可以充当看门狗:节点确认离线后自动调用 Compute Engine API `instances.start` 把它拉起来,成功 / 失败 / 放弃都会走 Telegram 通知。
 
+> 📖 手把手教程(逐步操作 + 多台/跨项目 + FAQ + 故障排查):[docs/gcp-guard.md](./docs/gcp-guard.md)
+
 **1. 创建最小权限的 Service Account**(推荐,只给「查状态 + 开机」两个权限):
 
 ```bash
