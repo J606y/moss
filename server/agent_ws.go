@@ -52,7 +52,7 @@ func (s *App) pushConfig(serverID string) {
 	}
 	msg := protocol.ServerMsg{
 		Type:     "config",
-		Interval: getSettingInt(s.db, "report_interval", 2),
+		Interval: getSettingInt(s.db, keyReportInterval, 2),
 		Tasks:    tasksForServer(s.db, serverID),
 	}
 	if err := c.send(msg); err != nil {

@@ -40,13 +40,17 @@ jobs:
           CGO_ENABLED: "0"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-        run: go build -trimpath -ldflags "-s -w" -o "dist-out/moss-agent-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" ./agent
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          go build -trimpath -ldflags "-s -w -X main.agentVersion=${VER}" -o "dist-out/moss-agent-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" ./agent
       - name: Build server (embed_web)
         env:
           CGO_ENABLED: "0"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-        run: go build -tags embed_web -trimpath -ldflags "-s -w" -o "dist-out/moss-server-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" ./server
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          go build -tags embed_web -trimpath -ldflags "-s -w -X main.serverVersion=${VER}" -o "dist-out/moss-server-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" ./server
       - uses: actions/upload-artifact@v7
         with:
           name: bin-${{ matrix.goos }}-${{ matrix.goarch }}
@@ -63,6 +67,12 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum moss-* > SHA256SUMS
+          echo "----- SHA256SUMS -----"
+          cat SHA256SUMS
       - name: Extract changelog for this tag
         run: |
           awk -v tag="$GITHUB_REF_NAME" '

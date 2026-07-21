@@ -68,6 +68,36 @@ func publicNet() (ipv4, ipv6, country string) {
 	return
 }
 
+const geoTTL = 30 * time.Minute
+
+var (
+	geoMu      sync.Mutex
+	geoCache   struct{ ipv4, ipv6, country string }
+	geoCacheAt time.Time
+)
+
+// publicNetCached 带 TTL 缓存的 publicNet：缓存有效期内直接返回上次结果，
+// 避免掉线抖动时每次重连都外呼免费 GeoIP 接口（ip-api 免费版 45 次/分，易被限流）。
+// 仅在成功拿到 IPv4 时刷新缓存，避免把一次全失败缓存 30 分钟。
+func publicNetCached() (ipv4, ipv6, country string) {
+	geoMu.Lock()
+	if !geoCacheAt.IsZero() && time.Since(geoCacheAt) < geoTTL && geoCache.ipv4 != "" {
+		c := geoCache
+		geoMu.Unlock()
+		return c.ipv4, c.ipv6, c.country
+	}
+	geoMu.Unlock()
+
+	ipv4, ipv6, country = publicNet()
+	if ipv4 != "" {
+		geoMu.Lock()
+		geoCache.ipv4, geoCache.ipv6, geoCache.country = ipv4, ipv6, country
+		geoCacheAt = time.Now()
+		geoMu.Unlock()
+	}
+	return
+}
+
 // fetchPlainIP 请求只回显纯文本 IP 的端点，校验为合法 IP 后返回。
 func fetchPlainIP(c *http.Client, url string) string {
 	resp, err := c.Get(url)

@@ -7,7 +7,7 @@
 # ==========================================================================
 set -o pipefail
 
-IMAGE="ghcr.io/j606y/moss:latest"
+IMAGE="ghcr.io/j606y/moss:${MOSS_TAG:-latest}" # 可 MOSS_TAG=vX.Y.Z 固定版本以便回滚
 CONTAINER="moss"
 VOLUME="moss-data"
 WORKDIR="/opt/moss"

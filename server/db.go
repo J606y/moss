@@ -78,12 +78,12 @@ CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, expires INTEGER NOT
 `
 
 var defaultSettings = map[string]string{
-	"site_name":       "Moss",
-	"site_desc":       "轻量服务器监控",
-	"report_interval": "2",
-	"sample_interval": "10", // 秒：历史落库最细粒度，决定时间轴可缩放的下限
-	"history_days":    "7",
-	"ping_days":       "7",
+	keySiteName:       "Moss",
+	keySiteDesc:       "轻量服务器监控",
+	keyReportInterval: "2",
+	keySampleInterval: "10", // 秒：历史落库最细粒度，决定时间轴可缩放的下限
+	keyHistoryDays:    "7",
+	keyPingDays:       "7",
 }
 
 func openDB(path string) (*sql.DB, error) {
@@ -126,17 +126,17 @@ func openDB(path string) (*sql.DB, error) {
 	}
 	// sample_interval 单位由「分钟」改为「秒」：老库存的是分钟值，首次升级一次性 ×60 迁移，
 	// 保持原有落库节奏不变；同时把仍是旧默认(30 天)的历史保留期下调到 7 天，配合更细的采样控制体积。
-	if getSetting(db, "sample_unit_sec", "") == "" {
+	if getSetting(db, keySampleUnitSec, "") == "" {
 		var v string
-		if err := db.QueryRow(`SELECT value FROM settings WHERE key = 'sample_interval'`).Scan(&v); err == nil {
+		if err := db.QueryRow(`SELECT value FROM settings WHERE key = ?`, keySampleInterval).Scan(&v); err == nil {
 			if n, e := strconv.Atoi(v); e == nil && n > 0 {
-				setSetting(db, "sample_interval", strconv.Itoa(n*60))
+				setSetting(db, keySampleInterval, strconv.Itoa(n*60))
 			}
 		}
-		if getSetting(db, "history_days", "") == "30" {
-			setSetting(db, "history_days", "7")
+		if getSetting(db, keyHistoryDays, "") == "30" {
+			setSetting(db, keyHistoryDays, "7")
 		}
-		setSetting(db, "sample_unit_sec", "1")
+		setSetting(db, keySampleUnitSec, "1")
 	}
 	for k, v := range defaultSettings {
 		if _, err := db.Exec(`INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)`, k, v); err != nil {
@@ -223,8 +223,8 @@ func newToken() string { return "mk_" + randString(16) }
 // cleanupLoop 周期清理过期历史数据与会话。
 func cleanupLoop(db *sql.DB) {
 	for {
-		histDays := getSettingInt(db, "history_days", 7)
-		pingDays := getSettingInt(db, "ping_days", 7)
+		histDays := getSettingInt(db, keyHistoryDays, 7)
+		pingDays := getSettingInt(db, keyPingDays, 7)
 		now := time.Now()
 		if _, err := db.Exec(`DELETE FROM history WHERE time < ?`, now.AddDate(0, 0, -histDays).UnixMilli()); err != nil {
 			log.Printf("清理 history 失败: %v", err)

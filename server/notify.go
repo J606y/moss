@@ -1,10 +1,8 @@
 package main
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -35,20 +33,20 @@ type notifyConfig struct {
 
 func loadNotifyConfig(db *sql.DB) notifyConfig {
 	return notifyConfig{
-		TgToken:       getSetting(db, "notify_tg_token", ""),
-		TgChat:        getSetting(db, "notify_tg_chat", ""),
-		OfflineOn:     getSetting(db, "notify_offline", "0") == "1",
-		OfflineDelay:  getSettingInt(db, "notify_offline_delay", 60),
-		LoadOn:        getSetting(db, "notify_load", "0") == "1",
-		CPUThreshold:  getSettingInt(db, "notify_cpu", 90),
-		MemThreshold:  getSettingInt(db, "notify_mem", 90),
-		DiskThreshold: getSettingInt(db, "notify_disk", 95),
-		LoadMinutes:   getSettingInt(db, "notify_load_min", 5),
-		NetOn:         getSetting(db, "notify_net", "0") == "1",
-		NetThreshold:  getSettingInt(db, "notify_net_mb", 50),
-		NetSeconds:    getSettingInt(db, "notify_net_sec", 60),
-		ExpireOn:      getSetting(db, "notify_expire", "0") == "1",
-		ExpireDays:    getSettingInt(db, "notify_expire_days", 3),
+		TgToken:       getSetting(db, keyNotifyTgToken, ""),
+		TgChat:        getSetting(db, keyNotifyTgChat, ""),
+		OfflineOn:     getSetting(db, keyNotifyOffline, "0") == "1",
+		OfflineDelay:  getSettingInt(db, keyNotifyOfflineDelay, 60),
+		LoadOn:        getSetting(db, keyNotifyLoad, "0") == "1",
+		CPUThreshold:  getSettingInt(db, keyNotifyCPU, 90),
+		MemThreshold:  getSettingInt(db, keyNotifyMem, 90),
+		DiskThreshold: getSettingInt(db, keyNotifyDisk, 95),
+		LoadMinutes:   getSettingInt(db, keyNotifyLoadMin, 5),
+		NetOn:         getSetting(db, keyNotifyNet, "0") == "1",
+		NetThreshold:  getSettingInt(db, keyNotifyNetMB, 50),
+		NetSeconds:    getSettingInt(db, keyNotifyNetSec, 60),
+		ExpireOn:      getSetting(db, keyNotifyExpire, "0") == "1",
+		ExpireDays:    getSettingInt(db, keyNotifyExpireDays, 3),
 	}
 }
 
@@ -267,236 +265,6 @@ func (n *Notifier) Run() {
 	}
 }
 
-/* ---------- GCP Spot 自动开机 ---------- */
-
-var errGCPBusy = errors.New("自动开机执行中，请稍候")
-
-// getGCPClient 懒建 GCP 客户端，凭证内容不变时复用（token 缓存随之保留）。
-func (n *Notifier) getGCPClient() (*gcpClient, error) {
-	raw := strings.TrimSpace(getSetting(n.db, "gcp_sa_json", ""))
-	if raw == "" {
-		return nil, errors.New("未配置 Service Account 凭证")
-	}
-	n.mu.Lock()
-	if n.gcpCli != nil && n.gcpSARaw == raw {
-		cli := n.gcpCli
-		n.mu.Unlock()
-		return cli, nil
-	}
-	n.mu.Unlock()
-	cli, err := newGCPClient(raw)
-	if err != nil {
-		return nil, err
-	}
-	n.mu.Lock()
-	n.gcpCli = cli
-	n.gcpSARaw = raw
-	n.mu.Unlock()
-	return cli, nil
-}
-
-// checkGCPStart 每 tick 从 DB 查启用节点自行记账。不挂在离线告警块内：
-// 那里受 OfflineOn 开关控制，且依赖 WS 断连事件，面板重启后会漏掉已死节点。
-func (n *Notifier) checkGCPStart() {
-	n.mu.Lock()
-	cfg := n.gcpCfg
-	tgCfg := n.cfg
-	n.mu.Unlock()
-	if !cfg.AutoOn {
-		return
-	}
-	rows, err := n.db.Query(
-		`SELECT id, name, gcp_project, gcp_zone, gcp_instance FROM servers WHERE gcp_enabled = 1`)
-	if err != nil {
-		log.Printf("checkGCPStart query: %v", err)
-		return
-	}
-	type target struct{ id, name, project, zone, instance string }
-	var targets []target
-	for rows.Next() {
-		var t target
-		if err := rows.Scan(&t.id, &t.name, &t.project, &t.zone, &t.instance); err == nil {
-			targets = append(targets, t)
-		}
-	}
-	rows.Close()
-
-	now := time.Now()
-	for _, t := range targets {
-		if n.isOnline(t.id) {
-			n.mu.Lock()
-			delete(n.gcp, t.id) // 与 OnOnline 双保险
-			n.mu.Unlock()
-			continue
-		}
-		if t.zone == "" || t.instance == "" {
-			continue
-		}
-		n.mu.Lock()
-		st, ok := n.gcp[t.id]
-		if !ok {
-			n.gcp[t.id] = &gcpState{offlineAt: now}
-			n.mu.Unlock()
-			continue // 刚观察到离线，从此刻起算确认延迟
-		}
-		due, giveUp := gcpDue(st, cfg, now)
-		if giveUp {
-			fire := !st.gaveUp
-			st.gaveUp = true
-			n.mu.Unlock()
-			if fire {
-				n.send(tgCfg, fmt.Sprintf("🛑 GCP 自动开机已停止\n%s 已尝试 %d 次仍未上线，等待人工处理（节点上线后自动复位）",
-					t.name, cfg.MaxTries))
-			}
-			continue
-		}
-		if !due {
-			n.mu.Unlock()
-			continue
-		}
-		st.inFlight = true
-		st.tries++
-		st.lastTry = now
-		tries := st.tries
-		n.mu.Unlock()
-		go n.gcpStartAttempt(t.id, t.name, t.project, t.zone, t.instance, tries, cfg, tgCfg)
-	}
-}
-
-// setGCPErr 记录最近一次错误供前端 tooltip 展示（节点可能已被删/已上线，状态不存在则忽略）。
-func (n *Notifier) setGCPErr(id, msg string) {
-	n.mu.Lock()
-	if st, ok := n.gcp[id]; ok {
-		st.lastErr = msg
-	}
-	n.mu.Unlock()
-}
-
-// gcpStartAttempt 单次自动开机尝试（goroutine，不阻塞 Run 循环）。
-// 先查实例状态：仅 TERMINATED/STOPPED 才开机，RUNNING 说明是 agent/网络问题，不动。
-func (n *Notifier) gcpStartAttempt(id, name, project, zone, instance string, tries int, cfg gcpConfig, tgCfg notifyConfig) {
-	defer func() {
-		n.mu.Lock()
-		if st, ok := n.gcp[id]; ok {
-			st.inFlight = false
-		}
-		n.mu.Unlock()
-	}()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	cli, err := n.getGCPClient()
-	if err != nil {
-		n.setGCPErr(id, err.Error())
-		log.Printf("GCP 自动开机(%s): %v", name, err)
-		return
-	}
-	if project == "" {
-		project = cli.sa.ProjectID
-	}
-	status, err := cli.InstanceStatus(ctx, project, zone, instance)
-	if err != nil {
-		n.setGCPErr(id, "查询实例状态失败: "+err.Error())
-		log.Printf("GCP 自动开机(%s): 查询状态失败: %v", name, err)
-		n.send(tgCfg, fmt.Sprintf("⚠️ GCP 自动开机失败\n%s 第 %d/%d 次：查询实例状态失败：%v", name, tries, cfg.MaxTries, err))
-		return
-	}
-	switch status {
-	case "TERMINATED", "STOPPED":
-		if err := cli.StartInstance(ctx, project, zone, instance); err != nil {
-			n.setGCPErr(id, "instances.start 失败: "+err.Error())
-			log.Printf("GCP 自动开机(%s): start 失败: %v", name, err)
-			n.send(tgCfg, fmt.Sprintf("⚠️ GCP 自动开机失败\n%s 第 %d/%d 次：%v", name, tries, cfg.MaxTries, err))
-			return
-		}
-		n.setGCPErr(id, "")
-		log.Printf("GCP 自动开机(%s): 已调用 instances.start（第 %d/%d 次）", name, tries, cfg.MaxTries)
-		n.send(tgCfg, fmt.Sprintf("🔄 GCP 自动开机\n%s 已调用 instances.start（第 %d/%d 次），等待节点上线", name, tries, cfg.MaxTries))
-	case "RUNNING":
-		n.setGCPErr(id, "实例运行中但节点离线，疑似 agent/网络故障")
-		n.mu.Lock()
-		st, ok := n.gcp[id]
-		fire := ok && !st.warnedRun
-		if ok {
-			st.warnedRun = true
-		}
-		n.mu.Unlock()
-		if fire {
-			n.send(tgCfg, fmt.Sprintf("⚠️ GCP 守护提醒\n%s 实例状态为 RUNNING 但节点离线，可能是 agent 或网络故障，不执行开机", name))
-		}
-	case "SUSPENDED":
-		n.setGCPErr(id, "实例已挂起（SUSPENDED），暂不支持自动恢复")
-		log.Printf("GCP 自动开机(%s): 实例 SUSPENDED，跳过", name)
-	default:
-		// PROVISIONING/STAGING/STOPPING/REPAIRING 等过渡态，冷却后下一轮再看
-		log.Printf("GCP 自动开机(%s): 实例状态 %s，跳过本次", name, status)
-	}
-}
-
-// ManualStartGCP 手动立即开机：忽略冷却、不消耗自动尝试次数，
-// 但记录 lastTry 让自动循环退让一个冷却期，避免背靠背双重 start。
-func (n *Notifier) ManualStartGCP(id, project, zone, instance string) (status string, started bool, err error) {
-	n.mu.Lock()
-	st, ok := n.gcp[id]
-	if ok && st.inFlight {
-		n.mu.Unlock()
-		return "", false, errGCPBusy
-	}
-	if !ok {
-		st = &gcpState{offlineAt: time.Now()}
-		n.gcp[id] = st
-	}
-	st.inFlight = true
-	st.lastTry = time.Now()
-	n.mu.Unlock()
-	defer func() {
-		n.mu.Lock()
-		if st, ok := n.gcp[id]; ok {
-			st.inFlight = false
-			if err != nil {
-				st.lastErr = err.Error()
-			}
-		}
-		n.mu.Unlock()
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cli, err := n.getGCPClient()
-	if err != nil {
-		return "", false, err
-	}
-	if project == "" {
-		project = cli.sa.ProjectID
-	}
-	status, err = cli.InstanceStatus(ctx, project, zone, instance)
-	if err != nil {
-		return "", false, fmt.Errorf("查询实例状态失败: %w", err)
-	}
-	if status == "TERMINATED" || status == "STOPPED" {
-		if err = cli.StartInstance(ctx, project, zone, instance); err != nil {
-			return status, false, err
-		}
-		log.Printf("GCP 手动开机(%s): 已调用 instances.start", instance)
-		return status, true, nil
-	}
-	return status, false, nil
-}
-
-// GCPStatus 导出节点自动开机运行态（内存态，面板重启归零，与冷却一起重置属合理行为）。
-func (n *Notifier) GCPStatus(id string) (tries int, lastTry int64, lastErr string) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	st, ok := n.gcp[id]
-	if !ok {
-		return 0, 0, ""
-	}
-	if !st.lastTry.IsZero() {
-		lastTry = st.lastTry.Unix()
-	}
-	return st.tries, lastTry, st.lastErr
-}
-
 // checkExpiry 到期提醒：到期日在 ExpireDays 天内且尚未就该日期提醒过的服务器推送通知。
 // 已提醒的到期日持久化在 servers.expire_notified（防重启重发）；改到期时间后按新日期重新提醒。
 func (n *Notifier) checkExpiry(cfg notifyConfig) {
@@ -597,20 +365,20 @@ func (s *App) handlePutNotify(w http.ResponseWriter, r *http.Request) {
 		}
 		return "0"
 	}
-	setSetting(s.db, "notify_tg_token", strings.TrimSpace(v.TgToken))
-	setSetting(s.db, "notify_tg_chat", strings.TrimSpace(v.TgChat))
-	setSetting(s.db, "notify_offline", b2s(v.OfflineOn))
-	setSetting(s.db, "notify_offline_delay", strconv.Itoa(clampInt(v.OfflineDelay, 30, 3600, 60)))
-	setSetting(s.db, "notify_load", b2s(v.LoadOn))
-	setSetting(s.db, "notify_cpu", strconv.Itoa(clampInt(v.CPUThreshold, 1, 100, 90)))
-	setSetting(s.db, "notify_mem", strconv.Itoa(clampInt(v.MemThreshold, 1, 100, 90)))
-	setSetting(s.db, "notify_disk", strconv.Itoa(clampInt(v.DiskThreshold, 1, 100, 95)))
-	setSetting(s.db, "notify_load_min", strconv.Itoa(clampInt(v.LoadMinutes, 1, 120, 5)))
-	setSetting(s.db, "notify_net", b2s(v.NetOn))
-	setSetting(s.db, "notify_net_mb", strconv.Itoa(clampInt(v.NetThreshold, 1, 100000, 50)))
-	setSetting(s.db, "notify_net_sec", strconv.Itoa(clampInt(v.NetSeconds, 10, 3600, 60)))
-	setSetting(s.db, "notify_expire", b2s(v.ExpireOn))
-	setSetting(s.db, "notify_expire_days", strconv.Itoa(clampInt(v.ExpireDays, 1, 7, 3)))
+	setSetting(s.db, keyNotifyTgToken, strings.TrimSpace(v.TgToken))
+	setSetting(s.db, keyNotifyTgChat, strings.TrimSpace(v.TgChat))
+	setSetting(s.db, keyNotifyOffline, b2s(v.OfflineOn))
+	setSetting(s.db, keyNotifyOfflineDelay, strconv.Itoa(clampInt(v.OfflineDelay, 30, 3600, 60)))
+	setSetting(s.db, keyNotifyLoad, b2s(v.LoadOn))
+	setSetting(s.db, keyNotifyCPU, strconv.Itoa(clampInt(v.CPUThreshold, 1, 100, 90)))
+	setSetting(s.db, keyNotifyMem, strconv.Itoa(clampInt(v.MemThreshold, 1, 100, 90)))
+	setSetting(s.db, keyNotifyDisk, strconv.Itoa(clampInt(v.DiskThreshold, 1, 100, 95)))
+	setSetting(s.db, keyNotifyLoadMin, strconv.Itoa(clampInt(v.LoadMinutes, 1, 120, 5)))
+	setSetting(s.db, keyNotifyNet, b2s(v.NetOn))
+	setSetting(s.db, keyNotifyNetMB, strconv.Itoa(clampInt(v.NetThreshold, 1, 100000, 50)))
+	setSetting(s.db, keyNotifyNetSec, strconv.Itoa(clampInt(v.NetSeconds, 10, 3600, 60)))
+	setSetting(s.db, keyNotifyExpire, b2s(v.ExpireOn))
+	setSetting(s.db, keyNotifyExpireDays, strconv.Itoa(clampInt(v.ExpireDays, 1, 7, 3)))
 	s.notifier.Reload()
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }

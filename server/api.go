@@ -52,7 +52,7 @@ type publicServer struct {
 
 func (s *App) listPublicServers() ([]publicServer, error) {
 	// 必须在 Query 之前取 setting：rows 未关闭时占用连接，期间再发查询会耗尽连接池
-	interval := getSettingInt(s.db, "report_interval", 2)
+	interval := getSettingInt(s.db, keyReportInterval, 2)
 	rows, err := s.db.Query(
 		`SELECT id, name, grp, region, flag, auto_flag, expire_at, os, arch, virt, cpu_model, cpu_cores,
 		 mem_total, swap_total, disk_total, agent_version FROM servers ORDER BY sort, created_at`)
@@ -94,8 +94,8 @@ func (s *App) handleServers(w http.ResponseWriter, r *http.Request) {
 
 func (s *App) handleSite(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{
-		"name": getSetting(s.db, "site_name", "Moss"),
-		"desc": getSetting(s.db, "site_desc", "轻量服务器监控"),
+		"name": getSetting(s.db, keySiteName, "Moss"),
+		"desc": getSetting(s.db, keySiteDesc, "轻量服务器监控"),
 	})
 }
 

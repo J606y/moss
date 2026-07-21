@@ -82,7 +82,7 @@ func (h *Hub) sampleInterval() time.Duration {
 	if h.siCached > 0 && time.Since(h.siReadAt) < 5*time.Second {
 		return h.siCached
 	}
-	d := time.Duration(getSettingInt(h.db, "sample_interval", 10)) * time.Second
+	d := time.Duration(getSettingInt(h.db, keySampleInterval, 10)) * time.Second
 	h.siCached = d
 	h.siReadAt = time.Now()
 	return d

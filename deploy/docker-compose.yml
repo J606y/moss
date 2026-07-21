@@ -6,7 +6,7 @@
 #   docker compose up -d --build    # 或本地从源码构建启动
 services:
   moss-server:
-    image: ghcr.io/j606y/moss:latest
+    image: ghcr.io/j606y/moss:${MOSS_TAG:-latest} # 生产可在 .env 固定 MOSS_TAG=vX.Y.Z 以便回滚
     build:
       context: ..
       dockerfile: deploy/Dockerfile

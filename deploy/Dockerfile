@@ -24,7 +24,7 @@ COPY --from=web /src/web/dist ./server/dist
 RUN mkdir -p /app-data
 ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
-    go build -tags embed_web -trimpath -ldflags "-s -w" \
+    go build -tags embed_web -trimpath -ldflags "-s -w -X main.serverVersion=${VERSION#v}" \
     -o /out/moss-server ./server
 
 # ---- 阶段3：极小运行镜像（distroless 静态，nonroot）----

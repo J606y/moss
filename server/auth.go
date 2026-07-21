@@ -76,7 +76,7 @@ func gcLoginAttempts(now time.Time) {
 
 // ensurePassword 首次启动时初始化管理密码。
 func (s *App) ensurePassword() {
-	if getSetting(s.db, "password_hash", "") != "" {
+	if getSetting(s.db, keyPasswordHash, "") != "" {
 		return
 	}
 	pwd := os.Getenv("MOSS_ADMIN_PASSWORD")
@@ -89,7 +89,7 @@ func (s *App) ensurePassword() {
 	if err != nil {
 		log.Fatalf("生成密码哈希失败: %v", err)
 	}
-	if err := setSetting(s.db, "password_hash", string(hash)); err != nil {
+	if err := setSetting(s.db, keyPasswordHash, string(hash)); err != nil {
 		log.Fatalf("保存密码失败: %v", err)
 	}
 	if generated {
@@ -103,7 +103,7 @@ func (s *App) ensurePassword() {
 }
 
 func (s *App) checkPassword(pwd string) bool {
-	hash := getSetting(s.db, "password_hash", "")
+	hash := getSetting(s.db, keyPasswordHash, "")
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(pwd)) == nil
 }
 
@@ -129,7 +129,7 @@ func (s *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// 轻量防爆破：固定延迟提高单次试探成本。
 	time.Sleep(300 * time.Millisecond)
-	wantUser := getSetting(s.db, "username", "admin")
+	wantUser := getSetting(s.db, keyUsername, "admin")
 	// 恒定成本校验：无论用户名是否正确都执行一次 bcrypt 比较，
 	// 用户名用常量时间比较，避免用户名枚举的计时侧信道。
 	userOK := subtle.ConstantTimeCompare([]byte(body.Username), []byte(wantUser)) == 1

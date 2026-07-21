@@ -1,17 +1,22 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"flag"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 )
 
-const serverVersion = "1.1.1"
+// serverVersion 发版时由 -ldflags "-X main.serverVersion=..." 注入（见 release.yml / Dockerfile）。
+var serverVersion = "dev"
 
 // App 聚合全局依赖。
 type App struct {
@@ -67,6 +72,8 @@ func main() {
 		log.Fatalf("打开数据库失败: %v", err)
 	}
 	defer db.Close()
+
+	initSecret(*dataDir) // 敏感列（GCP SA 凭证）加密主密钥
 
 	app := &App{db: db, hub: newHub(db), trustProxy: *trustProxy, trustedProxies: parseTrustedProxies(*trustedProxies)}
 	app.notifier = newNotifier(db)
@@ -129,8 +136,30 @@ func main() {
 	// 前端静态资源（SPA 回退）
 	mux.Handle("/", spaHandler(*webDir))
 
-	log.Printf("Moss server v%s 启动，监听 %s", serverVersion, *listen)
-	if err := http.ListenAndServe(*listen, app.apiRateLimit(mux)); err != nil {
-		log.Fatalf("服务退出: %v", err)
+	srv := &http.Server{
+		Addr:    *listen,
+		Handler: app.apiRateLimit(mux),
+		// 挡 Slowloris 慢连接；不设 WriteTimeout，否则会掐断 /api/ws 与
+		// /api/agent/ws 长连接（慢写保护已由各 handler 的 SetWriteDeadline 承担）。
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		log.Printf("Moss server v%s 启动，监听 %s", serverVersion, *listen)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("服务退出: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	log.Println("收到退出信号，优雅关闭中…")
+	shCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shCtx); err != nil {
+		log.Printf("优雅关闭超时: %v", err)
 	}
 }

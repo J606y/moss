@@ -337,13 +337,13 @@ type settingsView struct {
 
 func (s *App) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, settingsView{
-		Username:       getSetting(s.db, "username", "admin"),
-		SiteName:       getSetting(s.db, "site_name", "Moss"),
-		SiteDesc:       getSetting(s.db, "site_desc", "轻量服务器监控"),
-		ReportInterval: getSettingInt(s.db, "report_interval", 2),
-		SampleInterval: getSettingInt(s.db, "sample_interval", 10),
-		HistoryDays:    getSettingInt(s.db, "history_days", 7),
-		PingDays:       getSettingInt(s.db, "ping_days", 7),
+		Username:       getSetting(s.db, keyUsername, "admin"),
+		SiteName:       getSetting(s.db, keySiteName, "Moss"),
+		SiteDesc:       getSetting(s.db, keySiteDesc, "轻量服务器监控"),
+		ReportInterval: getSettingInt(s.db, keyReportInterval, 2),
+		SampleInterval: getSettingInt(s.db, keySampleInterval, 10),
+		HistoryDays:    getSettingInt(s.db, keyHistoryDays, 7),
+		PingDays:       getSettingInt(s.db, keyPingDays, 7),
 	})
 }
 
@@ -375,13 +375,13 @@ func (s *App) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	if v.Username == "" {
 		v.Username = "admin"
 	}
-	setSetting(s.db, "username", v.Username)
-	setSetting(s.db, "site_name", v.SiteName)
-	setSetting(s.db, "site_desc", v.SiteDesc)
-	setSetting(s.db, "report_interval", strconv.Itoa(clampInt(v.ReportInterval, 1, 60, 2)))
-	setSetting(s.db, "sample_interval", strconv.Itoa(clampInt(v.SampleInterval, 5, 3600, 10)))
-	setSetting(s.db, "history_days", strconv.Itoa(clampInt(v.HistoryDays, 1, 365, 7)))
-	setSetting(s.db, "ping_days", strconv.Itoa(clampInt(v.PingDays, 1, 90, 7)))
+	setSetting(s.db, keyUsername, v.Username)
+	setSetting(s.db, keySiteName, v.SiteName)
+	setSetting(s.db, keySiteDesc, v.SiteDesc)
+	setSetting(s.db, keyReportInterval, strconv.Itoa(clampInt(v.ReportInterval, 1, 60, 2)))
+	setSetting(s.db, keySampleInterval, strconv.Itoa(clampInt(v.SampleInterval, 5, 3600, 10)))
+	setSetting(s.db, keyHistoryDays, strconv.Itoa(clampInt(v.HistoryDays, 1, 365, 7)))
+	setSetting(s.db, keyPingDays, strconv.Itoa(clampInt(v.PingDays, 1, 90, 7)))
 	s.pushConfigAll()
 	s.hub.BroadcastMeta()
 	writeJSON(w, 200, map[string]bool{"ok": true})
@@ -406,7 +406,7 @@ func (s *App) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "内部错误")
 		return
 	}
-	setSetting(s.db, "password_hash", string(hash))
+	setSetting(s.db, keyPasswordHash, string(hash))
 	// 修改密码后吊销所有会话
 	s.db.Exec(`DELETE FROM sessions`)
 	writeJSON(w, 200, map[string]bool{"ok": true})

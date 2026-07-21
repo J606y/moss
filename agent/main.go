@@ -7,6 +7,7 @@ import (
 	"flag"
 	"log"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -15,7 +16,8 @@ import (
 	"moss/internal/protocol"
 )
 
-const agentVersion = "1.1.1"
+// agentVersion 发版时由 -ldflags "-X main.agentVersion=..." 注入（见 release.yml）。
+var agentVersion = "dev"
 
 func wsURL(endpoint, token string) (string, error) {
 	endpoint = strings.TrimRight(endpoint, "/")
@@ -46,15 +48,37 @@ func (c *client) send(v any) error {
 	return c.conn.WriteJSON(v)
 }
 
+// resolveToken 按优先级取 token：--token > MOSS_TOKEN 环境变量 > --token-file。
+// 安装脚本改用文件/环境变量，避免 token 出现在进程命令行（ps / schtasks /Query）。
+func resolveToken(token, tokenFile string) string {
+	if token != "" {
+		return token
+	}
+	if v := os.Getenv("MOSS_TOKEN"); v != "" {
+		return v
+	}
+	if tokenFile != "" {
+		b, err := os.ReadFile(tokenFile)
+		if err != nil {
+			log.Fatalf("读取 token 文件失败: %v", err)
+		}
+		return strings.TrimSpace(string(b))
+	}
+	return ""
+}
+
 func main() {
 	endpoint := flag.String("endpoint", "", "服务端地址，如 https://moss.example.com")
-	token := flag.String("token", "", "服务器 token")
+	token := flag.String("token", "", "服务器 token（明文，不推荐；优先用 --token-file 或 MOSS_TOKEN 环境变量）")
+	tokenFile := flag.String("token-file", "", "从文件读取 token（推荐，文件权限设 600）")
 	flag.Parse()
-	if *endpoint == "" || *token == "" {
-		log.Fatal("用法: moss-agent --endpoint <服务端地址> --token <token>")
+
+	tok := resolveToken(*token, *tokenFile)
+	if *endpoint == "" || tok == "" {
+		log.Fatal("用法: moss-agent --endpoint <服务端地址> (--token-file <文件> | --token <token>)")
 	}
 
-	target, err := wsURL(*endpoint, *token)
+	target, err := wsURL(*endpoint, tok)
 	if err != nil {
 		log.Fatalf("地址解析失败: %v", err)
 	}
@@ -67,7 +91,7 @@ func main() {
 			log.Printf("连接中断: %v，%v 后重连", err, backoff)
 		}
 		// 维持过一段在线再断（如服务端重启/部署）属正常掉线 → 退避归零，下次快速重连；
-		// 只有持续连不上（拨号失败/连上即断）才指数退避到 60s，避免雪崩。
+		// 只有持续连不上（拨号失败/连上即断）才线性退避（每次 +3s）到 60s，避免雪崩。
 		if time.Since(start) >= 30*time.Second {
 			backoff = baseBackoff
 		}

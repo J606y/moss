@@ -235,10 +235,10 @@ type gcpConfig struct {
 
 func loadGCPConfig(db *sql.DB) gcpConfig {
 	return gcpConfig{
-		AutoOn:   getSetting(db, "gcp_auto_on", "0") == "1",
-		Delay:    getSettingInt(db, "gcp_start_delay", 120),
-		Cooldown: getSettingInt(db, "gcp_start_cooldown", 300),
-		MaxTries: getSettingInt(db, "gcp_start_max_tries", 3),
+		AutoOn:   getSetting(db, keyGCPAutoOn, "0") == "1",
+		Delay:    getSettingInt(db, keyGCPStartDelay, 120),
+		Cooldown: getSettingInt(db, keyGCPStartCooldown, 300),
+		MaxTries: getSettingInt(db, keyGCPStartMaxTries, 3),
 	}
 }
 
@@ -287,7 +287,7 @@ type gcpSettingsView struct {
 func (s *App) handleGetGCP(w http.ResponseWriter, r *http.Request) {
 	cfg := loadGCPConfig(s.db)
 	v := gcpSettingsView{AutoOn: cfg.AutoOn, Delay: cfg.Delay, Cooldown: cfg.Cooldown, MaxTries: cfg.MaxTries}
-	if raw := getSetting(s.db, "gcp_sa_json", ""); strings.TrimSpace(raw) != "" {
+	if raw := decryptSecret(getSetting(s.db, keyGCPSAJSON, "")); strings.TrimSpace(raw) != "" {
 		v.Configured = true
 		if sa, _, err := parseGCPSA(raw); err == nil {
 			v.ClientEmail = sa.ClientEmail
@@ -311,29 +311,29 @@ func (s *App) handlePutGCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if f.ClearSa {
-		setSetting(s.db, "gcp_sa_json", "")
+		setSetting(s.db, keyGCPSAJSON, "")
 	} else if sa := strings.TrimSpace(f.SaJSON); sa != "" {
 		if _, _, err := parseGCPSA(sa); err != nil {
 			writeErr(w, 400, "凭证无效: "+err.Error())
 			return
 		}
-		setSetting(s.db, "gcp_sa_json", sa)
+		setSetting(s.db, keyGCPSAJSON, encryptSecret(sa)) // 私钥加密落库
 	} // 留空且未清除 = 保留旧凭证
 	on := "0"
 	if f.AutoOn {
 		on = "1"
 	}
-	setSetting(s.db, "gcp_auto_on", on)
-	setSetting(s.db, "gcp_start_delay", strconv.Itoa(clampInt(f.Delay, 60, 3600, 120)))
-	setSetting(s.db, "gcp_start_cooldown", strconv.Itoa(clampInt(f.Cooldown, 60, 3600, 300)))
-	setSetting(s.db, "gcp_start_max_tries", strconv.Itoa(clampInt(f.MaxTries, 1, 10, 3)))
+	setSetting(s.db, keyGCPAutoOn, on)
+	setSetting(s.db, keyGCPStartDelay, strconv.Itoa(clampInt(f.Delay, 60, 3600, 120)))
+	setSetting(s.db, keyGCPStartCooldown, strconv.Itoa(clampInt(f.Cooldown, 60, 3600, 300)))
+	setSetting(s.db, keyGCPStartMaxTries, strconv.Itoa(clampInt(f.MaxTries, 1, 10, 3)))
 	s.notifier.Reload()
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
 // handleTestGCP 用当前保存的凭证真实换一次 access token，验证凭证可用。
 func (s *App) handleTestGCP(w http.ResponseWriter, r *http.Request) {
-	raw := getSetting(s.db, "gcp_sa_json", "")
+	raw := decryptSecret(getSetting(s.db, keyGCPSAJSON, ""))
 	if strings.TrimSpace(raw) == "" {
 		writeErr(w, 400, "请先粘贴并保存 Service Account 凭证")
 		return

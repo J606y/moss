@@ -42,19 +42,40 @@ else
   URL="https://github.com/${REPO}/releases/download/${VERSION}/moss-agent-${OS}-${ARCH}"
 fi
 
+sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+
 echo "下载 ${URL} ..."
 curl -fsSL -o /tmp/moss-agent "$URL"
+
+# 完整性校验：release 附带 SHA256SUMS。缺失（老版本 release）则告警但继续，不匹配则终止。
+EXPECT="$(curl -fsSL "${URL%/*}/SHA256SUMS" 2>/dev/null | grep "moss-agent-${OS}-${ARCH}\$" | awk '{print $1}')"
+if [ -n "$EXPECT" ]; then
+  ACTUAL="$(sha256 /tmp/moss-agent)"
+  if [ "$EXPECT" != "$ACTUAL" ]; then
+    rm -f /tmp/moss-agent
+    echo "❌ 校验和不匹配，终止安装（期望 $EXPECT，实际 $ACTUAL）"; exit 1
+  fi
+  echo "✅ 校验和匹配"
+else
+  echo "⚠️  未获取到 SHA256SUMS，跳过完整性校验"
+fi
+
 chmod +x /tmp/moss-agent
 $SUDO mv /tmp/moss-agent "$BIN"
 
 if [[ "$OS" == "linux" ]] && command -v systemctl >/dev/null; then
+  # token 写入受限环境文件（600, root），不出现在 unit / 进程命令行 / ps 输出中
+  $SUDO install -m 600 /dev/null /etc/moss-agent.env
+  printf 'MOSS_TOKEN=%s\n' "$TOKEN" | $SUDO tee /etc/moss-agent.env >/dev/null
   $SUDO tee /etc/systemd/system/moss-agent.service >/dev/null <<EOF
 [Unit]
 Description=Moss Agent
+Wants=network-online.target
 After=network-online.target
 
 [Service]
-ExecStart=${BIN} --endpoint ${ENDPOINT} --token ${TOKEN}
+EnvironmentFile=/etc/moss-agent.env
+ExecStart=${BIN} --endpoint ${ENDPOINT}
 Restart=always
 RestartSec=5
 
@@ -71,6 +92,10 @@ EOF
 elif [[ "$OS" == "darwin" ]]; then
   PLIST="$HOME/Library/LaunchAgents/com.moss.agent.plist"
   mkdir -p "$(dirname "$PLIST")"
+  # token 写入受限文件（600），plist 用 --token-file 引用，命令行不出现 token
+  TOKEN_FILE="$HOME/Library/Application Support/moss-agent/token"
+  mkdir -p "$(dirname "$TOKEN_FILE")"
+  ( umask 077; printf '%s' "$TOKEN" > "$TOKEN_FILE" )
   cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -79,7 +104,7 @@ elif [[ "$OS" == "darwin" ]]; then
   <key>ProgramArguments</key><array>
     <string>${BIN}</string>
     <string>--endpoint</string><string>${ENDPOINT}</string>
-    <string>--token</string><string>${TOKEN}</string>
+    <string>--token-file</string><string>${TOKEN_FILE}</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
