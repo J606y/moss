@@ -2,6 +2,28 @@
 
 本项目所有重要变更都会记录在此文件，遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## v1.2.0 - 2026-07-22
+
+本次为一轮代码质量审计后的集中整改：安全加固、生产健壮性与大规模内部重构，均经构建、单元测试与运行验证，对用户可见行为保持不变。
+
+### 安全
+- **GCP Service Account 私钥改为加密存储**：此前整份 SA JSON（含 RSA 私钥）以明文存于 SQLite，`moss.db` 一旦泄露即等于云项目被接管。现改用 AES-256-GCM 加密，主密钥取环境变量 `MOSS_SECRET_KEY`，未设置时首启自动生成 `data/secret.key`（0600，与数据库分离）。历史明文凭证自动兼容读取，下次在面板保存即升级为密文，升级零操作。
+- **agent token 不再明文暴露于进程命令行**：此前 token 直接拼进 systemd unit（世界可读 644）/ launchd plist / Windows 计划任务，`ps`、`schtasks /Query` 等可读取，被监控机上任意用户可窃取。现三端改为受限文件传递——Linux 用 `EnvironmentFile`(600)、macOS 用 `umask 077` 令牌文件、Windows 用 `icacls` 锁定仅 SYSTEM/Administrators 可读；agent 新增 `--token-file` 与 `MOSS_TOKEN` 支持（旧 `--token` 仍兼容）。
+- **发布二进制新增 SHA256 校验和**：release 产物附带 `SHA256SUMS`，安装脚本下载后核对，不匹配即终止安装，堵住 release 资产被篡改的供应链风险（旧版本 release 无此文件时告警但继续）。
+
+### 稳定性
+- **服务端 HTTP 加超时与优雅关闭**：此前裸 `ListenAndServe` 无任何超时（Slowloris 慢连接可耗尽连接），且 SIGTERM 会硬杀进程使 WAL 可能未 checkpoint。现设 `ReadHeaderTimeout`/`IdleTimeout`（不设 `WriteTimeout` 以保 WebSocket 长连接），并在 SIGINT/SIGTERM 时 `Shutdown` 优雅退出，确保数据库正常收尾。
+- **agent 公网 IP / GeoIP 查询加进程内缓存**（30 分钟 TTL）：此前每次（重）连都重新外呼免费 GeoIP 接口，掉线抖动时数秒一轮，易被 ip-api（45 次/分）限流导致国旗时有时无。现缓存命中直接复用，仅 IP 拿到后刷新。
+
+### 重构（内部质量，行为不变）
+- **后端**：`notify.go` 拆出整套 GCP 自动开机编排到 `gcp_autostart.go`（629→341 行），告警引擎与云编排分家；自动 / 手动开机的重复流程抽公共函数去重；40+ 处散落的设置项 key 集中为常量，杜绝写入 / 读取端拼写漂移导致的静默失效。
+- **前端**：`Admin.tsx` 从 1669 行的「上帝文件」拆分为可复用 UI 组件库（`components/ui/`）+ 各功能页独立模块（`pages/admin/`），主文件回落到 ~120 行的路由壳；抽出拖拽排序 / 乐观更新公共 hook 消除 Tab 间复制粘贴；`TabButton` 提到模块顶层修复重渲染反模式；服务器详情页的昂贵图表派生改 `useMemo`，实时数据流去除对共享对象的原地修改（修复在线时长可能陈旧的隐患）；全站配色集中到 `tokens.ts`。
+- **CI / 发版**：CI 新增 `go test ./...` 作为回归网；二进制版本号改由构建时 `-ldflags -X` 注入（本地 `go build` 显示 `dev`，正式版本由 CI 发版注入）；`docker-compose` / `moss.sh` 镜像标签支持 `MOSS_TAG` 固定以便回滚。
+
+### 升级提醒
+- **服务端**：首次启动会在数据目录生成 `secret.key` 用于加密 GCP 凭证；若改用 `MOSS_SECRET_KEY` 环境变量，请保证其**稳定不变**——更换会导致已加密凭证无法解密，需在面板重新粘贴 SA。
+- **agent**：token 安全加固与 GeoIP 缓存在 **agent 端**，需**更新各监控机上的 agent 二进制**方可生效（仅更新服务端无效）；旧 agent 继续可用。
+
 ## v1.1.1 - 2026-07-21
 
 ### 体验
