@@ -1,5 +1,10 @@
 export const card = 'glass rounded-2xl'
 
+// 毛玻璃面板：弹窗 / 下拉等浮层共用的边框 + 背景 + 阴影 + 模糊底座。
+// 各处在此基础上追加尺寸、圆角、定位等类名（Modal / Select 下拉）。
+export const glassPanel =
+  'glass-sheen border border-white/50 bg-white/80 shadow-2xl backdrop-blur-2xl dark:border-white/10 dark:bg-zinc-900/80'
+
 export const btnPrimary =
   'inline-flex items-center gap-1.5 rounded-xl border border-emerald-400/40 bg-emerald-500/85 px-3 py-1.5 text-sm font-medium text-white shadow-lg shadow-emerald-500/20 backdrop-blur-md transition hover:bg-emerald-500 dark:border-emerald-400/25 dark:bg-emerald-500/75 dark:hover:bg-emerald-500/90'
 

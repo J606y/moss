@@ -129,20 +129,19 @@ function connect() {
     }
     if (msg.type === 'stats' && msg.id && msg.stats) {
       stats[msg.id] = msg.stats // 每次都是新对象，作为 useLiveStats 的快照
-      const meta = servers.find((s) => s.id === msg.id)
-      let flipped = false
-      if (meta) {
-        if (!meta.online) flipped = true // 识别 离线→在线 翻转
-        meta.online = true
-        meta.uptimeSec = msg.uptimeSec ?? meta.uptimeSec
+      const idx = servers.findIndex((s) => s.id === msg.id)
+      if (idx >= 0) {
+        const meta = servers[idx]
+        // 产出新的 meta 对象并只替换数组中的该项（换数组引用），使 useServers 快照能感知
+        // online / uptimeSec 变化；其余各台保持原对象引用，memo 化的卡片/行不会被误伤重渲染。
+        const next = servers.slice()
+        next[idx] = { ...meta, online: true, uptimeSec: msg.uptimeSec ?? meta.uptimeSec }
+        servers = next
       }
       pushBuf(msg.id, msg.stats, msg.time)
       emitStat(msg.id) // 只重渲染这一台的卡片/行/详情页
       emitAgg() // StatsBar 全局合计（单组件）
-      if (flipped) {
-        servers = [...servers] // 翻转：换数组引用，让 useServers 重排序
-        emitList()
-      }
+      emitList() // servers 引用已更新：通知 useServers 感知在线时长/上线翻转（含重排序）
     } else {
       // online / offline / meta：服务器列表或状态变化，整体刷新
       fetchServers()

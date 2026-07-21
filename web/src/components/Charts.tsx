@@ -1,14 +1,10 @@
 import type { ReactNode } from 'react'
 import { fmtDateTime } from '../utils/format'
 import { card } from '../ui'
+import { axisStroke } from '../tokens'
 
-export const palette = {
-  green: '#10b981',
-  sky: '#0ea5e9',
-  amber: '#f59e0b',
-  rose: '#f43f5e',
-  violet: '#8b5cf6',
-}
+// 色板与网格色统一收敛到 tokens.ts，这里透传给既有消费方（ServerDetail 等）
+export { gridStroke, palette } from '../tokens'
 
 /** Recharts 自定义 Tooltip，适配明暗主题 */
 export function ChartTip({
@@ -73,10 +69,8 @@ export function ChartCard({
 }
 
 export const axisProps = {
-  stroke: '#71717a',
+  stroke: axisStroke,
   fontSize: 11,
   tickLine: false,
   axisLine: false,
 } as const
-
-export const gridStroke = '#88888830'

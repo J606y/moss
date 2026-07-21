@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Activity, ArrowDown, ArrowUp, ChevronLeft, Radar } from 'lucide-react'
 import {
@@ -16,12 +16,13 @@ import {
 import { ensureBuf, getLiveBuf, pct, serversReady, useLiveStats, useServers } from '../api/store'
 import { get } from '../api/client'
 import type { HistoryPoint, PingData } from '../types'
-import { StatusPill } from '../components/ServerCard'
+import { StatusPill } from '../components/ui'
 import { ProgressBar, barColor, clampPct } from '../components/ProgressBar'
 import Flag from '../components/Flag'
 import Ticker from '../components/Ticker'
 import { axisProps, ChartCard, ChartTip, gridStroke, palette, SeriesChips } from '../components/Charts'
 import { fmtAxisTime, fmtBytes, fmtDateTime, fmtPercent, fmtSpeed, fmtTime, fmtUptime } from '../utils/format'
+import { brushFill, brushStroke, pingPalette, timelineStroke } from '../tokens'
 import { card } from '../ui'
 
 const ranges = [
@@ -73,8 +74,6 @@ function GaugeCard({
     </div>
   )
 }
-
-const pingPalette = ['#10b981', '#0ea5e9', '#f59e0b', '#8b5cf6', '#f43f5e', '#14b8a6']
 
 export default function ServerDetail() {
   const { id } = useParams<{ id: string }>()
@@ -133,6 +132,52 @@ export default function ServerDetail() {
     if (id) ensureBuf(id)
   }, [id])
 
+  // 以下派生在实时模式每 ~2s 轮询 + tick 下高频重渲染，统一用 useMemo 缓存，
+  // 仅在真正的输入变化时重算（计算逻辑与缓存前完全一致）。
+  // hooks 须在 early return 之前无条件调用，故这里对 server 缺省做内部兜底。
+
+  // 按刷选窗口过滤数据
+  const winFilter = <T extends { time: number }>(arr: T[]): T[] =>
+    timeWin ? arr.filter((d) => d.time >= timeWin[0] && d.time <= timeWin[1]) : arr
+
+  // 实时模式下浅拷贝缓冲数组（st 每 tick 换新引用，作为「缓冲已更新」信号驱动重算）；
+  // 历史模式按刷选窗口裁剪 history。
+  const histView = useMemo(
+    () => (server ? (isLive ? [...getLiveBuf(server.id)] : winFilter(history)) : []),
+    // st 作为实时缓冲更新信号；winFilter 仅依赖 timeWin，已在依赖中体现
+    [server, isLive, history, timeWin, st], // eslint-disable-line react-hooks/exhaustive-deps
+  )
+
+  // 实时模式：延迟图只展示最近 5 分钟。锚定到最新数据点的时间（而非浏览器 Date.now），
+  // 避免浏览器与服务端时钟偏差导致窗口整体错位、把点全滤掉。
+  const LIVE_PING_WIN_MS = 5 * 60_000
+  const pingMaxTime = useMemo(() => {
+    let m = 0
+    if (isLive)
+      for (const k in pingData.series) for (const p of pingData.series[k]) if (p.time > m) m = p.time
+    return m
+  }, [isLive, pingData])
+
+  const pingStats = useMemo(() => {
+    const liveCut = pingMaxTime - LIVE_PING_WIN_MS
+    const liveTrim = <T extends { time: number }>(arr: T[]): T[] =>
+      isLive && pingMaxTime ? arr.filter((d) => d.time >= liveCut) : arr
+    return pingData.tasks.map((t, i) => {
+      const pts = liveTrim(winFilter(pingData.series[String(t.id)] ?? []))
+      const vals = pts.map((p) => p.ms).filter((v): v is number => v != null)
+      return {
+        id: t.id,
+        name: t.name,
+        color: pingPalette[i % pingPalette.length],
+        pts,
+        cur: vals.length ? vals[vals.length - 1] : null,
+        avg: vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0,
+        loss: pts.length ? ((pts.length - vals.length) / pts.length) * 100 : 0,
+      }
+    })
+    // winFilter 依赖 timeWin，已在依赖中体现
+  }, [pingData, isLive, pingMaxTime, timeWin]) // eslint-disable-line react-hooks/exhaustive-deps
+
   if (!server) {
     // 列表尚未首次拉取完成时先显示「加载中」，避免刷新瞬间 serverList 为空被误判为「未找到」
     if (!serversReady()) {
@@ -156,12 +201,6 @@ export default function ServerDetail() {
     const d = new Date(t)
     return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
   }
-
-  // 按刷选窗口过滤数据
-  const winFilter = <T extends { time: number }>(arr: T[]): T[] =>
-    timeWin ? arr.filter((d) => d.time >= timeWin[0] && d.time <= timeWin[1]) : arr
-  // 实时模式下浅拷贝缓冲数组，保证每次 tick 触发图表更新
-  const histView = isLive ? [...getLiveBuf(server.id)] : winFilter(history)
 
   const onBrush = (range: { startIndex?: number; endIndex?: number }) => {
     if (range?.startIndex == null || range?.endIndex == null) return
@@ -204,9 +243,9 @@ export default function ServerDetail() {
             <Area
               type="monotone"
               dataKey="cpu"
-              stroke="#71717a"
+              stroke={timelineStroke}
               strokeWidth={1}
-              fill="#71717a"
+              fill={timelineStroke}
               fillOpacity={0.12}
               dot={false}
               isAnimationActive={false}
@@ -216,8 +255,8 @@ export default function ServerDetail() {
               dataKey="time"
               height={26}
               travellerWidth={8}
-              stroke="#10b981"
-              fill="rgba(120,120,128,0.12)"
+              stroke={brushStroke}
+              fill={brushFill}
               tickFormatter={brushTf}
               onChange={onBrush}
             />
@@ -226,31 +265,6 @@ export default function ServerDetail() {
       </div>
     </div>
   )
-
-  // 实时模式：延迟图只展示最近 5 分钟。锚定到最新数据点的时间（而非浏览器 Date.now），
-  // 避免浏览器与服务端时钟偏差导致窗口整体错位、把点全滤掉。
-  const LIVE_PING_WIN_MS = 5 * 60_000
-  let pingMaxTime = 0
-  if (isLive)
-    for (const k in pingData.series)
-      for (const p of pingData.series[k]) if (p.time > pingMaxTime) pingMaxTime = p.time
-  const liveCut = pingMaxTime - LIVE_PING_WIN_MS
-  const liveTrim = <T extends { time: number }>(arr: T[]): T[] =>
-    isLive && pingMaxTime ? arr.filter((d) => d.time >= liveCut) : arr
-
-  const pingStats = pingData.tasks.map((t, i) => {
-    const pts = liveTrim(winFilter(pingData.series[String(t.id)] ?? []))
-    const vals = pts.map((p) => p.ms).filter((v): v is number => v != null)
-    return {
-      id: t.id,
-      name: t.name,
-      color: pingPalette[i % pingPalette.length],
-      pts,
-      cur: vals.length ? vals[vals.length - 1] : null,
-      avg: vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0,
-      loss: pts.length ? ((pts.length - vals.length) / pts.length) * 100 : 0,
-    }
-  })
 
   return (
     <div className="space-y-4">

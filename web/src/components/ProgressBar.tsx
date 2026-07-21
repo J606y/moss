@@ -1,7 +1,9 @@
+import { barColors } from '../tokens'
+
 export function barColor(pct: number): string {
-  if (pct < 60) return '#10b981'
-  if (pct < 85) return '#f59e0b'
-  return '#f43f5e'
+  if (pct < 60) return barColors.ok
+  if (pct < 85) return barColors.warn
+  return barColors.danger
 }
 
 /** 把任意输入钳制到 0~100，非有限值（NaN/Infinity）兜底为 0 */
