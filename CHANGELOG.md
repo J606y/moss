@@ -2,6 +2,15 @@
 
 本项目所有重要变更都会记录在此文件，遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## v1.2.2 - 2026-07-23
+
+### 修复
+- **Windows agent 首次安装中途中止**：安装脚本在 `$ErrorActionPreference = "Stop"` 下，首装时 `schtasks /End` 对尚不存在的计划任务写 stderr，被 PowerShell 5.1 转成终止性 `NativeCommandError`（`2>$null` 拦不住），导致脚本在创建任务前退出——二进制虽已下载，但计划任务未注册、agent 未启动。现将清理旧任务的两步临时降级为 `Continue`。仅影响全新机器首次安装（重装时任务已存在故一直未暴露）。
+- **重装时 token 文件覆盖写被拒**：上一次安装（即使中途失败）已用 `icacls` 把 `token` 文件收紧为只读，重跑时 `Set-Content` 覆盖写触发 `UnauthorizedAccessException：访问被拒绝`。现在写入前若文件已存在，先恢复 Administrators 完全控制，写完再统一收紧权限，保证安装可重复执行。
+
+### 升级提醒
+- 本次仅改 Windows 安装脚本（`server/install/install.ps1`），需将新脚本**重新部署到安装端点**（`install.ps1` 静态文件）方可生效；已装好的 agent 无需更新。
+
 ## v1.2.1 - 2026-07-22
 
 ### 体验

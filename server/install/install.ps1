@@ -48,13 +48,24 @@ if ($expect) {
 
 # token 写入受限文件（仅 SYSTEM 与 Administrators 可读），避免出现在计划任务命令行 / schtasks /Query /V
 $tokenPath = "$dir\token"
+# 上次安装若已把 token 收紧成只读（仅 R），覆盖写会被拒。先给管理员组恢复完全控制，
+# 保证重装可重复执行；写完后第 52 行会再统一收紧权限。
+if (Test-Path $tokenPath) {
+  $ErrorActionPreference = "Continue"
+  icacls $tokenPath /grant "Administrators:(F)" 2>$null | Out-Null
+  $ErrorActionPreference = "Stop"
+}
 Set-Content -Path $tokenPath -Value $Token -NoNewline -Encoding ascii
 icacls $tokenPath /inheritance:r /grant "SYSTEM:R" "Administrators:R" | Out-Null
 
 # 注册为开机自启计划任务（SYSTEM 账户运行，ICMP 探测需要该权限）
 $taskName = "MossAgent"
+# 首次安装时任务不存在，schtasks 会往 stderr 写「找不到文件」；在 Stop 模式下这会被
+# 当成终止性 NativeCommandError（2>$null 也拦不住），导致任务未创建就退出。故临时降级。
+$ErrorActionPreference = "Continue"
 schtasks /End /TN $taskName 2>$null | Out-Null
 schtasks /Delete /TN $taskName /F 2>$null | Out-Null
+$ErrorActionPreference = "Stop"
 schtasks /Create /TN $taskName /SC ONSTART /RU SYSTEM /RL HIGHEST /F `
   /TR "`"$bin`" --endpoint `"$Endpoint`" --token-file `"$tokenPath`"" | Out-Null
 schtasks /Run /TN $taskName | Out-Null
