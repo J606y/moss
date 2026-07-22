@@ -2,6 +2,11 @@
 
 本项目所有重要变更都会记录在此文件，遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## v1.2.4 - 2026-07-23
+
+### 修复
+- **Windows agent 满 3 天被计划任务强杀**：计划任务的 `ExecutionTimeLimit` 默认为 `PT72H`（3 天），到点 Task Scheduler 会杀掉 agent 进程，而 `ONSTART` 触发器要等下次开机才再拉起 → agent 静默掉线数天。此坑自最初的 schtasks 版本即存在，仅因未有 Windows agent 连续运行超 3 天而未暴露。现注册任务时显式设 `-ExecutionTimeLimit ([TimeSpan]::Zero)`（即 `PT0S`），令 agent 无限常驻。
+
 ## v1.2.3 - 2026-07-23
 
 ### 修复

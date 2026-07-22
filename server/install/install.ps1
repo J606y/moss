@@ -70,7 +70,9 @@ if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
 $action    = New-ScheduledTaskAction -Execute $bin -Argument "--endpoint `"$Endpoint`" --token-file `"$tokenPath`""
 $trigger   = New-ScheduledTaskTrigger -AtStartup
 $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-$settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+# ExecutionTimeLimit 默认 PT72H：满 3 天 Task Scheduler 会杀掉 agent，而 ONSTART 要等
+# 下次开机才再拉起 → 静默掉线。设为 0（PT0S）表示无限运行，agent 常驻不被杀。
+$settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
 Start-ScheduledTask -TaskName $taskName
 
