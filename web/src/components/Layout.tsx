@@ -21,8 +21,10 @@ function Clock() {
 export default function Layout() {
   const { mode, cycle } = useTheme()
   const themeTitle = mode === 'auto' ? '主题：跟随系统' : mode === 'light' ? '主题：浅色' : '主题：深色'
+  // 根容器 pt 预留状态栏安全区高度：让 dock 的常规流占位盒随内容整体下移，
+  // 避免 sticky dock 在滚动到顶时压住下方卡片（非 iOS 独立模式该 inset 为 0）
   return (
-    <div className="flex min-h-screen flex-col">
+    <div className="flex min-h-screen flex-col pt-[env(safe-area-inset-top)]">
       {/* 背景彩色光斑，透过玻璃面板产生液态质感 */}
       <div className="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
         <div className="animate-drift-a absolute -left-56 -top-56 h-[30rem] w-[30rem] rounded-full bg-emerald-400/20 blur-3xl dark:bg-emerald-500/8" />
