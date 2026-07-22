@@ -31,7 +31,8 @@ export default function Layout() {
         <div className="animate-drift-d absolute -bottom-32 -right-32 h-[28rem] w-[28rem] rounded-full bg-pink-400/25 blur-3xl dark:bg-pink-500/10" />
       </div>
 
-      <header className="sticky top-3 z-40 px-3 sm:px-4">
+      {/* 顶部 dock 栏：状态栏铺满后画布从屏幕最顶开始，故 top 额外加上 safe-area-inset-top 让 dock 视觉位置保持不变（非 iOS 独立模式该值为 0） */}
+      <header className="sticky top-[calc(0.75rem_+_env(safe-area-inset-top))] z-40 px-3 sm:px-4">
         <div className="glass mx-auto flex h-14 max-w-7xl items-center justify-between rounded-2xl px-4">
           <Link to="/" className="flex items-center gap-2">
             <MossEye className="h-6 w-6" />
