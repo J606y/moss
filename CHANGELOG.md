@@ -2,6 +2,15 @@
 
 本项目所有重要变更都会记录在此文件，遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## v1.2.3 - 2026-07-23
+
+### 修复
+- **Windows agent 计划任务创建失败（安装假成功）**：安装脚本用 `schtasks /Create /TR "..."` 注册任务时，二进制装在含空格的路径下（如 `C:\Program Files (x86)\moss-agent`），PowerShell 5.1 对原生命令的嵌套引号转义损坏，schtasks 在空格处把路径切开、报「无效参数 - 'Files'」，任务未创建；后续 `/Run` 找不到任务，但脚本仍打印「✅ 已安装」形成假成功。现改用 `Register-ScheduledTask` cmdlet（`-Execute` / `-Argument` 分离传参），路径含空格也能正确注册；并移除对 `schtasks` 原生 stderr 的 `Continue` 降级 hack，改由 cmdlet 的 `-ErrorAction` 处理。
+
+### 升级提醒
+- 仍仅改 Windows 安装脚本（内嵌于 server 二进制）：把 server 更新到 v1.2.3 并重启即生效，随后在目标机重跑安装命令即可。
+- 计划任务改用 `ScheduledTasks` 模块 cmdlet，要求 Windows 8 / Server 2012 及以上（PowerShell 3.0+）；更老系统如仍需支持请告知。
+
 ## v1.2.2 - 2026-07-23
 
 ### 修复

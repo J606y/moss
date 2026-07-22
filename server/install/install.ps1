@@ -58,16 +58,20 @@ if (Test-Path $tokenPath) {
 Set-Content -Path $tokenPath -Value $Token -NoNewline -Encoding ascii
 icacls $tokenPath /inheritance:r /grant "SYSTEM:R" "Administrators:R" | Out-Null
 
-# 注册为开机自启计划任务（SYSTEM 账户运行，ICMP 探测需要该权限）
+# 注册为开机自启计划任务（SYSTEM 账户运行，ICMP 探测需要该权限）。
+# 用 ScheduledTasks cmdlet 而非 schtasks.exe：-Execute / -Argument 分离传参，
+# 二进制路径含空格（如 C:\Program Files (x86)\…）也不会被切开，避开 PowerShell 5.1
+# 对原生命令嵌套引号转义损坏的坑（schtasks /TR 会把带空格路径拆成多个参数而报错）。
 $taskName = "MossAgent"
-# 首次安装时任务不存在，schtasks 会往 stderr 写「找不到文件」；在 Stop 模式下这会被
-# 当成终止性 NativeCommandError（2>$null 也拦不住），导致任务未创建就退出。故临时降级。
-$ErrorActionPreference = "Continue"
-schtasks /End /TN $taskName 2>$null | Out-Null
-schtasks /Delete /TN $taskName /F 2>$null | Out-Null
-$ErrorActionPreference = "Stop"
-schtasks /Create /TN $taskName /SC ONSTART /RU SYSTEM /RL HIGHEST /F `
-  /TR "`"$bin`" --endpoint `"$Endpoint`" --token-file `"$tokenPath`"" | Out-Null
-schtasks /Run /TN $taskName | Out-Null
+# 升级/重装：先停掉旧任务实例（存在才停）；下面 Register -Force 会覆盖旧定义
+if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+  Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+}
+$action    = New-ScheduledTaskAction -Execute $bin -Argument "--endpoint `"$Endpoint`" --token-file `"$tokenPath`""
+$trigger   = New-ScheduledTaskTrigger -AtStartup
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+$settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+Start-ScheduledTask -TaskName $taskName
 
 Write-Host "✅ 已安装并启动 Moss Agent（计划任务，开机自启）"
