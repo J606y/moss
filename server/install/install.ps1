@@ -72,7 +72,9 @@ $trigger   = New-ScheduledTaskTrigger -AtStartup
 $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 # ExecutionTimeLimit 默认 PT72H：满 3 天 Task Scheduler 会杀掉 agent，而 ONSTART 要等
 # 下次开机才再拉起 → 静默掉线。设为 0（PT0S）表示无限运行，agent 常驻不被杀。
-$settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)
+# RestartCount/RestartInterval：agent 进程异常退出后每 1 分钟自动重拉（最多多次），
+# 不必等下次开机，进一步缩小崩溃后的掉线窗口。
+$settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
 Start-ScheduledTask -TaskName $taskName
 
