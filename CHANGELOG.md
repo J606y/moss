@@ -2,39 +2,25 @@
 
 本项目所有重要变更都会记录在此文件，遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## v1.2.5 - 2026-07-23
+## v1.3.0 - 2026-07-23
+
+本次把此前 v1.2.2 ~ v1.2.5 的一系列修复统一整理发布（这些中间版本已撤销，内容并入本版）。
 
 ### 修复
-- **移动端服务器卡片被超长主机名撑大**：卡片标题里的名字 `<span>` 虽带 `truncate`（`overflow:hidden; white-space:nowrap`），但作为 flex 子项未显式设 `min-width:0`。桌面 Chrome 遵守「`overflow` 非 `visible` 时 flex 子项自动最小尺寸为 0」而正常截断，移动 Safari 不严格遵守、把子项最小宽度当成文字全宽，长主机名撑开卡片 min-content，令网格单列（auto 轨道）超出容器宽度、横向撑大并出现横向滚动。现给名字 span 加 `min-w-0`，长名字正确以 `…` 截断，短名字观感不变。
-
-### 升级提醒
-- 纯前端改动：需重新构建前端并将 server 更新到 v1.2.5 重启即生效（前端产物随 server 二进制内嵌）。
-
-## v1.2.4 - 2026-07-23
-
-### 修复
-- **Windows agent 满 3 天被计划任务强杀**：计划任务的 `ExecutionTimeLimit` 默认为 `PT72H`（3 天），到点 Task Scheduler 会杀掉 agent 进程，而 `ONSTART` 触发器要等下次开机才再拉起 → agent 静默掉线数天。此坑自最初的 schtasks 版本即存在，仅因未有 Windows agent 连续运行超 3 天而未暴露。现注册任务时显式设 `-ExecutionTimeLimit ([TimeSpan]::Zero)`（即 `PT0S`），令 agent 无限常驻。
+- **Windows agent 安装与常驻可靠性系列修复**（合并数次安装脚本迭代，最终态）：
+  - **首次安装中途中止**：脚本在 `$ErrorActionPreference = "Stop"` 下，首装时 `schtasks /End` 对尚不存在的任务写 stderr，被 PowerShell 5.1 转成终止性 `NativeCommandError`（`2>$null` 拦不住），脚本在创建任务前退出——二进制已下载但计划任务未注册、agent 未启动（仅影响全新机器首装）。已将清理旧任务的两步临时降级为 `Continue`。
+  - **重装时 token 文件覆盖写被拒**：上次安装已用 `icacls` 把 `token` 收紧只读，重跑 `Set-Content` 触发 `UnauthorizedAccessException：访问被拒绝`。现写入前若文件已存在先恢复 Administrators 完全控制，写完再统一收紧，保证安装可重复执行。
+  - **含空格路径注册失败（安装假成功）**：`schtasks /Create /TR "..."` 在含空格路径（如 `C:\Program Files (x86)\moss-agent`）下，PowerShell 5.1 嵌套引号转义损坏、路径被切开报「无效参数 - 'Files'」，任务未创建却仍打印「✅ 已安装」。改用 `Register-ScheduledTask` cmdlet（`-Execute` / `-Argument` 分离传参）正确注册。
+  - **agent 满 3 天被计划任务强杀**：`ExecutionTimeLimit` 默认 `PT72H`（3 天），到点 Task Scheduler 杀掉 agent，而 `ONSTART` 触发器要等下次开机才再拉起 → 静默掉线数天。现显式设 `ExecutionTimeLimit=0`（`PT0S`）令 agent 无限常驻。
+- **移动端服务器卡片被超长内容撑大 / 整页横向溢出**：卡片名字 `<span>`（flex 子项）与第二行系统信息（block + `truncate`）在移动端会把卡片撑过视口。根因是移动端网格 `grid gap-4 sm:grid-cols-2 …` 在 base 断点无列定义、退化为**隐式 `auto` 列**，被子元素 `nowrap` 全宽内容撑开（实测视口 390 → documentScrollWidth 513）；桌面 `sm:grid-cols-2`＝`minmax(0,1fr)`（min 0）不受影响。现给网格补 `grid-cols-1`（＝`repeat(1,minmax(0,1fr))`）把移动端单列约束到视口，并给名字 span 加 `min-w-0`，长名字 / 长系统信息正确以 `…` 截断。
 
 ### 增强
-- **Windows agent 进程崩溃自动重启**：计划任务新增失败自动重启（`-RestartCount` / `-RestartInterval`）——agent 进程若异常退出，由 Task Scheduler 每 1 分钟自动重新拉起，无需等到下次开机，进一步缩小崩溃后的掉线窗口。
-
-## v1.2.3 - 2026-07-23
-
-### 修复
-- **Windows agent 计划任务创建失败（安装假成功）**：安装脚本用 `schtasks /Create /TR "..."` 注册任务时，二进制装在含空格的路径下（如 `C:\Program Files (x86)\moss-agent`），PowerShell 5.1 对原生命令的嵌套引号转义损坏，schtasks 在空格处把路径切开、报「无效参数 - 'Files'」，任务未创建；后续 `/Run` 找不到任务，但脚本仍打印「✅ 已安装」形成假成功。现改用 `Register-ScheduledTask` cmdlet（`-Execute` / `-Argument` 分离传参），路径含空格也能正确注册；并移除对 `schtasks` 原生 stderr 的 `Continue` 降级 hack，改由 cmdlet 的 `-ErrorAction` 处理。
+- **Windows agent 进程崩溃自动重启**：计划任务新增失败自动重启（`-RestartCount` / `-RestartInterval`），agent 异常退出后由 Task Scheduler 每 1 分钟自动拉起，无需等下次开机，缩小崩溃后的掉线窗口。
 
 ### 升级提醒
-- 仍仅改 Windows 安装脚本（内嵌于 server 二进制）：把 server 更新到 v1.2.3 并重启即生效，随后在目标机重跑安装命令即可。
+- **Windows 安装脚本改动**（内嵌于 server 二进制）：把 server 更新到 v1.3.0 并重启即生效，随后在目标机重跑安装命令即可让新计划任务配置生效；已装 agent 无需单独更新二进制。
 - 计划任务改用 `ScheduledTasks` 模块 cmdlet，要求 Windows 8 / Server 2012 及以上（PowerShell 3.0+）；更老系统如仍需支持请告知。
-
-## v1.2.2 - 2026-07-23
-
-### 修复
-- **Windows agent 首次安装中途中止**：安装脚本在 `$ErrorActionPreference = "Stop"` 下，首装时 `schtasks /End` 对尚不存在的计划任务写 stderr，被 PowerShell 5.1 转成终止性 `NativeCommandError`（`2>$null` 拦不住），导致脚本在创建任务前退出——二进制虽已下载，但计划任务未注册、agent 未启动。现将清理旧任务的两步临时降级为 `Continue`。仅影响全新机器首次安装（重装时任务已存在故一直未暴露）。
-- **重装时 token 文件覆盖写被拒**：上一次安装（即使中途失败）已用 `icacls` 把 `token` 文件收紧为只读，重跑时 `Set-Content` 覆盖写触发 `UnauthorizedAccessException：访问被拒绝`。现在写入前若文件已存在，先恢复 Administrators 完全控制，写完再统一收紧权限，保证安装可重复执行。
-
-### 升级提醒
-- 本次仅改 Windows 安装脚本（`server/install/install.ps1`），需将新脚本**重新部署到安装端点**（`install.ps1` 静态文件）方可生效；已装好的 agent 无需更新。
+- 移动端卡片修复为纯前端改动，随 server 二进制内嵌，更新 server 重启即生效。
 
 ## v1.2.1 - 2026-07-22
 
