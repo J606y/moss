@@ -24,7 +24,7 @@ function ServerCard({ server }: { server: ServerMeta }) {
     >
       <div className="flex items-center gap-2">
         <Flag code={server.flag} />
-        <span className="truncate font-medium">{server.name}</span>
+        <span className="min-w-0 truncate font-medium">{server.name}</span>
         <span className="ml-auto shrink-0">
           <StatusPill online={server.online} />
         </span>
