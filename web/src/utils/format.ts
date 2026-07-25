@@ -19,6 +19,27 @@ export function fmtUptime(sec: number): string {
 
 export const fmtPercent = (n: number) => `${(Number.isFinite(n) ? n : 0).toFixed(1)}%`
 
+// Windows 的系统名取自注册表 ProductName，比 Linux 长一大截
+// （"Microsoft Windows Server 2022 Datacenter 21H2" vs "Debian 13"），
+// 列表里既撑宽表格又难读。此处剥掉三段无判读价值的填充：
+//   1. "Microsoft " 前缀 —— 后面跟着 Windows，前缀不提供任何信息
+//   2. 尾部 build 号 —— "10.0.20348 Build 20348"
+//   3. Server 版本 SKU 及其后的 release ID —— "Datacenter 21H2"、"Standard 1809"
+// 非 Windows 系统一律原样返回：Linux 发行版的版本号本身就是关键信息，
+// 误剥会把 "Ubuntu 24.04" 砍成 "Ubuntu"。
+// release ID 只在紧跟 SKU 时才剥：老版本用四位数形式（1809），与 Server 的
+// 年份（2022）无法从字面区分，脱离 SKU 语境宁可保留也不误砍成 "Windows Server"。
+export function shortOS(os: string): string {
+  const s = os.replace(/^Microsoft\s+/i, '').trim()
+  if (!/^Windows\b/i.test(s)) return s || os
+  const trimmed = s
+    .replace(/\s+\d+(\.\d+)+(\s+Build\s+\d+)?$/i, '')
+    .replace(/\s+(Datacenter|Standard|Enterprise|Essentials)(\s+(?:\d{2}H\d|\d{4}))?$/i, '')
+    .replace(/\s+\d{2}H\d$/i, '')
+    .trim()
+  return trimmed || s
+}
+
 export function fmtTime(ts: number): string {
   return new Date(ts).toLocaleTimeString('zh-CN', { hour12: false })
 }

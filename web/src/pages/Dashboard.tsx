@@ -9,7 +9,7 @@ import Flag from '../components/Flag'
 import Ticker from '../components/Ticker'
 import { MiniBar } from '../components/ProgressBar'
 import { StatusPill } from '../components/ui'
-import { fmtBytes, fmtSpeed, fmtUptime } from '../utils/format'
+import { fmtBytes, fmtSpeed, fmtUptime, shortOS } from '../utils/format'
 import { safeLocalGet, safeLocalSet } from '../utils/storage'
 import { card, td, th } from '../ui'
 
@@ -38,10 +38,11 @@ const ServerRow = memo(function ServerRow({
       </td>
       {/* 系统名长短悬殊（"Debian 13" vs "Microsoft Windows Server 2022 Datacenter 21H2"），
           td 自带 whitespace-nowrap，auto 布局表格会被最长的一台撑出横向滚动条。
-          限宽截断把这一列的宽度上限钉死，完整值挂 title 供悬停查看。 */}
+          shortOS 先剥掉无判读价值的填充，再限宽兜底钉死列宽上限；
+          两者叠加后常见系统名可完整显示，完整原值挂 title 供悬停查看。 */}
       <td className={`${td} text-zinc-500`}>
-        <span className="block max-w-[15rem] truncate" title={server.os}>
-          {server.os}
+        <span className="block max-w-[12rem] truncate" title={server.os}>
+          {shortOS(server.os)}
         </span>
       </td>
       <td className={td}>

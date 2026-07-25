@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { ArrowDown, ArrowUp } from 'lucide-react'
 import type { ServerMeta } from '../types'
 import { pct, useLiveStats } from '../api/store'
-import { fmtBytes, fmtPercent, fmtSpeed, fmtUptime } from '../utils/format'
+import { fmtBytes, fmtPercent, fmtSpeed, fmtUptime, shortOS } from '../utils/format'
 import { ProgressBar } from './ProgressBar'
 import Flag from './Flag'
 import Ticker from './Ticker'
@@ -29,8 +29,10 @@ function ServerCard({ server }: { server: ServerMeta }) {
           <StatusPill online={server.online} />
         </span>
       </div>
+      {/* 与列表视图同源：长系统名会把后面的虚拟化 / 架构挤出 truncate 边界，
+          精简后这一行才放得下完整的三段信息 */}
       <div className="mt-1.5 truncate text-xs text-zinc-500">
-        {server.os} · {server.virtualization} · {server.arch}
+        {shortOS(server.os)} · {server.virtualization} · {server.arch}
         {server.online && <> · 在线 {fmtUptime(server.uptimeSec)}</>}
       </div>
 
