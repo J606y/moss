@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -71,6 +72,13 @@ func (s *App) listPublicServers() ([]publicServer, error) {
 		}
 		if p.Flag == "" {
 			p.Flag = autoFlag // 手动国旗优先，未设则用自动识别
+		}
+		// 地区未手填时用国家码大写兜底（US / JP / HK）。此处 p.Flag 已完成
+		// 手动优先合并，且两个来源都是 ISO alpha-2，故无需二次外呼或额外存列。
+		// 仅作用于公开接口：/api/admin/servers 返回原始值，避免编辑弹窗把
+		// 自动兜底值当成手填内容回写。
+		if p.Region == "" {
+			p.Region = strings.ToUpper(p.Flag)
 		}
 		p.IntervalSec = interval
 		stats, uptime, online := s.hub.Snapshot(p.ID)

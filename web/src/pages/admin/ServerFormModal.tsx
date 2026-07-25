@@ -49,7 +49,7 @@ export function ServerFormModal({
             <input className={input} placeholder="生产 / 测试…" value={f.group} onChange={set('group')} />
           </div>
           <div>
-            <label className={formLabel}>地区</label>
+            <label className={formLabel}>地区（不填则自动）</label>
             <input className={input} placeholder="香港 / 东京…" value={f.region} onChange={set('region')} />
           </div>
         </div>
