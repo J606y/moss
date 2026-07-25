@@ -36,7 +36,14 @@ const ServerRow = memo(function ServerRow({
         <Flag code={server.flag} className="mr-1.5" />
         {server.name}
       </td>
-      <td className={`${td} text-zinc-500`}>{server.os}</td>
+      {/* 系统名长短悬殊（"Debian 13" vs "Microsoft Windows Server 2022 Datacenter 21H2"），
+          td 自带 whitespace-nowrap，auto 布局表格会被最长的一台撑出横向滚动条。
+          限宽截断把这一列的宽度上限钉死，完整值挂 title 供悬停查看。 */}
+      <td className={`${td} text-zinc-500`}>
+        <span className="block max-w-[15rem] truncate" title={server.os}>
+          {server.os}
+        </span>
+      </td>
       <td className={td}>
         <MiniBar pct={st.cpu} />
       </td>
