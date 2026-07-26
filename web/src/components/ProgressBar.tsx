@@ -32,7 +32,10 @@ export function MiniBar({ pct }: { pct: number }) {
   const p = clampPct(pct)
   return (
     <div className="flex items-center gap-2">
-      <div className="h-1.5 w-14 overflow-hidden rounded-full bg-zinc-500/15 dark:bg-white/10">
+      {/* w-12：列表视图九列并排，宽屏容器（max-w-7xl）也仅剩 20 余像素余量，
+          真实运行数据下总流量 / 在线时长一变长就整表溢出。条身收窄 8px×3 列
+          回收 24px，进度观感不受影响。 */}
+      <div className="h-1.5 w-12 overflow-hidden rounded-full bg-zinc-500/15 dark:bg-white/10">
         <div className="h-full rounded-full" style={{ width: `${p}%`, background: barColor(p) }} />
       </div>
       {/* 固定宽度：位数变化（9%↔10%↔100%）不再影响表格列宽 */}

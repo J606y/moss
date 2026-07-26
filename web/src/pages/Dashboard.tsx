@@ -32,16 +32,22 @@ const ServerRow = memo(function ServerRow({
       <td className={td}>
         <StatusPill online={server.online} />
       </td>
+      {/* 名称由用户自填、长度无上限，此前没有任何宽度约束，够长就会把整表撑出
+          横向滚动条（与移动端卡片曾修过的同类问题同源）。限宽截断，完整名挂 title。 */}
       <td className={`${td} font-medium`}>
-        <Flag code={server.flag} className="mr-1.5" />
-        {server.name}
+        <span className="flex items-center">
+          <Flag code={server.flag} className="mr-1.5 shrink-0" />
+          <span className="min-w-0 truncate" title={server.name}>
+            {server.name}
+          </span>
+        </span>
       </td>
       {/* 系统名长短悬殊（"Debian 13" vs "Microsoft Windows Server 2022 Datacenter 21H2"），
           td 自带 whitespace-nowrap，auto 布局表格会被最长的一台撑出横向滚动条。
           shortOS 先剥掉无判读价值的填充，再限宽兜底钉死列宽上限；
           两者叠加后常见系统名可完整显示，完整原值挂 title 供悬停查看。 */}
       <td className={`${td} text-zinc-500`}>
-        <span className="block max-w-[12rem] truncate" title={server.os}>
+        <span className="block truncate" title={server.os}>
           {shortOS(server.os)}
         </span>
       </td>
@@ -146,7 +152,23 @@ export default function Dashboard() {
         </div>
       ) : (
         <div className={`${card} overflow-x-auto`}>
-          <table className="w-full min-w-[860px]">
+          {/* table-fixed + colgroup：列宽由声明决定而非内容决定。此前是 auto 布局，
+              九列宽度全由最长的一行数据推导，宽屏容器（max-w-7xl≈1246px）余量本就
+              不足 30px，流量涨到 TB / 在线时长上三位数就整表溢出、底部冒出横条。
+              固定宽度按各列内容实测上限分配（速度 77px、流量 135px、时长 85px，
+              均含 px-2.5 左右内边距 20px），名称列吃掉剩余弹性空间并截断兜底。 */}
+          <table className="w-full min-w-[1150px] table-fixed">
+            <colgroup>
+              <col className="w-[72px]" />
+              <col />
+              <col className="w-[156px]" />
+              <col className="w-[108px]" />
+              <col className="w-[108px]" />
+              <col className="w-[108px]" />
+              <col className="w-[200px]" />
+              <col className="w-[160px]" />
+              <col className="w-[106px]" />
+            </colgroup>
             <thead className="border-b border-zinc-500/15 dark:border-white/10">
               <tr>
                 <th className={th}>状态</th>

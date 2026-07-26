@@ -24,6 +24,8 @@ export const input =
 
 export const formLabel = 'mb-1 block text-xs font-medium text-zinc-500 dark:text-zinc-400'
 
-export const th = 'px-3 py-2 text-left text-xs font-medium text-zinc-500 whitespace-nowrap'
+// px-2.5：单元格左右各收 2px，九列表格合计回收 36px。列表视图在宽屏容器下
+// 余量本就只有 20 余像素，真实运行数据（总流量 / 在线时长变长）即会溢出出横条。
+export const th = 'px-2.5 py-2 text-left text-xs font-medium text-zinc-500 whitespace-nowrap'
 
-export const td = 'px-3 py-2.5 text-sm whitespace-nowrap'
+export const td = 'px-2.5 py-2.5 text-sm whitespace-nowrap'

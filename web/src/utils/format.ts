@@ -1,8 +1,12 @@
 export function fmtBytes(n: number, digits = 1): string {
   if (!isFinite(n) || n <= 0) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
-  const i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), units.length - 1)
-  return `${(n / 1024 ** i).toFixed(i === 0 ? 0 : digits)} ${units[i]}`
+  let i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), units.length - 1)
+  const round = (idx: number) => (n / 1024 ** idx).toFixed(idx === 0 ? 0 : digits)
+  // 取档按精确值、显示要四舍五入，两者不一致时会漏进一档：差 1 字节到 1 TB 仍算
+  // GB 档，1023.99 被舍成 "1024.0 GB"。舍入后已满 1024 就升档，改显 "1.0 TB"。
+  if (i < units.length - 1 && Number(round(i)) >= 1024) i++
+  return `${round(i)} ${units[i]}`
 }
 
 export const fmtSpeed = (n: number) => `${fmtBytes(n)}/s`
