@@ -339,7 +339,7 @@ func (s *App) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, settingsView{
 		Username:       getSetting(s.db, keyUsername, "admin"),
 		SiteName:       getSetting(s.db, keySiteName, "Moss"),
-		SiteDesc:       getSetting(s.db, keySiteDesc, "轻量服务器监控"),
+		SiteDesc:       getSetting(s.db, keySiteDesc, "智控中心"),
 		ReportInterval: getSettingInt(s.db, keyReportInterval, 2),
 		SampleInterval: getSettingInt(s.db, keySampleInterval, 10),
 		HistoryDays:    getSettingInt(s.db, keyHistoryDays, 7),

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { get, post, put } from '../../api/client'
-import type { NotifySettings } from '../../types'
+import type { NotifySettings, WebhookSettings } from '../../types'
 import { NumberInput, Toggle } from '../../components/ui'
 import { errMsg } from '../../utils/admin'
 import { btnGhost, btnPrimary, card, formLabel, input } from '../../ui'
@@ -141,6 +141,108 @@ export function NotifyTab({ toast }: { toast: Toast }) {
       <div className="flex justify-end">
         <button className={btnPrimary} onClick={save}>
           保存设置
+        </button>
+      </div>
+
+      <WebhookSection toast={toast} />
+    </div>
+  )
+}
+
+/**
+ * 通用 Webhook 推送：设置来自独立接口（/api/admin/webhook），不属于 NotifySettings，
+ * 因此单独管理状态与保存按钮，模式参考 GcpTab 的凭证区块——密钥只写不回显。
+ */
+function WebhookSection({ toast }: { toast: Toast }) {
+  const [w, setW] = useState<WebhookSettings | null>(null)
+  // 密钥单独用一个受控字段：留空提交 = 保留原密钥，绝不会被服务端回显的明文污染
+  const [secret, setSecret] = useState('')
+  const [testing, setTesting] = useState(false)
+
+  useEffect(() => {
+    get<WebhookSettings>('/api/admin/webhook')
+      .then(setW)
+      .catch((e) => toast(errMsg(e)))
+  }, [toast])
+
+  if (!w) return null
+
+  // clearSecret 显式清空密钥；否则 secret 留空即代表「不修改」，由后端保证语义
+  const save = async (clearSecret = false) => {
+    await put('/api/admin/webhook', { url: w.url, on: w.on, secret, clearSecret })
+    setSecret('')
+    setW(await get<WebhookSettings>('/api/admin/webhook'))
+  }
+
+  const onSave = async () => {
+    try {
+      await save()
+      toast('Webhook 设置已保存')
+    } catch (e) {
+      toast(errMsg(e))
+    }
+  }
+
+  const onClearSecret = async () => {
+    try {
+      await save(true)
+      toast('密钥已清除')
+    } catch (e) {
+      toast(errMsg(e))
+    }
+  }
+
+  const onTest = async () => {
+    setTesting(true)
+    try {
+      await save() // 先保存再测试，避免测到旧配置
+      await post('/api/admin/webhook/test', {})
+      toast('测试消息已发送，请检查接收端')
+    } catch (e) {
+      toast(errMsg(e))
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  return (
+    <div className={`${card} space-y-3 p-4`}>
+      <h3 className="text-sm font-semibold">Webhook 推送</h3>
+      <p className="text-xs text-zinc-400">
+        告警会实时发送到下面这个地址，接入常驻的 AI
+        助手后，服务器一出问题就能第一时间唤醒它自动排查，不必人工盯盘。
+      </p>
+      <Toggle checked={w.on} label="启用 Webhook 推送" onChange={(v) => setW({ ...w, on: v })} />
+      <div>
+        <label className={formLabel}>地址</label>
+        <input
+          className={`${input} truncate`}
+          placeholder="https://your-ai-gateway.example.com/hooks/moss"
+          value={w.url}
+          onChange={(e) => setW({ ...w, url: e.target.value })}
+        />
+      </div>
+      <div>
+        <label className={formLabel}>密钥（可选）</label>
+        <input
+          className={input}
+          type="password"
+          placeholder={w.secretSet ? '已配置，留空则不修改' : '用于验证请求来源，可留空'}
+          value={secret}
+          onChange={(e) => setSecret(e.target.value)}
+        />
+      </div>
+      <div className="flex flex-wrap justify-end gap-2">
+        {w.secretSet && (
+          <button className={`${btnGhost} !text-rose-500`} onClick={onClearSecret}>
+            清除密钥
+          </button>
+        )}
+        <button className={btnGhost} onClick={onTest} disabled={testing}>
+          {testing ? '发送中…' : '保存并发送测试消息'}
+        </button>
+        <button className={btnPrimary} onClick={onSave}>
+          保存
         </button>
       </div>
     </div>

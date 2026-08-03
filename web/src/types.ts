@@ -114,6 +114,13 @@ export interface NotifySettings {
   expireDays: number
 }
 
+/** 通用 Webhook 推送配置。后端不回传密钥明文，仅用 secretSet 标记是否已配置。 */
+export interface WebhookSettings {
+  url: string
+  on: boolean
+  secretSet: boolean
+}
+
 export interface GcpSettings {
   configured: boolean
   clientEmail: string
@@ -132,4 +139,43 @@ export interface Settings {
   sampleInterval: number
   historyDays: number
   pingDays: number
+}
+
+/** AI 接入用的 API Key。明文只在创建时返回一次，此处只有前缀。 */
+export interface ApiKey {
+  id: number
+  name: string
+  prefix: string
+  caps: string[]
+  servers: string[]
+  /** 秒级时间戳，0 表示永不过期 */
+  expiresAt: number
+  createdAt: number
+  /** 0 表示从未使用 */
+  lastUsedAt: number
+  revoked: boolean
+}
+
+/** 执行审计列表项，不含输出正文。 */
+export interface ExecAudit {
+  jobId: string
+  serverId: string
+  serverName: string
+  caller: string
+  cmd: string
+  dir: string
+  /** 毫秒级时间戳 */
+  startedAt: number
+  /** 0 表示仍在执行 */
+  finishedAt: number
+  exitCode: number
+  error?: string
+  truncated?: boolean
+}
+
+export interface ExecAuditDetail {
+  record: ExecAudit
+  timeout: number
+  stdout: string
+  stderr: string
 }

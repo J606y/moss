@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Bell, Cloud, LogOut, Radar, Server, SlidersHorizontal } from 'lucide-react'
+import { Bell, Bot, Cloud, LogOut, Radar, Server, SlidersHorizontal } from 'lucide-react'
 import { get, post } from '../api/client'
 import type { ApiError } from '../api/client'
 import { btnGhost } from '../ui'
@@ -8,15 +8,17 @@ import { ServersTab } from './admin/ServersTab'
 import { TasksTab } from './admin/TasksTab'
 import { NotifyTab } from './admin/NotifyTab'
 import { GcpTab } from './admin/GcpTab'
+import { AiTab } from './admin/AiTab'
 import { SettingsTab } from './admin/SettingsTab'
 
-type TabKey = 'servers' | 'tasks' | 'notify' | 'gcp' | 'settings'
+type TabKey = 'servers' | 'tasks' | 'notify' | 'gcp' | 'ai' | 'settings'
 
 const tabs: Array<{ key: TabKey; label: string; icon: typeof Server }> = [
   { key: 'servers', label: '服务器', icon: Server },
   { key: 'tasks', label: '探测任务', icon: Radar },
   { key: 'notify', label: '通知告警', icon: Bell },
   { key: 'gcp', label: 'GCP 守护', icon: Cloud },
+  { key: 'ai', label: 'AI 接入', icon: Bot },
   { key: 'settings', label: '站点设置', icon: SlidersHorizontal },
 ]
 
@@ -109,6 +111,7 @@ export default function Admin() {
           {tab === 'tasks' && <TasksTab toast={showToast} />}
           {tab === 'notify' && <NotifyTab toast={showToast} />}
           {tab === 'gcp' && <GcpTab toast={showToast} />}
+          {tab === 'ai' && <AiTab toast={showToast} />}
           {tab === 'settings' && <SettingsTab toast={showToast} />}
         </div>
       </div>

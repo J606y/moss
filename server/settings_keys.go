@@ -10,6 +10,7 @@ const (
 	keySampleUnitSec  = "sample_unit_sec"
 	keyHistoryDays    = "history_days"
 	keyPingDays       = "ping_days"
+	keyExecAuditDays  = "exec_audit_days"
 
 	keyUsername     = "username"
 	keyPasswordHash = "password_hash"
@@ -28,6 +29,10 @@ const (
 	keyNotifyNetSec       = "notify_net_sec"
 	keyNotifyExpire       = "notify_expire"
 	keyNotifyExpireDays   = "notify_expire_days"
+
+	keyWebhookURL    = "webhook_url"
+	keyWebhookSecret = "webhook_secret"
+	keyWebhookOn     = "webhook_on"
 
 	keyGCPSAJSON        = "gcp_sa_json"
 	keyGCPAutoOn        = "gcp_auto_on"

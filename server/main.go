@@ -26,6 +26,8 @@ type App struct {
 	trustProxy     bool         // 是否信任反代转发头获取真实来源 IP
 	trustedProxies []*net.IPNet // 可信代理网段；从 XFF 最右往左跳过这些地址取真实客户端
 
+	exec *execManager // 命令下发、分片聚合与审计
+
 	globalLimiter *limiter // 全局 /api 限流（按真实访客 IP）
 	authLimiter   *limiter // 登录等敏感端点的更严限流
 }
@@ -76,7 +78,9 @@ func main() {
 	initSecret(*dataDir) // 敏感列（GCP SA 凭证）加密主密钥
 
 	app := &App{db: db, hub: newHub(db), trustProxy: *trustProxy, trustedProxies: parseTrustedProxies(*trustedProxies)}
+	app.exec = newExecManager(db)
 	app.notifier = newNotifier(db)
+	app.exec.notifier = app.notifier // 拦截告警走同一套通知配置
 	app.hub.notifier = app.notifier
 	app.notifier.isOnline = func(id string) bool {
 		_, _, online := app.hub.Snapshot(id)
@@ -121,13 +125,26 @@ func main() {
 	mux.HandleFunc("GET /api/admin/notify", app.requireAuth(app.handleGetNotify))
 	mux.HandleFunc("PUT /api/admin/notify", app.requireAuth(app.handlePutNotify))
 	mux.HandleFunc("POST /api/admin/notify/test", app.requireAuth(app.handleTestNotify))
+	mux.HandleFunc("GET /api/admin/webhook", app.requireAuth(app.handleGetWebhook))
+	mux.HandleFunc("PUT /api/admin/webhook", app.requireAuth(app.handlePutWebhook))
+	mux.HandleFunc("POST /api/admin/webhook/test", app.requireAuth(app.handleTestWebhook))
 	mux.HandleFunc("GET /api/admin/gcp", app.requireAuth(app.handleGetGCP))
 	mux.HandleFunc("PUT /api/admin/gcp", app.requireAuth(app.handlePutGCP))
 	mux.HandleFunc("POST /api/admin/gcp/test", app.requireAuth(app.handleTestGCP))
 	mux.HandleFunc("POST /api/admin/servers/{id}/gcp-start", app.requireAuth(app.handleGCPManualStart))
+	mux.HandleFunc("GET /api/admin/keys", app.requireAuth(app.handleListKeys))
+	mux.HandleFunc("POST /api/admin/keys", app.requireAuth(app.handleCreateKey))
+	mux.HandleFunc("POST /api/admin/keys/{id}/revoke", app.requireAuth(app.handleRevokeKey))
+	mux.HandleFunc("DELETE /api/admin/keys/{id}", app.requireAuth(app.handleDeleteKey))
+	mux.HandleFunc("POST /api/admin/servers/{id}/exec", app.requireAuth(app.handleExec))
+	mux.HandleFunc("GET /api/admin/exec-audit", app.requireAuth(app.handleExecAudit))
+	mux.HandleFunc("GET /api/admin/exec-audit/{jobId}", app.requireAuth(app.handleExecAuditDetail))
 	mux.HandleFunc("GET /api/admin/settings", app.requireAuth(app.handleGetSettings))
 	mux.HandleFunc("PUT /api/admin/settings", app.requireAuth(app.handlePutSettings))
 	mux.HandleFunc("PUT /api/admin/password", app.requireAuth(app.handleChangePassword))
+
+	// MCP 端点（AI 客户端接入，Bearer API Key 鉴权）
+	mux.HandleFunc("/mcp", app.handleMCP)
 
 	// 安装脚本
 	mux.HandleFunc("GET /install.sh", serveInstallSh)

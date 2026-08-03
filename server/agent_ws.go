@@ -87,6 +87,9 @@ func (s *App) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		conn.Close()
 		s.hub.UnregisterAgent(serverID, ac)
+		// 立即收敛该 agent 名下所有在途执行：结果已注定拿不到，
+		// 不收敛的话调用方要一直等到宽限超时才知道。
+		s.exec.OnAgentGone(serverID)
 		log.Printf("agent 已断开: %s", serverID)
 	}()
 
@@ -176,6 +179,9 @@ func (s *App) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 			); err != nil {
 				log.Printf("写入探测结果失败: %v", err)
 			}
+
+		case "exec_result":
+			s.exec.OnResult(msg.Exec)
 		}
 	}
 }

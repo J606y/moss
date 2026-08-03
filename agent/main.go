@@ -71,6 +71,7 @@ func main() {
 	endpoint := flag.String("endpoint", "", "服务端地址，如 https://moss.example.com")
 	token := flag.String("token", "", "服务器 token（明文，不推荐；优先用 --token-file 或 MOSS_TOKEN 环境变量）")
 	tokenFile := flag.String("token-file", "", "从文件读取 token（推荐，文件权限设 600）")
+	allowExec := flag.Bool("allow-exec", false, "允许服务端下发命令在本机执行（默认关闭，也可用 MOSS_ALLOW_EXEC=1 开启）")
 	flag.Parse()
 
 	tok := resolveToken(*token, *tokenFile)
@@ -83,11 +84,20 @@ func main() {
 		log.Fatalf("地址解析失败: %v", err)
 	}
 
+	// 远程执行默认关闭：装了 agent 不等于接受被远程操作，需显式开启。
+	allow := *allowExec || os.Getenv("MOSS_ALLOW_EXEC") == "1"
+	if allow {
+		log.Printf("远程执行已开启")
+	}
+	// runner 在重连间保持存活：幂等记录必须跨连接有效，
+	// 否则服务端在重连后重发同一任务会造成二次执行（例如重复跑一遍部署）。
+	runner := newExecRunner(allow)
+
 	const baseBackoff = 3 * time.Second
 	backoff := baseBackoff
 	for {
 		start := time.Now()
-		if err := runOnce(target); err != nil {
+		if err := runOnce(target, runner); err != nil {
 			log.Printf("连接中断: %v，%v 后重连", err, backoff)
 		}
 		// 维持过一段在线再断（如服务端重启/部署）属正常掉线 → 退避归零，下次快速重连；
@@ -102,7 +112,7 @@ func main() {
 	}
 }
 
-func runOnce(target string) error {
+func runOnce(target string, runner *execRunner) error {
 	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
 	conn, _, err := dialer.Dial(target, nil)
 	if err != nil {
@@ -144,7 +154,8 @@ func runOnce(target string) error {
 				return
 			}
 			conn.SetReadDeadline(time.Now().Add(90 * time.Second))
-			if msg.Type == "config" {
+			switch msg.Type {
+			case "config":
 				select {
 				case intervalCh <- msg.Interval:
 				default:
@@ -152,6 +163,16 @@ func runOnce(target string) error {
 				select {
 				case tasksCh <- msg.Tasks:
 				default:
+				}
+			case "exec":
+				if msg.Exec != nil {
+					// 异步受理：执行可能持续数分钟，不能阻塞本读取循环，
+					// 否则期间的心跳与配置下发全部停摆。
+					runner.Handle(c, *msg.Exec)
+				}
+			case "write":
+				if msg.Write != nil {
+					runner.HandleWrite(c, *msg.Write)
 				}
 			}
 		}

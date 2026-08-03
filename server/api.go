@@ -103,7 +103,7 @@ func (s *App) handleServers(w http.ResponseWriter, r *http.Request) {
 func (s *App) handleSite(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{
 		"name": getSetting(s.db, keySiteName, "Moss"),
-		"desc": getSetting(s.db, keySiteDesc, "轻量服务器监控"),
+		"desc": getSetting(s.db, keySiteDesc, "智控中心"),
 	})
 }
 

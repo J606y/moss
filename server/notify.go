@@ -74,6 +74,24 @@ type Notifier struct {
 	gcp      map[string]*gcpState
 	gcpCli   *gcpClient // 懒建缓存，凭证变更（Reload/内容比对）后重建
 	gcpSARaw string
+
+	webhook webhookConfig
+}
+
+// fire 是所有告警的唯一出口：一份事件同时走 Telegram 与 webhook。
+//
+// 统一出口而非在每个告警点分别调两次，是为了避免新增通道时漏改某个分支——
+// 告警点有六处，漏一处就意味着某类故障永远不会通知到人。
+func (n *Notifier) fire(cfg notifyConfig, ev alertEvent) {
+	if ev.Timestamp == 0 {
+		ev.Timestamp = time.Now().Unix()
+	}
+	n.mu.Lock()
+	wh := n.webhook
+	n.mu.Unlock()
+
+	n.send(cfg, ev.Text)
+	n.sendWebhook(wh, ev)
 }
 
 func newNotifier(db *sql.DB) *Notifier {
@@ -84,6 +102,7 @@ func newNotifier(db *sql.DB) *Notifier {
 		states:   make(map[string]*alertState),
 		gcpCfg:   loadGCPConfig(db),
 		gcp:      make(map[string]*gcpState),
+		webhook:  loadWebhookConfig(db),
 	}
 }
 
@@ -91,9 +110,11 @@ func newNotifier(db *sql.DB) *Notifier {
 func (n *Notifier) Reload() {
 	cfg := loadNotifyConfig(n.db)
 	gcpCfg := loadGCPConfig(n.db)
+	wh := loadWebhookConfig(n.db)
 	n.mu.Lock()
 	n.cfg = cfg
 	n.gcpCfg = gcpCfg
+	n.webhook = wh
 	n.gcpCli = nil
 	n.gcpSARaw = ""
 	n.mu.Unlock()
@@ -134,7 +155,13 @@ func (n *Notifier) OnOnline(id string) {
 
 	if wasAlerted && cfg.OfflineOn {
 		dur := time.Since(downSince).Round(time.Second)
-		n.send(cfg, fmt.Sprintf("🟢 服务器恢复\n%s 已重新上线（离线 %s）", n.serverName(id), dur))
+		name := n.serverName(id)
+		n.fire(cfg, alertEvent{
+			Type:       evtServerOnline,
+			ServerID:   id,
+			ServerName: name,
+			Text:       fmt.Sprintf("🟢 服务器恢复\n%s 已重新上线（离线 %s）", name, dur),
+		})
 	}
 }
 
@@ -157,7 +184,15 @@ func (n *Notifier) OnReport(id string, cpu, mem, disk, netUp, netDown float64) {
 		return
 	}
 	st := n.state(id)
-	type fire struct{ msg string }
+	// 除文案外一并携带指标名、实测值与阈值：接收端（AI 网关）应当读结构化字段，
+	// 而不是去解析中文告警文案——文案一改，对端就崩。
+	type fire struct {
+		msg   string
+		typ   string
+		met   string
+		val   float64
+		thres float64
+	}
 	var fires []fire
 	now := time.Now()
 	hold := time.Duration(cfg.LoadMinutes) * time.Minute
@@ -173,13 +208,19 @@ func (n *Notifier) OnReport(id string, cpu, mem, disk, netUp, netDown float64) {
 			}
 			if !st.highAlerted[metric] && now.Sub(st.highSince[metric]) >= hold {
 				st.highAlerted[metric] = true
-				fires = append(fires, fire{fmt.Sprintf("⚠️ 负载告警\n%%NAME%% %s 使用率 %.1f%%，已持续 %d 分钟（阈值 %d%%）",
-					metric, val, cfg.LoadMinutes, threshold)})
+				fires = append(fires, fire{
+					msg: fmt.Sprintf("⚠️ 负载告警\n%%NAME%% %s 使用率 %.1f%%，已持续 %d 分钟（阈值 %d%%）",
+						metric, val, cfg.LoadMinutes, threshold),
+					typ: evtLoadAlert, met: metric, val: val, thres: th,
+				})
 			}
 		} else if val < th*0.9 { // 按比例迟滞带（恢复回差），低阈值也可达，避免在阈值附近反复告警
 			if st.highAlerted[metric] {
 				st.highAlerted[metric] = false
-				fires = append(fires, fire{fmt.Sprintf("✅ 负载恢复\n%%NAME%% %s 已回落至 %.1f%%", metric, val)})
+				fires = append(fires, fire{
+					msg: fmt.Sprintf("✅ 负载恢复\n%%NAME%% %s 已回落至 %.1f%%", metric, val),
+					typ: evtLoadRecovered, met: metric, val: val, thres: th,
+				})
 			}
 			delete(st.highSince, metric)
 		}
@@ -204,13 +245,19 @@ func (n *Notifier) OnReport(id string, cpu, mem, disk, netUp, netDown float64) {
 			}
 			if !st.highAlerted["net"] && now.Sub(st.highSince["net"]) >= time.Duration(cfg.NetSeconds)*time.Second {
 				st.highAlerted["net"] = true
-				fires = append(fires, fire{fmt.Sprintf("⚠️ 网速告警\n%%NAME%% 上行 %.1f MB/s / 下行 %.1f MB/s，已持续 %d 秒（阈值 %d MB/s）",
-					netUp/mb, netDown/mb, cfg.NetSeconds, cfg.NetThreshold)})
+				fires = append(fires, fire{
+					msg: fmt.Sprintf("⚠️ 网速告警\n%%NAME%% 上行 %.1f MB/s / 下行 %.1f MB/s，已持续 %d 秒（阈值 %d MB/s）",
+						netUp/mb, netDown/mb, cfg.NetSeconds, cfg.NetThreshold),
+					typ: evtNetAlert, met: "net", val: speed, thres: th,
+				})
 			}
 		} else if speed < th*0.9 {
 			if st.highAlerted["net"] {
 				st.highAlerted["net"] = false
-				fires = append(fires, fire{fmt.Sprintf("✅ 网速恢复\n%%NAME%% 网速已回落至 ↑ %.1f / ↓ %.1f MB/s", netUp/mb, netDown/mb)})
+				fires = append(fires, fire{
+					msg: fmt.Sprintf("✅ 网速恢复\n%%NAME%% 网速已回落至 ↑ %.1f / ↓ %.1f MB/s", netUp/mb, netDown/mb),
+					typ: evtNetRecovered, met: "net", val: speed, thres: th,
+				})
 			}
 			delete(st.highSince, "net")
 		}
@@ -220,7 +267,15 @@ func (n *Notifier) OnReport(id string, cpu, mem, disk, netUp, netDown float64) {
 	if len(fires) > 0 {
 		name := n.serverName(id)
 		for _, f := range fires {
-			n.send(cfg, strings.ReplaceAll(f.msg, "%NAME%", name))
+			n.fire(cfg, alertEvent{
+				Type:       f.typ,
+				ServerID:   id,
+				ServerName: name,
+				Text:       strings.ReplaceAll(f.msg, "%NAME%", name),
+				Metric:     f.met,
+				Value:      f.val,
+				Threshold:  f.thres,
+			})
 		}
 	}
 }
@@ -254,7 +309,13 @@ func (n *Notifier) Run() {
 		n.mu.Unlock()
 
 		for _, p := range due {
-			n.send(cfg, fmt.Sprintf("🔴 服务器离线\n%s 已离线超过 %d 秒", n.serverName(p.id), cfg.OfflineDelay))
+			name := n.serverName(p.id)
+			n.fire(cfg, alertEvent{
+				Type:       evtServerOffline,
+				ServerID:   p.id,
+				ServerName: name,
+				Text:       fmt.Sprintf("🔴 服务器离线\n%s 已离线超过 %d 秒", name, cfg.OfflineDelay),
+			})
 		}
 
 		if cfg.ExpireOn {
@@ -307,8 +368,38 @@ func (n *Notifier) checkExpiry(cfg notifyConfig) {
 		if d.daysLeft == 0 {
 			left = "今天到期"
 		}
-		n.send(cfg, fmt.Sprintf("📅 到期提醒\n%s 将于 %s 到期（%s）", d.name, d.expireAt, left))
+		n.fire(cfg, alertEvent{
+			Type:       evtServerExpiring,
+			ServerID:   d.id,
+			ServerName: d.name,
+			Text:       fmt.Sprintf("📅 到期提醒\n%s 将于 %s 到期（%s）", d.name, d.expireAt, left),
+		})
 	}
+}
+
+// NotifyBlocked 推送一条命令拦截告警。
+//
+// 只有被拦截的操作才推送：AI 正常执行的命令留在审计里供事后查阅，
+// 逐条推送会把通知变成噪音，两天后人就把它关了。而「AI 试图动防火墙」
+// 这类事必须当场知道——它意味着模型的判断偏离了预期。
+func (n *Notifier) NotifyBlocked(serverName, caller, cmd, reason string) {
+	n.mu.Lock()
+	cfg := n.cfg
+	n.mu.Unlock()
+
+	// 命令可能很长（比如一整段脚本），截断避免推送失败
+	if len([]rune(cmd)) > 300 {
+		cmd = string([]rune(cmd)[:300]) + "…"
+	}
+	n.fire(cfg, alertEvent{
+		Type:       evtCommandBlocked,
+		ServerName: serverName,
+		Text: "🚫 命令被拦截\n\n" +
+			"机器：" + serverName + "\n" +
+			"调用方：" + caller + "\n" +
+			"原因：" + reason + "\n\n" +
+			"命令：\n" + cmd,
+	})
 }
 
 /* ---------- Telegram 推送 ---------- */

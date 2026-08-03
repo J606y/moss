@@ -75,15 +75,47 @@ CREATE TABLE IF NOT EXISTS ping_tasks (
 );
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, expires INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS exec_audit (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	job_id TEXT NOT NULL,
+	server_id TEXT NOT NULL,
+	caller TEXT NOT NULL DEFAULT '',
+	cmd TEXT NOT NULL,
+	dir TEXT NOT NULL DEFAULT '',
+	timeout INTEGER NOT NULL DEFAULT 0,
+	started_at INTEGER NOT NULL,
+	finished_at INTEGER NOT NULL DEFAULT 0,
+	exit_code INTEGER NOT NULL DEFAULT 0,
+	error TEXT NOT NULL DEFAULT '',
+	stdout TEXT NOT NULL DEFAULT '',
+	stderr TEXT NOT NULL DEFAULT '',
+	truncated INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_exec_audit_job ON exec_audit(job_id);
+CREATE INDEX IF NOT EXISTS idx_exec_audit_time ON exec_audit(started_at);
+CREATE TABLE IF NOT EXISTS api_keys (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	name TEXT NOT NULL,
+	key_hash TEXT NOT NULL,
+	key_prefix TEXT NOT NULL DEFAULT '',
+	caps TEXT NOT NULL DEFAULT '',
+	servers TEXT NOT NULL DEFAULT '',
+	expires_at INTEGER NOT NULL DEFAULT 0,
+	created_at INTEGER NOT NULL,
+	last_used_at INTEGER NOT NULL DEFAULT 0,
+	revoked INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
 `
 
 var defaultSettings = map[string]string{
 	keySiteName:       "Moss",
-	keySiteDesc:       "轻量服务器监控",
+	keySiteDesc:       "智控中心",
 	keyReportInterval: "2",
 	keySampleInterval: "10", // 秒：历史落库最细粒度，决定时间轴可缩放的下限
 	keyHistoryDays:    "7",
 	keyPingDays:       "7",
+	keyExecAuditDays:  "90", // 执行审计保留期。用户无法主动删除单条记录，只能整体设定保留时长
 }
 
 func openDB(path string) (*sql.DB, error) {
@@ -137,6 +169,12 @@ func openDB(path string) (*sql.DB, error) {
 			setSetting(db, keyHistoryDays, "7")
 		}
 		setSetting(db, keySampleUnitSec, "1")
+	}
+	// 站点描述随定位调整而变更。defaultSettings 走的是 INSERT OR IGNORE，
+	// 对已有库不生效，因此这里显式迁移——但只在仍是旧默认值时改，
+	// 用户自己改过的描述必须原样保留。
+	if getSetting(db, keySiteDesc, "") == "轻量服务器监控" {
+		setSetting(db, keySiteDesc, "智控中心")
 	}
 	for k, v := range defaultSettings {
 		if _, err := db.Exec(`INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)`, k, v); err != nil {
@@ -234,6 +272,10 @@ func cleanupLoop(db *sql.DB) {
 		}
 		if _, err := db.Exec(`DELETE FROM sessions WHERE expires < ?`, now.Unix()); err != nil {
 			log.Printf("清理 sessions 失败: %v", err)
+		}
+		auditDays := getSettingInt(db, keyExecAuditDays, 90)
+		if _, err := db.Exec(`DELETE FROM exec_audit WHERE started_at < ?`, now.AddDate(0, 0, -auditDays).UnixMilli()); err != nil {
+			log.Printf("清理 exec_audit 失败: %v", err)
 		}
 		gcLoginAttempts(now) // 回收登录失败限流的内存 map，防无界增长
 		time.Sleep(time.Hour)

@@ -39,7 +39,7 @@ export default function Layout() {
           <Link to="/" className="flex items-center gap-2">
             <MossEye className="h-6 w-6" />
             <span className="text-lg font-bold tracking-tight">Moss</span>
-            <span className="mt-0.5 hidden text-xs text-zinc-500 sm:inline">轻量服务器监控</span>
+            <span className="mt-0.5 hidden text-xs text-zinc-500 sm:inline">智控中心</span>
           </Link>
           <div className="flex items-center gap-2">
             <Clock />
@@ -64,7 +64,7 @@ export default function Layout() {
         </Suspense>
       </main>
       <footer className="py-5 text-center text-xs text-zinc-400 dark:text-zinc-600">
-        Moss v{__APP_VERSION__} · 轻量服务器监控
+        Moss v{__APP_VERSION__} · 智控中心
       </footer>
     </div>
   )
