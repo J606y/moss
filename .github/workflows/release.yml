@@ -87,3 +87,7 @@ jobs:
           files: artifacts/*
           body_path: RELEASE_NOTES.md
           generate_release_notes: true
+          # 带预发布后缀的 tag（v2.0.0-beta.1、v2.0.0-rc.1）自动标为 Pre-release，
+          # 正式版 tag（v2.0.0）不受影响。按 tag 名判断而非手工勾选，
+          # 免得某次发测试版忘了勾，用户当成稳定版装上去。
+          prerelease: ${{ contains(github.ref_name, '-') }}
