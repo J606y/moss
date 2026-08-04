@@ -33,17 +33,17 @@ type totals struct {
 }
 
 type liveState struct {
-	stats   protocol.Stats
-	uptime  uint64
-	online  bool
-	buf     []LivePoint
-	tot     totals
+	stats  protocol.Stats
+	uptime uint64
+	online bool
+	buf    []LivePoint
+	tot    totals
 	// 历史采样累加器
-	accN                                            int
-	accCPU, accMem, accSwap, accDisk, accLoad1      float64
-	accUp, accDown                                  float64
-	accTCP, accProc                                 float64
-	lastSample                                      time.Time
+	accN                                       int
+	accCPU, accMem, accSwap, accDisk, accLoad1 float64
+	accUp, accDown                             float64
+	accTCP, accProc                            float64
+	lastSample                                 time.Time
 }
 
 type agentConn struct {
@@ -69,9 +69,9 @@ type Hub struct {
 	browsers map[chan []byte]struct{}
 
 	// sample_interval 进程内缓存：后台改设置后近实时生效，避免每次上报都查库。
-	siMu       sync.Mutex
-	siCached   time.Duration
-	siReadAt   time.Time
+	siMu     sync.Mutex
+	siCached time.Duration
+	siReadAt time.Time
 }
 
 // sampleInterval 读取“采样间隔”设置，5 秒内复用缓存值。

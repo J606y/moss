@@ -29,26 +29,26 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 
 // publicServer 与前端 ServerMeta + stats 对齐。
 type publicServer struct {
-	ID             string          `json:"id"`
-	Name           string          `json:"name"`
-	Region         string          `json:"region"`
-	Flag           string          `json:"flag"`
-	OS             string          `json:"os"`
-	Arch           string          `json:"arch"`
-	Virtualization string          `json:"virtualization"`
-	CPUModel       string          `json:"cpuModel"`
-	CPUCores       int             `json:"cpuCores"`
-	MemTotal       uint64          `json:"memTotal"`
-	SwapTotal      uint64          `json:"swapTotal"`
-	DiskTotal      uint64          `json:"diskTotal"`
-	AgentVersion   string          `json:"agentVersion"`
-	IntervalSec    int             `json:"intervalSec"`
-	Online         bool            `json:"online"`
-	UptimeSec      uint64          `json:"uptimeSec"`
-	Group          string          `json:"group"`
-	ExpireAt       string          `json:"expireAt,omitempty"`
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Region         string `json:"region"`
+	Flag           string `json:"flag"`
+	OS             string `json:"os"`
+	Arch           string `json:"arch"`
+	Virtualization string `json:"virtualization"`
+	CPUModel       string `json:"cpuModel"`
+	CPUCores       int    `json:"cpuCores"`
+	MemTotal       uint64 `json:"memTotal"`
+	SwapTotal      uint64 `json:"swapTotal"`
+	DiskTotal      uint64 `json:"diskTotal"`
+	AgentVersion   string `json:"agentVersion"`
+	IntervalSec    int    `json:"intervalSec"`
+	Online         bool   `json:"online"`
+	UptimeSec      uint64 `json:"uptimeSec"`
+	Group          string `json:"group"`
+	ExpireAt       string `json:"expireAt,omitempty"`
 	// Note 备注属内部信息，刻意不在公开接口返回（仅 /api/admin/servers 可见）
-	Stats          *protocol.Stats `json:"stats"`
+	Stats *protocol.Stats `json:"stats"`
 }
 
 func (s *App) listPublicServers() ([]publicServer, error) {

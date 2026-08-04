@@ -44,7 +44,7 @@ const (
 	// 而猜错的后果是把更新打到别的机器上。
 	keyPanelHostServer = "panel_host_server"
 
-	keyGCPSAJSON = "gcp_sa_json"
+	keyGCPSAJSON        = "gcp_sa_json"
 	keyGCPAutoOn        = "gcp_auto_on"
 	keyGCPStartDelay    = "gcp_start_delay"
 	keyGCPStartCooldown = "gcp_start_cooldown"

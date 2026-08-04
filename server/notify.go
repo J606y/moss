@@ -35,9 +35,9 @@ type notifyConfig struct {
 	//
 	// 代价是恢复通知延迟这么久，但这个代价该付：恢复通知的作用是「告诉你不用管了」，
 	// 晚几十秒毫无损失；而误发一次会让人以为没事了，实际还在反复。
-	RecoverSec int `json:"recoverSec"`
-	ExpireOn      bool   `json:"expireOn"`
-	ExpireDays    int    `json:"expireDays"` // 到期前几天提醒，1~7
+	RecoverSec int  `json:"recoverSec"`
+	ExpireOn   bool `json:"expireOn"`
+	ExpireDays int  `json:"expireDays"` // 到期前几天提醒，1~7
 }
 
 func loadNotifyConfig(db *sql.DB) notifyConfig {

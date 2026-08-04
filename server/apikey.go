@@ -28,7 +28,7 @@ var allCaps = []string{capRead, capExec, capWrite}
 
 var (
 	errKeyMissing  = errors.New("缺少 API Key")
-	errKeyInvalid  = errors.New("API Key 无效或已吊销")
+	errKeyInvalid  = errors.New("API Key 无效或已停用")
 	errKeyExpired  = errors.New("API Key 已过期")
 	errKeyNoCap    = errors.New("API Key 缺少所需能力")
 	errKeyNoServer = errors.New("API Key 无权访问该服务器")
@@ -179,7 +179,13 @@ type apiKeyRow struct {
 	ExpiresAt  int64    `json:"expiresAt"`
 	CreatedAt  int64    `json:"createdAt"`
 	LastUsedAt int64    `json:"lastUsedAt"`
-	Revoked    bool     `json:"revoked"`
+	// Disabled 已停用。数据库列仍叫 revoked（改名要迁移表，不值得），
+	// 但语义已从「吊销」改为「停用」——可以再启用回来。
+	//
+	// 原先「吊销」与「删除」的差别只有「列表里还看不看得见」，
+	// 为这点差别设两个动作不值；改成停用之后两者才真正分工：
+	// 停用是临时关，删除是彻底没。
+	Disabled bool `json:"disabled"`
 }
 
 func (s *App) handleListKeys(w http.ResponseWriter, r *http.Request) {
@@ -213,7 +219,7 @@ func (s *App) handleListKeys(w http.ResponseWriter, r *http.Request) {
 		if it.Servers == nil {
 			it.Servers = []string{}
 		}
-		it.Revoked = revoked == 1
+		it.Disabled = revoked == 1
 		list = append(list, it)
 	}
 	if err := rows.Err(); err != nil {
@@ -284,18 +290,91 @@ func (s *App) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"id": id, "key": raw})
 }
 
-func (s *App) handleRevokeKey(w http.ResponseWriter, r *http.Request) {
+// handleUpdateKey 修改已有 Key 的名称、能力集、机器范围与有效期。
+//
+// **密钥本身不可改**：库里只有哈希，改不出明文；要换密钥只能新建一把。
+// 这也是好事——改配置不该影响已经填进客户端的那串字符。
+func (s *App) handleUpdateKey(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		writeErr(w, 400, "参数错误")
 		return
 	}
-	// 吊销而非删除：Key 已经写进审计记录，删掉会让历史记录失去归属。
-	if _, err := s.db.Exec(`UPDATE api_keys SET revoked = 1 WHERE id = ?`, id); err != nil {
-		log.Printf("handleRevokeKey: %v", err)
+	var f keyForm
+	if err := json.NewDecoder(r.Body).Decode(&f); err != nil || strings.TrimSpace(f.Name) == "" {
+		writeErr(w, 400, "名称不能为空")
+		return
+	}
+	caps := normalizeCaps(f.Caps)
+	if len(caps) == 0 {
+		writeErr(w, 400, "至少需要选择一项能力")
+		return
+	}
+	// 与新建同一套校验：白名单里的 ID 必须真实存在，
+	// 否则用户会以为已授权、实际永远调不通。
+	for _, sid := range f.Servers {
+		var n int
+		if err := s.db.QueryRow(`SELECT COUNT(1) FROM servers WHERE id = ?`, sid).Scan(&n); err != nil || n == 0 {
+			writeErr(w, 400, "机器白名单包含不存在的服务器: "+sid)
+			return
+		}
+	}
+
+	// 停用中的 Key 同样可编辑：停用是「临时关掉」而非「作废」，
+	// 改完权限再启用回来是正常用法。
+	var exists int
+	if err := s.db.QueryRow(`SELECT COUNT(1) FROM api_keys WHERE id = ?`, id).Scan(&exists); err != nil || exists == 0 {
+		writeErr(w, 404, "密钥不存在")
+		return
+	}
+
+	if _, err := s.db.Exec(
+		`UPDATE api_keys SET name = ?, caps = ?, servers = ?, expires_at = ? WHERE id = ?`,
+		strings.TrimSpace(f.Name), strings.Join(caps, ","), strings.Join(f.Servers, ","), f.ExpiresAt, id,
+	); err != nil {
+		log.Printf("handleUpdateKey: %v", err)
 		writeErr(w, 500, "内部错误")
 		return
 	}
+	// 鉴权走的是数据库实时查询，改完立即生效，无需让客户端重连。
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+// handleToggleKey 停用 / 启用一把 Key。
+//
+// 取代原先的「吊销」：吊销是终态、不可恢复，而它与删除的实际差别只有
+// 「列表里还看不看得见」——为这点差别设两个动作不值。
+// 改成可切换的停用之后，两个动作才真正分工：**停用是临时关，删除是彻底没**。
+//
+// 数据库列仍叫 revoked（改名要迁移表，不值得），语义已改为「已停用」。
+func (s *App) handleToggleKey(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeErr(w, 400, "参数错误")
+		return
+	}
+	var body struct {
+		Disabled bool `json:"disabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, 400, "请求格式错误")
+		return
+	}
+	v := 0
+	if body.Disabled {
+		v = 1
+	}
+	res, err := s.db.Exec(`UPDATE api_keys SET revoked = ? WHERE id = ?`, v, id)
+	if err != nil {
+		log.Printf("handleToggleKey: %v", err)
+		writeErr(w, 500, "内部错误")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeErr(w, 404, "密钥不存在")
+		return
+	}
+	// 鉴权每次都查库，停用/启用立即生效，无需客户端重连。
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 

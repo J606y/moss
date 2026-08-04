@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { KeyRound, Plus, Ban, Trash2, ShieldAlert } from 'lucide-react'
-import { del, get, post } from '../../api/client'
+import { KeyRound, Plus, Pencil, Power, PowerOff, Trash2, ShieldAlert } from 'lucide-react'
+import { del, get, post, put } from '../../api/client'
 import type { ApiKey, AdminServer } from '../../types'
 import { CheckBox, CopyBtn, Modal, ConfirmDelete } from '../../components/ui'
 import { errMsg } from '../../utils/admin'
@@ -21,8 +21,8 @@ export function AiTab({ toast }: { toast: Toast }) {
   const [keys, setKeys] = useState<ApiKey[]>([])
   const [servers, setServers] = useState<AdminServer[]>([])
   const [creating, setCreating] = useState(false)
+  const [editing, setEditing] = useState<ApiKey | null>(null)
   const [newKey, setNewKey] = useState<string | null>(null)
-  const [revoking, setRevoking] = useState<ApiKey | null>(null)
   const [deleting, setDeleting] = useState<ApiKey | null>(null)
 
   const load = useCallback(() => {
@@ -38,11 +38,12 @@ export function AiTab({ toast }: { toast: Toast }) {
       .catch(() => {})
   }, [load])
 
-  const revoke = async (k: ApiKey) => {
+  // 停用/启用不设确认弹窗：它可以随时切回来，代价接近零。
+  // 需要确认的是删除——那个不可恢复。
+  const toggle = async (k: ApiKey) => {
     try {
-      await post(`/api/admin/keys/${k.id}/revoke`)
-      toast(`已吊销「${k.name}」`)
-      setRevoking(null)
+      await put(`/api/admin/keys/${k.id}/disabled`, { disabled: !k.disabled })
+      toast(k.disabled ? `已启用「${k.name}」` : `已停用「${k.name}」`)
       load()
     } catch (e) {
       toast(errMsg(e))
@@ -84,7 +85,7 @@ export function AiTab({ toast }: { toast: Toast }) {
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead>
-                {/* 次要列在窄屏隐藏：手机上要能直接够到吊销/删除，
+                {/* 次要列在窄屏隐藏：手机上要能直接够到停用/删除，
                     而不是横滑一段才摸得到操作按钮 */}
                 <tr className="border-b border-white/40 dark:border-white/10">
                   <th className={th}>名称</th>
@@ -102,7 +103,8 @@ export function AiTab({ toast }: { toast: Toast }) {
                     key={k.id}
                     k={k}
                     servers={servers}
-                    onRevoke={() => setRevoking(k)}
+                    onEdit={() => setEditing(k)}
+                    onToggle={() => toggle(k)}
                     onDelete={() => setDeleting(k)}
                   />
                 ))}
@@ -125,19 +127,25 @@ export function AiTab({ toast }: { toast: Toast }) {
         />
       )}
 
-      {newKey && <NewKeyModal plain={newKey} onClose={() => setNewKey(null)} />}
-
-      {revoking && (
-        <ConfirmDelete title="吊销密钥" onCancel={() => setRevoking(null)} onConfirm={() => revoke(revoking)}>
-          吊销「{revoking.name}」后，正在使用它的 AI 客户端会立刻失去访问权限。
-          记录会保留，历史审计仍可追溯到这把密钥。
-        </ConfirmDelete>
+      {editing && (
+        <KeyFormModal
+          servers={servers}
+          edit={editing}
+          onClose={() => setEditing(null)}
+          onCreated={() => {
+            setEditing(null)
+            load()
+          }}
+          toast={toast}
+        />
       )}
+
+      {newKey && <NewKeyModal plain={newKey} onClose={() => setNewKey(null)} />}
 
       {deleting && (
         <ConfirmDelete title="删除密钥" onCancel={() => setDeleting(null)} onConfirm={() => remove(deleting)}>
-          删除「{deleting.name}」后不可恢复。若只是想停用，建议改用吊销——
-          删除会让历史审计记录失去对应的密钥信息。
+          删除「{deleting.name}」后不可恢复，列表里也不再留下任何痕迹。
+          只是想临时关掉的话用「停用」——那个随时可以再启用。
         </ConfirmDelete>
       )}
     </div>
@@ -147,16 +155,18 @@ export function AiTab({ toast }: { toast: Toast }) {
 function KeyRow({
   k,
   servers,
-  onRevoke,
+  onEdit,
+  onToggle,
   onDelete,
 }: {
   k: ApiKey
   servers: AdminServer[]
-  onRevoke: () => void
+  onEdit: () => void
+  onToggle: () => void
   onDelete: () => void
 }) {
   const expired = k.expiresAt > 0 && Date.now() / 1000 > k.expiresAt
-  const dead = k.revoked || expired
+  const dead = k.disabled || expired
 
   const scope =
     k.servers.length === 0
@@ -170,8 +180,8 @@ function KeyRow({
       <td className={td}>
         <div className="flex items-center gap-2">
           {k.name}
-          {k.revoked && <span className="rounded bg-rose-500/10 px-1.5 py-0.5 text-xs text-rose-500">已吊销</span>}
-          {!k.revoked && expired && (
+          {k.disabled && <span className="rounded bg-zinc-500/15 px-1.5 py-0.5 text-xs text-zinc-500">已停用</span>}
+          {!k.disabled && expired && (
             <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-600">已过期</span>
           )}
         </div>
@@ -199,11 +209,17 @@ function KeyRow({
       </td>
       <td className={`${td} text-right`}>
         <div className="flex justify-end gap-1">
-          {!k.revoked && (
-            <button className={iconBtn} title="吊销" onClick={onRevoke}>
-              <Ban className="h-4 w-4" />
-            </button>
-          )}
+          <button className={iconBtn} title="编辑" onClick={onEdit}>
+            <Pencil className="h-4 w-4" />
+          </button>
+          {/* 停用可来回切；删除才是不可恢复的那个 */}
+          <button
+            className={`${iconBtn} ${k.disabled ? '!text-emerald-500' : ''}`}
+            title={k.disabled ? '启用' : '停用'}
+            onClick={onToggle}
+          >
+            {k.disabled ? <Power className="h-4 w-4" /> : <PowerOff className="h-4 w-4" />}
+          </button>
           <button className={iconBtn} title="删除" onClick={onDelete}>
             <Trash2 className="h-4 w-4" />
           </button>
@@ -215,21 +231,35 @@ function KeyRow({
 
 /* ---------- 新建密钥 ---------- */
 
+/**
+ * 新建 / 编辑密钥。传 edit 即进入编辑模式。
+ *
+ * 编辑改不了密钥本身——库里只有哈希，改不出明文。这反而是对的：
+ * 调整权限范围不该让已经填进客户端的那串字符失效。
+ */
 function KeyFormModal({
   servers,
+  edit,
   onClose,
   onCreated,
   toast,
 }: {
   servers: AdminServer[]
+  edit?: ApiKey
   onClose: () => void
   onCreated: (plain: string) => void
   toast: Toast
 }) {
-  const [name, setName] = useState('')
-  const [caps, setCaps] = useState<string[]>(['read'])
-  const [scope, setScope] = useState('') // 逗号分隔；空串表示全部机器
-  const [days, setDays] = useState('')
+  const [name, setName] = useState(edit?.name ?? '')
+  const [caps, setCaps] = useState<string[]>(edit?.caps ?? ['read'])
+  const [scope, setScope] = useState(edit?.servers.join(',') ?? '') // 逗号分隔；空串表示全部机器
+  // 有效期在库里是绝对时间戳，表单里填的是「从现在起多少天」。
+  // 编辑时换算回剩余天数，否则一打开就显示空白，保存等于把有效期抹成永久。
+  const [days, setDays] = useState(() => {
+    if (!edit || edit.expiresAt === 0) return ''
+    const left = Math.ceil((edit.expiresAt - Date.now() / 1000) / 86400)
+    return left > 0 ? String(left) : ''
+  })
   const [busy, setBusy] = useState(false)
 
   const toggleCap = (c: string) =>
@@ -242,12 +272,14 @@ function KeyFormModal({
     try {
       const n = Number(days)
       const expiresAt = days.trim() && n > 0 ? Math.floor(Date.now() / 1000) + n * 86400 : 0
-      const res = await post<{ id: number; key: string }>('/api/admin/keys', {
-        name: name.trim(),
-        caps,
-        servers: scope ? scope.split(',') : [],
-        expiresAt,
-      })
+      const body = { name: name.trim(), caps, servers: scope ? scope.split(',') : [], expiresAt }
+      if (edit) {
+        await put(`/api/admin/keys/${edit.id}`, body)
+        toast(`已保存「${name.trim()}」`)
+        onCreated('') // 编辑不产生新密钥，父组件只需刷新列表
+        return
+      }
+      const res = await post<{ id: number; key: string }>('/api/admin/keys', body)
       onCreated(res.key)
     } catch (e) {
       toast(errMsg(e))
@@ -268,7 +300,7 @@ function KeyFormModal({
     'flex w-full cursor-pointer select-none items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition hover:bg-white/50 dark:hover:bg-white/10'
 
   return (
-    <Modal title="新建接入密钥" onClose={onClose}>
+    <Modal title={edit ? `编辑「${edit.name}」` : "新建接入密钥"} onClose={onClose}>
       <div className="space-y-4">
         <div>
           <label className={formLabel}>名称</label>
@@ -345,7 +377,7 @@ function KeyFormModal({
             取消
           </button>
           <button className={btnPrimary} onClick={submit} disabled={busy}>
-            {busy ? '创建中…' : '创建'}
+            {busy ? '保存中…' : edit ? '保存' : '创建'}
           </button>
         </div>
       </div>

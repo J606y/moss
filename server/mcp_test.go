@@ -233,15 +233,15 @@ func TestMCPRejectsInvalidKey(t *testing.T) {
 	}
 }
 
-func TestMCPRejectsRevokedKey(t *testing.T) {
+func TestMCPRejectsDisabledKey(t *testing.T) {
 	app := mcpTestApp(t)
 	raw := mcpKey(t, app, "read", "")
 	if _, err := app.db.Exec(`UPDATE api_keys SET revoked = 1 WHERE key_hash = ?`, hashKey(raw)); err != nil {
-		t.Fatalf("吊销失败: %v", err)
+		t.Fatalf("停用失败: %v", err)
 	}
 	w := mcpPost(t, app, raw, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
 	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("已吊销的 Key 应返回 401，实际 %d", w.Code)
+		t.Fatalf("已停用的 Key 应返回 401，实际 %d", w.Code)
 	}
 }
 

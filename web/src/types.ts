@@ -188,7 +188,8 @@ export interface ApiKey {
   createdAt: number
   /** 0 表示从未使用 */
   lastUsedAt: number
-  revoked: boolean
+  /** 已停用。停用是临时关闭、可再启用；删除才是彻底移除。 */
+  disabled: boolean
 }
 
 /** 执行审计列表项，不含输出正文。 */
