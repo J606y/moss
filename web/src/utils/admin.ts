@@ -16,11 +16,21 @@ export function maskIp(ip: string) {
   return `${parts[0]}.${parts[1]}.*.*`
 }
 
-/** 三端通用同一个 endpoint + token，只是安装命令按系统区分 */
-export function installCmds(token: string) {
+/**
+ * 三端通用同一个 endpoint + token，只是安装命令按系统区分。
+ *
+ * allowExec 决定命令里带不带远程执行开关。默认不带——装了 agent 不等于同意被远程操作，
+ * 而这个开关只能在装机时由执行命令的人决定，面板无法远程打开它。
+ */
+export function installCmds(token: string, allowExec = false) {
   const origin = window.location.origin
   return {
-    sh: `curl -fsSL ${origin}/install.sh | bash -s -- --endpoint ${origin} --token ${token}`,
-    ps: `powershell -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((iwr -useb ${origin}/install.ps1))) -Endpoint '${origin}' -Token '${token}'"`,
+    sh:
+      `curl -fsSL ${origin}/install.sh | bash -s -- --endpoint ${origin} --token ${token}` +
+      (allowExec ? ' --allow-exec' : ''),
+    ps:
+      `powershell -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((iwr -useb ${origin}/install.ps1))) -Endpoint '${origin}' -Token '${token}'` +
+      (allowExec ? ' -AllowExec' : '') +
+      '"',
   }
 }

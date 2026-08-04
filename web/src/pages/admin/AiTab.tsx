@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
-import { KeyRound, Plus, ScrollText, Ban, Trash2, ShieldAlert } from 'lucide-react'
+import { KeyRound, Plus, Ban, Trash2, ShieldAlert } from 'lucide-react'
 import { del, get, post } from '../../api/client'
-import type { ApiKey, ExecAudit, ExecAuditDetail, AdminServer } from '../../types'
+import type { ApiKey, AdminServer } from '../../types'
 import { CheckBox, CopyBtn, Modal, ConfirmDelete } from '../../components/ui'
 import { errMsg } from '../../utils/admin'
-import { fmtDateTime, fmtTime } from '../../utils/format'
+import { fmtDateTime } from '../../utils/format'
 import { btnGhost, btnPrimary, card, formLabel, input, iconBtn, td, th } from '../../ui'
 import type { Toast } from './types'
 
@@ -111,8 +111,6 @@ export function AiTab({ toast }: { toast: Toast }) {
           </div>
         )}
       </section>
-
-      <AuditSection toast={toast} />
 
       {creating && (
         <KeyFormModal
@@ -419,164 +417,5 @@ function ConnectGuide() {
         </div>
       </div>
     </section>
-  )
-}
-
-/* ---------- 执行审计 ---------- */
-
-function AuditSection({ toast }: { toast: Toast }) {
-  const [rows, setRows] = useState<ExecAudit[]>([])
-  const [detail, setDetail] = useState<ExecAuditDetail | null>(null)
-
-  const load = useCallback(() => {
-    get<ExecAudit[]>('/api/admin/exec-audit?limit=100')
-      .then(setRows)
-      .catch((e) => toast(errMsg(e)))
-  }, [toast])
-
-  useEffect(load, [load])
-
-  const open = async (jobId: string) => {
-    try {
-      setDetail(await get<ExecAuditDetail>(`/api/admin/exec-audit/${jobId}`))
-    } catch (e) {
-      toast(errMsg(e))
-    }
-  }
-
-  return (
-    <section className={`${card} p-4 sm:p-5`}>
-      <div className="mb-4 flex items-center justify-between gap-3">
-        <h2 className="flex items-center gap-2 font-semibold">
-          <ScrollText className="h-4 w-4 text-emerald-500" />
-          执行审计
-        </h2>
-        <button className={btnGhost} onClick={load}>
-          刷新
-        </button>
-      </div>
-
-      {rows.length === 0 ? (
-        <p className="py-8 text-center text-sm text-zinc-400">暂无记录。AI 执行的每一条命令都会出现在这里。</p>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead>
-              <tr className="border-b border-white/40 dark:border-white/10">
-                <th className={th}>时间</th>
-                <th className={th}>机器</th>
-                <th className={`${th} hidden md:table-cell`}>调用方</th>
-                <th className={th}>命令</th>
-                <th className={th}>结果</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => (
-                <tr
-                  key={r.jobId}
-                  className="cursor-pointer border-b border-white/25 transition hover:bg-white/40 dark:border-white/5 dark:hover:bg-white/5"
-                  onClick={() => open(r.jobId)}
-                >
-                  {/* 窄屏只给时分秒，完整日期在这里不值得占掉「结果」列的位置 */}
-                  <td className={td}>
-                    <span className="md:hidden">{fmtTime(r.startedAt)}</span>
-                    <span className="hidden md:inline">{fmtDateTime(r.startedAt)}</span>
-                  </td>
-                  <td className={td}>{r.serverName || r.serverId}</td>
-                  <td className={`${td} hidden max-w-[10rem] truncate md:table-cell`} title={r.caller}>
-                    {r.caller}
-                  </td>
-                  <td className={`${td} max-w-[7rem] truncate font-mono text-xs sm:max-w-[20rem]`} title={r.cmd}>
-                    {r.cmd}
-                  </td>
-                  <td className={td}>
-                    <AuditStatus row={r} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {detail && <AuditDetailModal d={detail} onClose={() => setDetail(null)} />}
-    </section>
-  )
-}
-
-function AuditStatus({ row }: { row: ExecAudit }) {
-  if (row.finishedAt === 0) {
-    return <span className="rounded bg-sky-500/10 px-1.5 py-0.5 text-xs text-sky-600">执行中</span>
-  }
-  if (row.error) {
-    // 被拦截的命令是审计里最值得注意的记录，单独标红并原样展示原因。
-    const blocked = row.error.includes('拦截')
-    return (
-      <span
-        className={`rounded px-1.5 py-0.5 text-xs ${
-          blocked ? 'bg-rose-500/15 text-rose-600' : 'bg-amber-500/10 text-amber-600'
-        }`}
-        title={row.error}
-      >
-        {blocked ? '已拦截' : '失败'}
-      </span>
-    )
-  }
-  if (row.exitCode !== 0) {
-    return <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-600">退出码 {row.exitCode}</span>
-  }
-  return <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-xs text-emerald-600">成功</span>
-}
-
-function AuditDetailModal({ d, onClose }: { d: ExecAuditDetail; onClose: () => void }) {
-  const r = d.record
-  return (
-    <Modal title="执行详情" onClose={onClose}>
-      <div className="space-y-3 text-sm">
-        <Field label="机器" value={r.serverName || r.serverId} />
-        <Field label="调用方" value={r.caller} />
-        <Field label="时间" value={fmtDateTime(r.startedAt)} />
-        {r.dir && <Field label="工作目录" value={r.dir} />}
-        <div>
-          <label className={formLabel}>命令</label>
-          <pre className="glass-sheen overflow-x-auto rounded-xl border border-white/50 bg-white/45 p-2.5 font-mono text-xs dark:border-white/10 dark:bg-zinc-900/40">
-            {r.cmd}
-          </pre>
-        </div>
-        {r.error && (
-          <div className="rounded-xl border border-rose-400/30 bg-rose-500/10 p-2.5 text-sm text-rose-600 dark:text-rose-400">
-            {r.error}
-          </div>
-        )}
-        {d.stdout && <OutputBlock label="标准输出" text={d.stdout} />}
-        {d.stderr && <OutputBlock label="标准错误" text={d.stderr} />}
-        {r.truncated && <p className="text-xs text-zinc-400">输出较长，审计中只保留了开头部分。</p>}
-        <div className="flex justify-end">
-          <button className={btnGhost} onClick={onClose}>
-            关闭
-          </button>
-        </div>
-      </div>
-    </Modal>
-  )
-}
-
-function Field({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex justify-between gap-3">
-      <span className="text-zinc-500 dark:text-zinc-400">{label}</span>
-      <span className="text-right">{value}</span>
-    </div>
-  )
-}
-
-function OutputBlock({ label, text }: { label: string; text: string }) {
-  return (
-    <div>
-      <label className={formLabel}>{label}</label>
-      <pre className="glass-sheen max-h-48 overflow-auto rounded-xl border border-white/50 bg-white/45 p-2.5 font-mono text-xs leading-relaxed dark:border-white/10 dark:bg-zinc-900/40">
-        {text}
-      </pre>
-    </div>
   )
 }

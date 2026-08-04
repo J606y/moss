@@ -5,7 +5,10 @@ param(
   [Parameter(Mandatory = $true)][string]$Token,
   [string]$Repo = "j606y/moss",
   # 默认版本由 server 下发脚本时改写为它自身的版本，理由见 install.sh 同处注释。
-  [string]$Version = "latest"
+  [string]$Version = "latest",
+  # 远程执行默认关闭。装了 agent 不等于同意被远程操作——
+  # 这个开关的控制权在机器上，面板无法远程打开它。
+  [switch]$AllowExec
 )
 $ErrorActionPreference = "Stop"
 
@@ -65,10 +68,21 @@ icacls $tokenPath /inheritance:r /grant "SYSTEM:R" "Administrators:R" | Out-Null
 # 对原生命令嵌套引号转义损坏的坑（schtasks /TR 会把带空格路径拆成多个参数而报错）。
 $taskName = "MossAgent"
 # 升级/重装：先停掉旧任务实例（存在才停）；下面 Register -Force 会覆盖旧定义
-if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+$extraArgs = ""
+if ($AllowExec) { $extraArgs = " --allow-exec" }
+$existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+if ($existingTask) {
+  # Register-ScheduledTask -Force 会整个覆盖任务定义，用户自己加在 -Argument 里的
+  # --allow-exec 会被静默抹掉：升级完远程执行就没了，且全程无任何提示。
+  # 这与 Linux 侧重写 /etc/moss-agent.env 是同一个坑，两边都必须保留用户的设置。
+  $oldArgs = ($existingTask.Actions | Select-Object -First 1).Arguments
+  if (-not $AllowExec -and $oldArgs -match '--allow-exec') {
+    $extraArgs = " --allow-exec"
+    Write-Host "检测到已开启远程执行，保留 --allow-exec"
+  }
   Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 }
-$action    = New-ScheduledTaskAction -Execute $bin -Argument "--endpoint `"$Endpoint`" --token-file `"$tokenPath`""
+$action    = New-ScheduledTaskAction -Execute $bin -Argument "--endpoint `"$Endpoint`" --token-file `"$tokenPath`"$extraArgs"
 $trigger   = New-ScheduledTaskTrigger -AtStartup
 $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 # ExecutionTimeLimit 默认 PT72H：满 3 天 Task Scheduler 会杀掉 agent，而 ONSTART 要等
@@ -80,3 +94,8 @@ Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Pr
 Start-ScheduledTask -TaskName $taskName
 
 Write-Host "✅ 已安装并启动 Moss Agent（计划任务，开机自启）"
+if ($extraArgs) {
+  Write-Host "   已开启远程执行：本机接受面板下发的命令"
+} else {
+  Write-Host "   远程执行未开启（仅监控）"
+}

@@ -78,9 +78,10 @@ func spaHandler(webDir string) http.Handler {
 }
 
 // setStaticCache 按文件名定缓存策略：
-//   assets/* 是 Vite 按内容哈希命名的产物（内容变即换名），可永久强缓存；
-//   index.html（含所有 SPA 回退）绝不能强缓存，否则发版后浏览器仍读旧 HTML，
-//   而它引用的旧哈希资源已被新构建删除 → 页面白屏/卡旧版，必须每次回源校验。
+//
+//	assets/* 是 Vite 按内容哈希命名的产物（内容变即换名），可永久强缓存；
+//	index.html（含所有 SPA 回退）绝不能强缓存，否则发版后浏览器仍读旧 HTML，
+//	而它引用的旧哈希资源已被新构建删除 → 页面白屏/卡旧版，必须每次回源校验。
 func setStaticCache(w http.ResponseWriter, name string) {
 	if strings.HasPrefix(name, "assets/") {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")

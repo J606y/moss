@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { ArrowUpCircle, Eye, EyeOff, GripVertical, Loader2, Pencil, Play, Plus, Terminal, Trash2 } from 'lucide-react'
 import { del, get, post, put } from '../../api/client'
 import type { AdminServer } from '../../types'
-import { CmdBlock, ConfirmDelete, CopyBtn, Modal, StatusPill } from '../../components/ui'
+import { CmdBlock, ConfirmDelete, CopyBtn, Modal, StatusPill, Switch } from '../../components/ui'
 import Flag from '../../components/Flag'
 import { errMsg, installCmds, maskIp } from '../../utils/admin'
 import { btnGhost, btnPrimary, card, iconBtn, input, td, th } from '../../ui'
@@ -45,6 +45,13 @@ export function ServersTab({ toast }: { toast: Toast }) {
   const { items: list, setItems: setList, mutate } = useOptimisticList<AdminServer>([])
   const [modal, setModal] = useState<'add' | AdminServer | null>(null)
   const [install, setInstall] = useState<{ name: string; token: string } | null>(null)
+  // 安装命令里带不带远程执行开关。默认关：装了 agent 不等于同意被远程操作。
+  const [allowExec, setAllowExec] = useState(false)
+  // 关闭时一并复位：安全默认不能因为上一台开过就延续到下一台。
+  const closeInstall = () => {
+    setInstall(null)
+    setAllowExec(false)
+  }
   const [confirmDel, setConfirmDel] = useState<AdminServer | null>(null)
   const [revealed, setRevealed] = useState<Set<string>>(new Set())
   const [search, setSearch] = useState('')
@@ -420,20 +427,36 @@ export function ServersTab({ toast }: { toast: Toast }) {
       )}
 
       {install && (
-        <Modal title={`Agent 安装命令 · ${install.name}`} onClose={() => setInstall(null)}>
+        <Modal title={`Agent 安装命令 · ${install.name}`} onClose={closeInstall}>
           <p className="mb-3 text-xs text-zinc-500">
             三个系统共用同一个地址和 Token，按目标系统选择对应命令执行即可：
           </p>
+
+          {/* 远程执行开关做进命令本身，而不是让人装完再去改配置文件。
+              开关状态只影响复制出来的命令——控制权仍在真正去机器上执行它的人手里，
+              面板改不了任何一台已装机器的这个设置。 */}
+          <div className="mb-3 flex items-start justify-between gap-3 rounded-xl border border-white/40 bg-white/30 p-3 dark:border-white/10 dark:bg-white/5">
+            <div className="min-w-0">
+              <p className="text-sm font-medium">允许 AI 执行命令</p>
+              <p className="mt-0.5 text-xs text-zinc-500">
+                {allowExec
+                  ? '这台机器将接受面板下发的命令。危险操作仍会被硬拦截，每一条都进审计。'
+                  : '默认只上报监控数据，不接受任何远程命令。'}
+              </p>
+            </div>
+            <Switch on={allowExec} onChange={setAllowExec} />
+          </div>
+
           <div className="space-y-3">
-            <CmdBlock label="Linux / macOS" cmd={installCmds(install.token).sh} />
-            <CmdBlock label="Windows（管理员 PowerShell）" cmd={installCmds(install.token).ps} />
+            <CmdBlock label="Linux / macOS" cmd={installCmds(install.token, allowExec).sh} />
+            <CmdBlock label="Windows（管理员 PowerShell）" cmd={installCmds(install.token, allowExec).ps} />
             <div className="flex items-center gap-1 text-xs text-zinc-500">
               Token：<code className="rounded bg-zinc-500/10 px-1.5 py-0.5 dark:bg-white/10">{install.token}</code>
               <CopyBtn text={install.token} />
             </div>
           </div>
           <div className="mt-3 flex justify-end">
-            <button className={btnGhost} onClick={() => setInstall(null)}>
+            <button className={btnGhost} onClick={closeInstall}>
               关闭
             </button>
           </div>

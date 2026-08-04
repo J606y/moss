@@ -11,11 +11,15 @@ REPO="${MOSS_REPO:-j606y/moss}"   # GitHub 仓库
 VERSION="${MOSS_VERSION:-latest}"
 ENDPOINT=""
 TOKEN=""
+# 远程执行默认关闭。装了 agent 不等于同意被远程操作——
+# 这个开关的控制权在机器上，面板无法远程打开它。
+ALLOW_EXEC=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --endpoint) ENDPOINT="$2"; shift 2 ;;
-    --token)    TOKEN="$2"; shift 2 ;;
+    --endpoint)   ENDPOINT="$2"; shift 2 ;;
+    --token)      TOKEN="$2"; shift 2 ;;
+    --allow-exec) ALLOW_EXEC=1; shift ;;
     *) echo "未知参数: $1"; exit 1 ;;
   esac
 done
@@ -77,9 +81,15 @@ if [[ "$OS" == "linux" ]] && command -v systemctl >/dev/null; then
   if [ -f "$ENV_FILE" ]; then
     KEEP="$($SUDO grep -v '^[[:space:]]*MOSS_TOKEN=' "$ENV_FILE" || true)"
   fi
+  # 显式带了 --allow-exec 时，先滤掉旧的同名行，避免重复写出两条。
+  # 没带则保持原样：已经开过的不会被关掉，这与「保留用户自定义变量」是同一条原则。
+  if [ -n "$KEEP" ] && [ "$ALLOW_EXEC" = "1" ]; then
+    KEEP="$(printf '%s\n' "$KEEP" | grep -v '^[[:space:]]*MOSS_ALLOW_EXEC=' || true)"
+  fi
   $SUDO install -m 600 /dev/null "$ENV_FILE"
   {
     printf 'MOSS_TOKEN=%s\n' "$TOKEN"
+    if [ "$ALLOW_EXEC" = "1" ]; then printf 'MOSS_ALLOW_EXEC=1\n'; fi
     # 用 if 而非 `[ -n "$KEEP" ] && printf`：后者在 KEEP 为空时返回 1，
     # 作为块内最后一条命令会让整个管道在 set -o pipefail 下失败退出。
     if [ -n "$KEEP" ]; then printf '%s\n' "$KEEP"; fi
@@ -106,6 +116,11 @@ EOF
   # “面板删号后重装一直 401 不上线”。restart 强制拉起新二进制 + 新 token。
   $SUDO systemctl restart moss-agent
   echo "✅ 已安装并启动 moss-agent (systemd)"
+  if [ "$ALLOW_EXEC" = "1" ]; then
+    echo "   已开启远程执行：本机接受面板下发的命令"
+  else
+    echo "   远程执行未开启（仅监控）"
+  fi
 elif [[ "$OS" == "darwin" ]]; then
   PLIST="$HOME/Library/LaunchAgents/com.moss.agent.plist"
   mkdir -p "$(dirname "$PLIST")"
@@ -113,6 +128,13 @@ elif [[ "$OS" == "darwin" ]]; then
   TOKEN_FILE="$HOME/Library/Application Support/moss-agent/token"
   mkdir -p "$(dirname "$TOKEN_FILE")"
   ( umask 077; printf '%s' "$TOKEN" > "$TOKEN_FILE" )
+  # launchd 没有 EnvironmentFile，开关只能进 ProgramArguments。
+  # 换行是有意的：插进 array 后每个 <string> 各占一行，plist 保持可读。
+  ALLOW_EXEC_ARG=""
+  if [ "$ALLOW_EXEC" = "1" ]; then
+    ALLOW_EXEC_ARG="
+    <string>--allow-exec</string>"
+  fi
   cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -121,7 +143,7 @@ elif [[ "$OS" == "darwin" ]]; then
   <key>ProgramArguments</key><array>
     <string>${BIN}</string>
     <string>--endpoint</string><string>${ENDPOINT}</string>
-    <string>--token-file</string><string>${TOKEN_FILE}</string>
+    <string>--token-file</string><string>${TOKEN_FILE}</string>${ALLOW_EXEC_ARG}
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -131,6 +153,8 @@ EOF
   launchctl load "$PLIST"
   echo "✅ 已安装并启动 moss-agent (launchd)"
 else
+  MANUAL_ARGS="--endpoint ${ENDPOINT} --token ${TOKEN}"
+  if [ "$ALLOW_EXEC" = "1" ]; then MANUAL_ARGS="${MANUAL_ARGS} --allow-exec"; fi
   echo "✅ 已安装到 ${BIN}，请自行配置开机自启："
-  echo "   ${BIN} --endpoint ${ENDPOINT} --token ${TOKEN}"
+  echo "   ${BIN} ${MANUAL_ARGS}"
 fi

@@ -3,14 +3,15 @@ package main
 // settings 表的 key 常量，集中定义避免写入端/读取端拼写漂移
 // （拼错时 getSetting 会静默返回 fallback，难以排查）。
 const (
-	keySiteName       = "site_name"
-	keySiteDesc       = "site_desc"
-	keyReportInterval = "report_interval"
-	keySampleInterval = "sample_interval"
-	keySampleUnitSec  = "sample_unit_sec"
-	keyHistoryDays    = "history_days"
-	keyPingDays       = "ping_days"
-	keyExecAuditDays  = "exec_audit_days"
+	keySiteName         = "site_name"
+	keySiteDesc         = "site_desc"
+	keyReportInterval   = "report_interval"
+	keySampleInterval   = "sample_interval"
+	keySampleUnitSec    = "sample_unit_sec"
+	keyHistoryDays      = "history_days"
+	keyPingDays         = "ping_days"
+	keyExecAuditDays    = "exec_audit_days"
+	keyExecAuditMaxRows = "exec_audit_max_rows"
 
 	keyUsername     = "username"
 	keyPasswordHash = "password_hash"

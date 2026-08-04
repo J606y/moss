@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"moss/internal/protocol"
 )
@@ -68,7 +69,16 @@ type execAuditRow struct {
 	Truncated  bool   `json:"truncated,omitempty"`
 }
 
-// handleExecAudit 返回执行审计列表，按时间倒序。
+// execAuditPage 审计列表的分页响应。
+//
+// 带上 Total 是分页的前提：不知道总数就画不出页码，只能退化成「一直往下加载」——
+// 而那正是 5000 条堆在一页里、滑到手酸还卡顿的来源。
+type execAuditPage struct {
+	Items []execAuditRow `json:"items"`
+	Total int            `json:"total"`
+}
+
+// handleExecAudit 返回执行审计列表，按时间倒序，带总数供前端分页。
 func (s *App) handleExecAudit(w http.ResponseWriter, r *http.Request) {
 	limit := 100
 	if v := r.URL.Query().Get("limit"); v != "" {
@@ -76,19 +86,48 @@ func (s *App) handleExecAudit(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	args := []any{}
-	where := ""
-	if sid := r.URL.Query().Get("server"); sid != "" {
-		where = ` WHERE a.server_id = ?`
-		args = append(args, sid)
+	// offset 支持翻页：审计会持续增长，只给最近一页等于旧记录不可达。
+	offset := 0
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			offset = n
+		}
 	}
-	args = append(args, limit)
+
+	// filterArgs 只含筛选条件，供 COUNT 复用；分页参数单独追加，
+	// 否则总数会被 LIMIT 影响，页码数永远算错。
+	filterArgs := []any{}
+	conds := []string{}
+	if sid := r.URL.Query().Get("server"); sid != "" {
+		conds = append(conds, "a.server_id = ?")
+		filterArgs = append(filterArgs, sid)
+	}
+	// 「仅看拦截」：被拦下的尝试是审计里最该被单独捞出来看的记录，
+	// 混在日常执行流水里很快就被刷到翻不到的地方。
+	if r.URL.Query().Get("blocked") == "1" {
+		conds = append(conds, "a.error LIKE ?")
+		filterArgs = append(filterArgs, execBlockedPrefix+"%")
+	}
+	where := ""
+	if len(conds) > 0 {
+		where = " WHERE " + strings.Join(conds, " AND ")
+	}
+
+	// 总数与列表必须用同一套筛选条件，否则筛选后页码还是按全量算的。
+	var total int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM exec_audit a`+where, filterArgs...,
+	).Scan(&total); err != nil {
+		log.Printf("handleExecAudit count: %v", err)
+		writeErr(w, 500, "内部错误")
+		return
+	}
 
 	rows, err := s.db.Query(`
 		SELECT a.job_id, a.server_id, COALESCE(s.name, ''), a.caller, a.cmd, a.dir,
 		       a.started_at, a.finished_at, a.exit_code, a.error, a.truncated
 		FROM exec_audit a LEFT JOIN servers s ON s.id = a.server_id`+where+`
-		ORDER BY a.started_at DESC LIMIT ?`, args...)
+		ORDER BY a.started_at DESC LIMIT ? OFFSET ?`, append(filterArgs, limit, offset)...)
 	if err != nil {
 		log.Printf("handleExecAudit query: %v", err)
 		writeErr(w, 500, "内部错误")
@@ -114,7 +153,7 @@ func (s *App) handleExecAudit(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "内部错误")
 		return
 	}
-	writeJSON(w, 200, list)
+	writeJSON(w, 200, execAuditPage{Items: list, Total: total})
 }
 
 // handleExecAuditDetail 返回单条审计的完整记录，含输出正文。

@@ -348,17 +348,29 @@ type settingsView struct {
 	SampleInterval int    `json:"sampleInterval"`
 	HistoryDays    int    `json:"historyDays"`
 	PingDays       int    `json:"pingDays"`
+	// ExecAuditDays 执行审计保留天数。
+	//
+	// 下限刻意不给到 1 天：审计的意义是「AI 动过什么事后查得到」，
+	// 少于一周意味着周末发生的事周一就没了——而周末恰恰是无人值守、
+	// AI 自主处置最多的时候。单条记录不可删除，只能整体设定保留时长。
+	ExecAuditDays int `json:"execAuditDays"`
+	// ExecAuditMaxRows 审计条数上限，与保留天数取先触发者。
+	// 可设 100–5000；不再提供「不限制」选项——无上限意味着一次失控的高频调用
+	// 就能把库撑到 GB 级，而 SQLite 打满磁盘会带走整个面板。
+	ExecAuditMaxRows int `json:"execAuditMaxRows"`
 }
 
 func (s *App) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, settingsView{
-		Username:       getSetting(s.db, keyUsername, "admin"),
-		SiteName:       getSetting(s.db, keySiteName, "Moss"),
-		SiteDesc:       getSetting(s.db, keySiteDesc, "智控中心"),
-		ReportInterval: getSettingInt(s.db, keyReportInterval, 2),
-		SampleInterval: getSettingInt(s.db, keySampleInterval, 10),
-		HistoryDays:    getSettingInt(s.db, keyHistoryDays, 7),
-		PingDays:       getSettingInt(s.db, keyPingDays, 7),
+		Username:         getSetting(s.db, keyUsername, "admin"),
+		SiteName:         getSetting(s.db, keySiteName, "Moss"),
+		SiteDesc:         getSetting(s.db, keySiteDesc, "智控中心"),
+		ReportInterval:   getSettingInt(s.db, keyReportInterval, 2),
+		SampleInterval:   getSettingInt(s.db, keySampleInterval, 10),
+		HistoryDays:      getSettingInt(s.db, keyHistoryDays, 7),
+		PingDays:         getSettingInt(s.db, keyPingDays, 7),
+		ExecAuditDays:    getSettingInt(s.db, keyExecAuditDays, 90),
+		ExecAuditMaxRows: getSettingInt(s.db, keyExecAuditMaxRows, execAuditMaxRows),
 	})
 }
 
@@ -397,6 +409,10 @@ func (s *App) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	setSetting(s.db, keySampleInterval, strconv.Itoa(clampInt(v.SampleInterval, 5, 3600, 10)))
 	setSetting(s.db, keyHistoryDays, strconv.Itoa(clampInt(v.HistoryDays, 1, 365, 7)))
 	setSetting(s.db, keyPingDays, strconv.Itoa(clampInt(v.PingDays, 1, 90, 7)))
+	setSetting(s.db, keyExecAuditDays, strconv.Itoa(clampInt(v.ExecAuditDays, 7, 90, 90)))
+	// 这里可以放心用 clampInt：0 已不再是有效值，被它当作「未设」回退到 5000 正是想要的行为。
+	setSetting(s.db, keyExecAuditMaxRows,
+		strconv.Itoa(clampInt(v.ExecAuditMaxRows, execAuditMinRows, execAuditMaxRows, execAuditMaxRows)))
 	s.pushConfigAll()
 	s.hub.BroadcastMeta()
 	writeJSON(w, 200, map[string]bool{"ok": true})

@@ -103,11 +103,16 @@ func newUpgradeManager() *upgradeManager {
 
 /* ---------- 版本判定 ---------- */
 
-// agentMinUpgradable 支持接收 upgrade 消息的最低 agent 主版本号。
+// agentMinUpgradable 能接收 upgrade 消息的最低 agent 版本。
 //
-// 低于此版本的 agent 其 WS 消息分发 switch 没有 default 分支，未知类型被静默丢弃，
+// upgrade 消息类型是 v2.0.0-beta.2 引入的，此前的 agent（**包括 2.0.0-beta.1**）
+// 其 WS 消息分发 switch 没有 default 分支，未知类型被静默丢弃，
 // 症状是干等到超时而非报错。因此必须在下发前就拦住。
-const agentMinUpgradable = 2
+//
+// 判据必须精确到预发布号，不能只比主版本：2.0.0-beta.1 的主版本也是 2，
+// 只看主版本会把它误判为支持，用户点了按钮就是白等一场——
+// 而这正是这个按钮本该防住的事。
+const agentMinUpgradable = "2.0.0-beta.2"
 
 // agentSupportsUpgrade 判断该版本的 agent 认不认识 upgrade 消息。
 //
@@ -121,12 +126,79 @@ func agentSupportsUpgrade(v string) bool {
 	if v == "dev" {
 		return true
 	}
-	major, _, _ := strings.Cut(v, ".")
-	n, err := strconv.Atoi(major)
-	if err != nil {
-		return false
+	return compareSemver(v, agentMinUpgradable) >= 0
+}
+
+// compareSemver 比较两个语义化版本，返回 -1 / 0 / 1。
+//
+// 覆盖预发布后缀的排序规则：2.0.0-beta.1 < 2.0.0-beta.2 < 2.0.0。
+// 无法解析的段按 0 处理而不是报错——版本号来自 agent 上报，
+// 拿不准的输入应当落到「保守判定」而非让整个判断炸掉。
+func compareSemver(a, b string) int {
+	an, ap := splitSemver(a)
+	bn, bp := splitSemver(b)
+	for i := range an {
+		if an[i] != bn[i] {
+			if an[i] < bn[i] {
+				return -1
+			}
+			return 1
+		}
 	}
-	return n >= agentMinUpgradable
+	// 数字段相同：带预发布后缀的排在正式版之前（2.0.0-beta.1 < 2.0.0）。
+	switch {
+	case ap == "" && bp == "":
+		return 0
+	case ap == "":
+		return 1
+	case bp == "":
+		return -1
+	}
+	return comparePrerelease(ap, bp)
+}
+
+// splitSemver 拆出 [major, minor, patch] 与预发布后缀。
+func splitSemver(v string) ([3]int, string) {
+	var nums [3]int
+	core, pre, _ := strings.Cut(v, "-")
+	core, _, _ = strings.Cut(core, "+") // 构建元数据不参与比较
+	for i, seg := range strings.SplitN(core, ".", 3) {
+		if i > 2 {
+			break
+		}
+		nums[i], _ = strconv.Atoi(seg) // 解析失败即 0
+	}
+	return nums, pre
+}
+
+// comparePrerelease 按点分段比较预发布标识：
+// 全数字段按数值比，否则按字典序；段数少的排在前面（beta < beta.1）。
+func comparePrerelease(a, b string) int {
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(as) && i < len(bs); i++ {
+		if as[i] == bs[i] {
+			continue
+		}
+		an, aErr := strconv.Atoi(as[i])
+		bn, bErr := strconv.Atoi(bs[i])
+		if aErr == nil && bErr == nil {
+			if an < bn {
+				return -1
+			}
+			return 1
+		}
+		if as[i] < bs[i] {
+			return -1
+		}
+		return 1
+	}
+	switch {
+	case len(as) < len(bs):
+		return -1
+	case len(as) > len(bs):
+		return 1
+	}
+	return 0
 }
 
 // sameVersion 比较两个版本号，忽略 v 前缀差异。
@@ -276,7 +348,15 @@ func (m *upgradeManager) OnRegister(serverID, reportedVersion string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	job, ok := m.jobs[serverID]
-	if !ok || isTerminalStage(job.Stage) {
+	if !ok {
+		return
+	}
+	if isTerminalStage(job.Stage) {
+		// 失败标记应当在问题解决后自行消失：agent 上报的版本已经等于目标版本，
+		// 说明人已经手动升上去了，界面再挂一个红色的失败按钮只会误导。
+		if job.Stage == upgradeStageFailed && sameVersion(reportedVersion, job.Target) {
+			delete(m.jobs, serverID)
+		}
 		return
 	}
 	// 替换之前的重连只是普通的网络抖动，此时版本本来就还是旧的，不能据此判失败。

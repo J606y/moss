@@ -15,13 +15,19 @@ func TestAgentSupportsUpgrade(t *testing.T) {
 		"2.0.0":        true,
 		"v2.0.0":       true,
 		"2.0.0-beta.2": true,
+		"2.0.0-rc.1":   true, // rc > beta
+		"2.0.1":        true,
 		"10.1.0":       true,
 		"dev":          true, // 源码构建，必然含最新协议；本地端到端验证要靠它
-		"1.4.0":        false,
-		"v1.4.0":       false,
-		"0.9.0":        false,
-		"":             false, // 从未上报过版本，保守视为不支持
-		"garbage":      false,
+		// beta.1 的主版本也是 2，只比主版本会把它误判为支持。
+		// upgrade 消息是 beta.2 才加的，beta.1 收到同样静默丢弃。
+		"2.0.0-beta.1":  false,
+		"2.0.0-alpha.9": false,
+		"1.4.0":         false,
+		"v1.4.0":        false,
+		"0.9.0":         false,
+		"":              false, // 从未上报过版本，保守视为不支持
+		"garbage":       false,
 	}
 	for v, want := range cases {
 		if got := agentSupportsUpgrade(v); got != want {
@@ -30,10 +36,40 @@ func TestAgentSupportsUpgrade(t *testing.T) {
 	}
 }
 
+// semver 的排序规则里最容易写错的就是预发布段，而按钮能不能点全靠它。
+func TestCompareSemver(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"2.0.0", "2.0.0", 0},
+		{"2.0.1", "2.0.0", 1},
+		{"2.1.0", "2.0.9", 1},
+		{"3.0.0", "2.9.9", 1},
+		{"1.4.0", "2.0.0", -1},
+		// 预发布版排在同号正式版之前
+		{"2.0.0-beta.1", "2.0.0", -1},
+		{"2.0.0", "2.0.0-beta.1", 1},
+		// 预发布版之间按段比较，数字段按数值而非字典序
+		{"2.0.0-beta.1", "2.0.0-beta.2", -1},
+		{"2.0.0-beta.9", "2.0.0-beta.10", -1}, // 字典序会判反
+		{"2.0.0-alpha.1", "2.0.0-beta.1", -1},
+		{"2.0.0-rc.1", "2.0.0-beta.9", 1},
+		{"2.0.0-beta", "2.0.0-beta.1", -1}, // 段数少的在前
+		// 构建元数据不参与比较
+		{"2.0.0+build1", "2.0.0", 0},
+	}
+	for _, c := range cases {
+		if got := compareSemver(c.a, c.b); got != c.want {
+			t.Errorf("compareSemver(%q, %q) = %d, 期望 %d", c.a, c.b, got, c.want)
+		}
+	}
+}
+
 func TestUpgradeAvailability(t *testing.T) {
 	old := serverVersion
 	t.Cleanup(func() { serverVersion = old })
-	serverVersion = "2.0.0-beta.2"
+	serverVersion = "2.0.0-beta.3"
 
 	// 旧 agent：必须拦在下发之前，并说清楚要手动升一次。
 	ok, hint := upgradeAvailability("1.4.0", true)
@@ -44,24 +80,30 @@ func TestUpgradeAvailability(t *testing.T) {
 		t.Errorf("提示应说明需手动升级一次，实际: %q", hint)
 	}
 
+	// beta.1 的主版本也是 2，但 upgrade 消息是 beta.2 才加的，它同样收不到。
+	// 这条曾经判反过：按钮显示为可点，点下去只会静默丢弃、干等超时。
+	if ok, hint := upgradeAvailability("2.0.0-beta.1", true); ok || !strings.Contains(hint, "手动") {
+		t.Errorf("beta.1 不认识升级指令，应提示手动升级，实际 ok=%v hint=%q", ok, hint)
+	}
+
 	// 已是目标版本：不可升级，且不该有提示——没什么好提示的。
-	if ok, hint := upgradeAvailability("2.0.0-beta.2", true); ok || hint != "" {
+	if ok, hint := upgradeAvailability("2.0.0-beta.3", true); ok || hint != "" {
 		t.Errorf("已是最新时应无提示，实际 ok=%v hint=%q", ok, hint)
 	}
 
 	// 离线机器下发不出去。
-	if ok, hint := upgradeAvailability("2.0.0-beta.1", false); ok || !strings.Contains(hint, "离线") {
+	if ok, hint := upgradeAvailability("2.0.0-beta.2", false); ok || !strings.Contains(hint, "离线") {
 		t.Errorf("离线应被拦下，实际 ok=%v hint=%q", ok, hint)
 	}
 
-	// 正常可升级。
-	if ok, hint := upgradeAvailability("2.0.0-beta.1", true); !ok || hint != "" {
+	// 正常可升级：agent 认识升级指令、在线、且版本落后。
+	if ok, hint := upgradeAvailability("2.0.0-beta.2", true); !ok || hint != "" {
 		t.Errorf("应允许升级，实际 ok=%v hint=%q", ok, hint)
 	}
 
 	// 开发态 server 没有对应的 release，钉上去只会 404。
 	serverVersion = "dev"
-	if ok, hint := upgradeAvailability("2.0.0-beta.1", true); ok || !strings.Contains(hint, "开发版本") {
+	if ok, hint := upgradeAvailability("2.0.0-beta.2", true); ok || !strings.Contains(hint, "开发版本") {
 		t.Errorf("开发态应拒绝，实际 ok=%v hint=%q", ok, hint)
 	}
 }
@@ -173,6 +215,29 @@ func TestUpgradeTimesOut(t *testing.T) {
 	// 无法确认目标机实际状态时，措辞不能断言，只能如实说明。
 	if !strings.Contains(errMsg, "确认") {
 		t.Errorf("超时提示应引导人确认机器状态，实际: %q", errMsg)
+	}
+}
+
+// 升级失败后人工把版本修上去了，红色的失败标记必须自行消失，
+// 否则界面会一直挂着一个已经不存在的问题。
+func TestUpgradeFailureClearedAfterManualFix(t *testing.T) {
+	m := newUpgradeManager()
+	m.jobs["srv"] = &upgradeJob{
+		ID: "j1", ServerID: "srv", Target: "v2.0.0-beta.3",
+		Stage: upgradeStageFailed, Err: "新版本未能连回",
+		Started: time.Now(), restartedAt: time.Now(), graceSec: 60,
+	}
+
+	// 版本仍是旧的：问题还在，标记必须保留。
+	m.OnRegister("srv", "2.0.0-beta.2")
+	if stage, _ := m.Status("srv"); stage != upgradeStageFailed {
+		t.Fatalf("问题未解决时应保留失败标记，实际: %q", stage)
+	}
+
+	// 人工升上去了：标记应当消失。
+	m.OnRegister("srv", "2.0.0-beta.3")
+	if stage, errMsg := m.Status("srv"); stage != "" || errMsg != "" {
+		t.Errorf("人工修复后失败标记应清除，实际 stage=%q err=%q", stage, errMsg)
 	}
 }
 

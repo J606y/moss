@@ -148,6 +148,10 @@ export interface Settings {
   sampleInterval: number
   historyDays: number
   pingDays: number
+  /** 执行审计保留天数，7–90。单条记录不可删除，只能整体设定保留时长。 */
+  execAuditDays: number
+  /** 执行审计条数上限，100–5000，与保留天数取先触发者。 */
+  execAuditMaxRows: number
 }
 
 /** AI 接入用的 API Key。明文只在创建时返回一次，此处只有前缀。 */

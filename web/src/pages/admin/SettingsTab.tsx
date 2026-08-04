@@ -88,6 +88,20 @@ export function SettingsTab({ toast }: { toast: Toast }) {
             <label className={formLabel}>延迟数据保留（天）</label>
             <NumberInput min={1} value={s.pingDays} onChange={num('pingDays')} />
           </div>
+          <div>
+            <label className={formLabel}>执行审计保留（天）</label>
+            <NumberInput min={7} max={90} value={s.execAuditDays} onChange={num('execAuditDays')} />
+            {/* 下限 7 天不是随手定的：少于一周，周末发生的事周一就查不到了，
+                而周末恰恰是无人值守、AI 自主处置最多的时候。 */}
+            <p className="mt-1 text-xs text-zinc-400">7–90 天。单条记录不可删除，只能整体设定保留时长。</p>
+          </div>
+          <div>
+            <label className={formLabel}>执行审计条数上限</label>
+            <NumberInput min={100} max={5000} value={s.execAuditMaxRows} onChange={num('execAuditMaxRows')} />
+            <p className="mt-1 text-xs text-zinc-400">
+              100–5000 条，与保留天数取先触发者。超出后自动删除最旧的记录。
+            </p>
+          </div>
         </div>
         <div className="flex justify-end">
           <button className={btnPrimary} onClick={save}>

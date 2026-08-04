@@ -132,12 +132,19 @@ type execManager struct {
 	finished map[string]finishedJob
 }
 
+// execBlockedPrefix 拦截记录的错误前缀。
+//
+// 审计的「仅看拦截」筛选靠它识别，落库与查询共用这一处定义——
+// 散落成字面量的话，改一次文案就会让筛选静默失效，而「谁试图执行什么危险操作」
+// 恰恰是审计里最不能丢的那类记录。
+const execBlockedPrefix = "命令被拦截："
+
 // reportBlocked 落审计并推送拦截告警。
 //
 // 命令拦截与路径拦截都收敛到这里，保证两条路径的留痕与告警行为一致——
 // 「谁试图执行什么危险操作」是审计里最有价值的记录，不能因为拦得早就不记。
 func (m *execManager) reportBlocked(job *execJob, serverID, caller, target, reason string) ExecOutcome {
-	out := ExecOutcome{JobID: job.id, Error: "命令被拦截：" + reason}
+	out := ExecOutcome{JobID: job.id, Error: execBlockedPrefix + reason}
 	m.auditFinish(job.id, out)
 	if m.notifier != nil {
 		name := serverID

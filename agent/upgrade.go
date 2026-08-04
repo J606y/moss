@@ -9,8 +9,14 @@
 // **为什么回滚必须由旧二进制守护**
 // 新二进制若根本起不来（架构不对、下载损坏、依赖缺失），就没有任何进程能执行回滚，
 // 而 systemd 的 Restart=always 会把失败进程反复拉起，机器永久失联。
-// 因此升级把旧二进制留在 <bin>.bak，并用**它**（不是新的）以独立会话拉起
-// --rollback-guard 守护。旧二进制此刻正在运行，是唯一能确定可执行的东西。
+// 因此升级把旧二进制留在 <bin>.bak，并用**它**（不是新的）拉起 --rollback-guard 守护。
+// 旧二进制此刻正在运行，是唯一能确定可执行的东西。
+//
+// **守护必须脱离 cgroup，不只是脱离进程组**
+// 守护要 systemctl restart moss-agent，而 systemd 停止 service 时默认
+// KillMode=control-group，杀的是该 unit cgroup 内的所有进程。Setsid 换的是
+// session 不是 cgroup，挡不住这个——必须用 systemd-run 起独立单元。
+// 详见 spawnRollbackGuard 的注释。
 package main
 
 import (
@@ -78,32 +84,35 @@ func (u *upgrader) Handle(c *client, t protocol.UpgradeTask) {
 	u.mu.Unlock()
 
 	go func() {
-		err := u.run(c, t)
+		stage, err := u.run(c, t)
 		u.mu.Lock()
 		u.busy = false
 		u.mu.Unlock()
 		if err != nil {
-			// 失败在这里就地回报并终止：二进制尚未被替换，agent 仍在正常运行，
-			// 不需要回滚，也不会重启。
-			log.Printf("升级失败: %v", err)
-			u.report(c, t.ID, protocol.UpgradeStageDownloading, err)
+			// 回报失败发生在**哪一步**，而不是笼统地报最早那一步：
+			// 「下载时失败」意味着机器完全没动过，「替换后失败」意味着二进制被动过
+			// （虽已恢复），两者的人工处置完全不同。
+			log.Printf("升级失败（%s 阶段）: %v", stage, err)
+			u.report(c, t.ID, stage, err)
 		}
 	}()
 }
 
-// run 执行升级。返回 nil 表示已进入重启流程（此后连接会中断，不再有回执）。
-func (u *upgrader) run(c *client, t protocol.UpgradeTask) error {
+// run 执行升级。
+// 返回 (失败时所处的阶段, error)；error 为 nil 表示已进入重启流程，
+// 此后连接会中断，不再有回执——成功判据由 server 侧在 agent 重连时给出。
+func (u *upgrader) run(c *client, t protocol.UpgradeTask) (string, error) {
 	// 平台与权限检查必须前置：等下载完几十兆才发现这台机器根本没法重启服务，
 	// 既浪费带宽，也让失败发生在更靠近替换的地方。
 	if err := upgradeSupported(); err != nil {
-		return err
+		return protocol.UpgradeStageDownloading, err
 	}
 	if strings.TrimPrefix(t.Version, "v") == strings.TrimPrefix(agentVersion, "v") {
-		return fmt.Errorf("当前已是 %s，无需升级", t.Version)
+		return protocol.UpgradeStageDownloading, fmt.Errorf("当前已是 %s，无需升级", t.Version)
 	}
 	bin, err := u.files.self()
 	if err != nil {
-		return fmt.Errorf("定位自身可执行文件失败: %w", err)
+		return protocol.UpgradeStageDownloading, fmt.Errorf("定位自身可执行文件失败: %w", err)
 	}
 	// 解析软链，否则备份与替换会作用在链接而不是真实文件上。
 	if real, err := filepath.EvalSymlinks(bin); err == nil {
@@ -111,7 +120,7 @@ func (u *upgrader) run(c *client, t protocol.UpgradeTask) error {
 	}
 
 	if t.BaseURL == "" {
-		return errors.New("未提供下载地址")
+		return protocol.UpgradeStageDownloading, errors.New("未提供下载地址")
 	}
 	binURL, sumsURL, assetName := releaseURLs(t.BaseURL)
 
@@ -121,13 +130,13 @@ func (u *upgrader) run(c *client, t protocol.UpgradeTask) error {
 	tmp := bin + ".new"
 	defer os.Remove(tmp) // 成功路径上 tmp 已被 rename 走，Remove 返回的 NotExist 无害
 	if err := downloadTo(tmp, binURL, upgradeBinCap); err != nil {
-		return fmt.Errorf("下载新版本失败: %w", err)
+		return protocol.UpgradeStageDownloading, fmt.Errorf("下载新版本失败: %w", err)
 	}
 	if err := verifySum(tmp, sumsURL, assetName); err != nil {
-		return err
+		return protocol.UpgradeStageDownloading, err
 	}
 	if err := os.Chmod(tmp, 0o755); err != nil {
-		return fmt.Errorf("设置可执行权限失败: %w", err)
+		return protocol.UpgradeStageVerified, fmt.Errorf("设置可执行权限失败: %w", err)
 	}
 	u.report(c, t.ID, protocol.UpgradeStageVerified, nil)
 
@@ -136,14 +145,14 @@ func (u *upgrader) run(c *client, t protocol.UpgradeTask) error {
 	backup := bin + ".bak"
 	os.Remove(backup) // 清掉上次升级的残留，否则 rename 在部分系统上会失败
 	if err := os.Rename(bin, backup); err != nil {
-		return fmt.Errorf("备份旧版本失败: %w", err)
+		return protocol.UpgradeStageVerified, fmt.Errorf("备份旧版本失败: %w", err)
 	}
 	if err := os.Rename(tmp, bin); err != nil {
 		// 替换失败必须立刻把备份换回去，否则 bin 不存在，服务再也起不来。
 		if rbErr := os.Rename(backup, bin); rbErr != nil {
-			return fmt.Errorf("替换失败(%v)且恢复备份失败(%v)，二进制缺失，需人工介入", err, rbErr)
+			return protocol.UpgradeStageReplaced, fmt.Errorf("替换失败(%v)且恢复备份失败(%v)，二进制缺失，需人工介入", err, rbErr)
 		}
-		return fmt.Errorf("替换新版本失败: %w", err)
+		return protocol.UpgradeStageVerified, fmt.Errorf("替换新版本失败: %w", err)
 	}
 	u.report(c, t.ID, protocol.UpgradeStageReplaced, nil)
 
@@ -158,13 +167,13 @@ func (u *upgrader) run(c *client, t protocol.UpgradeTask) error {
 		// 守护起不来就不能重启：没有回滚兜底的重启是在赌运气。
 		// 把备份换回去，回到升级前的状态。
 		if rbErr := os.Rename(backup, bin); rbErr != nil {
-			return fmt.Errorf("守护启动失败(%v)且恢复备份失败(%v)，需人工介入", err, rbErr)
+			return protocol.UpgradeStageReplaced, fmt.Errorf("守护启动失败(%v)且恢复备份失败(%v)，需人工介入", err, rbErr)
 		}
-		return fmt.Errorf("回滚守护启动失败，已恢复原版本: %w", err)
+		return protocol.UpgradeStageReplaced, fmt.Errorf("回滚守护启动失败，已恢复原版本: %w", err)
 	}
 	u.report(c, t.ID, protocol.UpgradeStageRestarting, nil)
 	log.Printf("已替换为 %s，等待守护重启（%ds 内未连回将自动回滚）", t.Version, grace)
-	return nil
+	return protocol.UpgradeStageRestarting, nil
 }
 
 func (u *upgrader) report(c *client, id, stage string, err error) {

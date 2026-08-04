@@ -108,6 +108,32 @@ CREATE TABLE IF NOT EXISTS api_keys (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
 `
 
+// pruneExecAudit 清理执行审计：按保留天数与条数上限，两条规则取先触发者。
+// maxRows 为 0 表示不限制条数。
+//
+// 单独成函数而不是内联在 cleanupLoop 里：这是会删数据的逻辑，
+// 写错就是静默删掉不该删的记录，必须能在测试里直接驱动。
+func pruneExecAudit(db *sql.DB, now time.Time, days, maxRows int) {
+	if _, err := db.Exec(
+		`DELETE FROM exec_audit WHERE started_at < ?`,
+		now.AddDate(0, 0, -days).UnixMilli(),
+	); err != nil {
+		log.Printf("按保留期清理 exec_audit 失败: %v", err)
+	}
+	if maxRows <= 0 {
+		return
+	}
+	// 用主键比较而不是 `id NOT IN (SELECT ... LIMIT n)`：后者要为每一行做一次
+	// 集合判定，表大起来会很慢；这里只取第 n+1 新的那一行的 id 做一次范围删除。
+	// 表内不足 n 行时子查询返回 NULL，`id <= NULL` 恒为 NULL，一行都不会删。
+	if _, err := db.Exec(
+		`DELETE FROM exec_audit WHERE id <= (SELECT id FROM exec_audit ORDER BY id DESC LIMIT 1 OFFSET ?)`,
+		maxRows,
+	); err != nil {
+		log.Printf("按条数上限清理 exec_audit 失败: %v", err)
+	}
+}
+
 var defaultSettings = map[string]string{
 	keySiteName:       "Moss",
 	keySiteDesc:       "智控中心",
@@ -116,7 +142,20 @@ var defaultSettings = map[string]string{
 	keyHistoryDays:    "7",
 	keyPingDays:       "7",
 	keyExecAuditDays:  "90", // 执行审计保留期。用户无法主动删除单条记录，只能整体设定保留时长
+	// 条数上限与保留期取先触发者。默认取满 5000：按实测单条均值约 1.2KB 计不到 6MB，
+	// 足够覆盖数十天的正常使用，同时为失控的高频调用守住磁盘——
+	// SQLite 撑爆磁盘会带走整个面板，比丢几条旧审计严重得多。
+	keyExecAuditMaxRows: "5000",
 }
+
+// 审计条数上限的可设范围。
+//
+// 下限 100 而不是更小：设成个位数等于审计刚写进去就被冲掉，
+// 那不是「限制容量」而是「变相关闭审计」，与单条记录不可删除的原则相悖。
+const (
+	execAuditMinRows = 100
+	execAuditMaxRows = 5000
+)
 
 func openDB(path string) (*sql.DB, error) {
 	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)", path)
@@ -273,10 +312,9 @@ func cleanupLoop(db *sql.DB) {
 		if _, err := db.Exec(`DELETE FROM sessions WHERE expires < ?`, now.Unix()); err != nil {
 			log.Printf("清理 sessions 失败: %v", err)
 		}
-		auditDays := getSettingInt(db, keyExecAuditDays, 90)
-		if _, err := db.Exec(`DELETE FROM exec_audit WHERE started_at < ?`, now.AddDate(0, 0, -auditDays).UnixMilli()); err != nil {
-			log.Printf("清理 exec_audit 失败: %v", err)
-		}
+		pruneExecAudit(db, now,
+			getSettingInt(db, keyExecAuditDays, 90),
+			getSettingInt(db, keyExecAuditMaxRows, execAuditMaxRows))
 		gcLoginAttempts(now) // 回收登录失败限流的内存 map，防无界增长
 		time.Sleep(time.Hour)
 	}
