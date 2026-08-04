@@ -193,6 +193,13 @@ func runOnce(target string, runner *execRunner, up *upgrader) error {
 					runner.HandleWrite(c, *msg.Write)
 				}
 			case "upgrade":
+				// 刻意不检查 allow：--allow-exec 管的是「允许远程执行任意命令」，
+				// 而升级只能升到 server 当前版本、从固定地址装带校验和的官方二进制，
+				// 属于产品自身的受限维护动作，不是把机器交出去。
+				//
+				// ⚠️ 这条成立的前提是「特权保持受限」。一旦升级支持指定版本
+				// （回滚到旧版）或自定义下载源，它就变成了任意代码分发通道，
+				// 那时必须补上 allow 检查——理由见 docs/ai-ops.md 的决策表。
 				if msg.Upgrade != nil {
 					up.Handle(c, *msg.Upgrade)
 				}

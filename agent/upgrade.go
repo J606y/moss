@@ -37,9 +37,15 @@ import (
 	"moss/internal/protocol"
 )
 
-// upgradeDownloadTimeout 下载单个文件的超时。跨境拉 GitHub 可能很慢，给足余量；
-// 超时只是放弃本次升级，不影响正在运行的 agent。
-const upgradeDownloadTimeout = 10 * time.Minute
+// upgradeDownloadTimeout 下载单个文件的超时。
+//
+// 实测境内机器直连 GitHub 约 15 KB/s，7MB 的 agent 要下约 8 分钟——
+// 原本定的 10 分钟只剩 2 分钟余量，跨境链路抖一下就超时。20 分钟给到 2.5 倍余量，
+// 速度掉到 6 KB/s 仍能完成。
+//
+// 放宽超时不增加风险：超时只是放弃本次升级，此时二进制还没被动过，
+// agent 继续正常运行。真正要防的是无限等待，不是慢。
+const upgradeDownloadTimeout = 20 * time.Minute
 
 // upgradeBinCap 二进制大小上限，防止下载地址被指向超大文件打爆磁盘。
 // agent 实际约 10MB 量级，64MB 留足余量。

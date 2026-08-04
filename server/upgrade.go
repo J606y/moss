@@ -75,9 +75,16 @@ const (
 	upgradeStageFailed  = "failed"
 )
 
-// upgradeOverallTimeout 单个升级任务的整体上限。跨境拉 GitHub 可能很慢，
-// 给足余量；超时只是把状态判为失败，不影响目标机上实际发生的事。
-const upgradeOverallTimeout = 20 * time.Minute
+// upgradeOverallTimeout 单个升级任务的整体上限。
+//
+// **必须大于 agent 侧的 protocol 下载超时（当前 20 分钟）加上后续步骤的耗时**，
+// 否则会出现 server 已判失败、agent 却马上要替换成功的错位——
+// 界面显示红色，机器却真的升上去了，之后没有任何东西会来纠正这个状态。
+// 30 分钟给下载留满 20 分钟，再留 10 分钟给校验、替换与拉起守护。
+//
+// 改这个值时务必回头看一眼 agent/upgrade.go 的 upgradeDownloadTimeout，
+// 这两个数字之间有隐含契约。超时本身只是把状态判为失败，不影响目标机上实际发生的事。
+const upgradeOverallTimeout = 30 * time.Minute
 
 type upgradeJob struct {
 	ID       string
