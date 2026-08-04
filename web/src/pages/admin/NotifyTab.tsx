@@ -73,6 +73,11 @@ export function NotifyTab({ toast }: { toast: Toast }) {
         </div>
       </div>
 
+      {/* 两个推送通道排在一起，后面才是告警规则——按「发到哪去」和「什么时候发」
+          分组，比按实现先后排列好懂。Webhook 原先落在页面最末、还在「保存设置」
+          按钮下方，看起来像上面那张表单的附属品，实际它走的是独立接口。 */}
+      <WebhookSection toast={toast} />
+
       <div className={`${card} space-y-3 p-4`}>
         <h3 className="text-sm font-semibold">离线告警</h3>
         <Toggle checked={n.offlineOn} label="服务器离线时推送通知（恢复上线时同步通知）" onChange={(v) => setN({ ...n, offlineOn: v })} />
@@ -100,11 +105,22 @@ export function NotifyTab({ toast }: { toast: Toast }) {
             <NumberInput min={1} max={100} value={n.diskThreshold} onChange={num('diskThreshold')} />
           </div>
           <div>
+            <label className={formLabel}>恢复确认（秒）</label>
+            <NumberInput min={10} max={3600} value={n.recoverSec} onChange={num('recoverSec')} />
+          </div>
+          <div>
             <label className={formLabel}>持续时间（分钟）</label>
             <NumberInput min={1} max={120} value={n.loadMinutes} onChange={num('loadMinutes')} />
           </div>
         </div>
-        <p className="text-xs text-zinc-400">超阈值持续指定时间才告警；回落至阈值 5% 以下时发送恢复通知。</p>
+        {/* 恢复条件必须写准：实现是 val < 阈值×0.9（见 notify.go 的迟滞判定），
+            原文案写的「回落至阈值 5% 以下」既数值不对，字面还会被读成
+            「低于阈值的 5%」——阈值 90% 时那是 4.5%，永远等不到恢复通知。 */}
+        <p className="text-xs text-zinc-400">
+          超阈值持续指定时间才告警；回落到阈值的 90% 以下、并持续「恢复确认」时长后，才发送恢复通知
+          （如阈值 90%，需降至 81% 以下并保持住）。两道条件缺一不可：回差挡阈值附近的抖动，
+          时长挡大幅波动——否则负载在高低之间来回摆，告警和恢复会交替刷屏。恢复确认对网速告警同样生效。
+        </p>
 
         <div className="space-y-3 border-t border-zinc-500/10 pt-3 dark:border-white/5">
           <Toggle
@@ -122,7 +138,10 @@ export function NotifyTab({ toast }: { toast: Toast }) {
               <NumberInput min={10} max={3600} value={n.netSeconds} onChange={num('netSeconds')} />
             </div>
           </div>
-          <p className="text-xs text-zinc-400">上行或下行任一方向超过阈值并持续指定时长即告警，与上方开关相互独立。</p>
+          <p className="text-xs text-zinc-400">
+            上行或下行任一方向超过阈值并持续指定时长即告警，与上方开关相互独立；
+            恢复判定与负载告警同一套规则（回落到阈值的 90% 以下 + 上方的「恢复确认」时长）。
+          </p>
         </div>
       </div>
 
@@ -143,8 +162,6 @@ export function NotifyTab({ toast }: { toast: Toast }) {
           保存设置
         </button>
       </div>
-
-      <WebhookSection toast={toast} />
     </div>
   )
 }

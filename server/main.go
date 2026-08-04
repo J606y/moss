@@ -26,8 +26,10 @@ type App struct {
 	trustProxy     bool         // 是否信任反代转发头获取真实来源 IP
 	trustedProxies []*net.IPNet // 可信代理网段；从 XFF 最右往左跳过这些地址取真实客户端
 
-	exec    *execManager    // 命令下发、分片聚合与审计
-	upgrade *upgradeManager // agent 一键升级的下发与状态跟踪
+	exec     *execManager    // 命令下发、分片聚合与审计
+	releases *releaseCache   // GitHub 版本查询缓存
+	panelUpd *panelUpdater   // 面板自更新状态
+	upgrade  *upgradeManager // agent 一键升级的下发与状态跟踪
 
 	globalLimiter *limiter // 全局 /api 限流（按真实访客 IP）
 	authLimiter   *limiter // 登录等敏感端点的更严限流
@@ -81,6 +83,8 @@ func main() {
 	app := &App{db: db, hub: newHub(db), trustProxy: *trustProxy, trustedProxies: parseTrustedProxies(*trustedProxies)}
 	app.exec = newExecManager(db)
 	app.upgrade = newUpgradeManager()
+	app.releases = newReleaseCache()
+	app.panelUpd = newPanelUpdater()
 	app.notifier = newNotifier(db)
 	app.exec.notifier = app.notifier // 拦截告警走同一套通知配置
 	app.hub.notifier = app.notifier
@@ -144,6 +148,11 @@ func main() {
 	mux.HandleFunc("POST /api/admin/servers/{id}/exec", app.requireAuth(app.handleExec))
 	mux.HandleFunc("GET /api/admin/exec-audit", app.requireAuth(app.handleExecAudit))
 	mux.HandleFunc("GET /api/admin/exec-audit/{jobId}", app.requireAuth(app.handleExecAuditDetail))
+	// 面板自更新：同样只在后台管理接口下。更新面板意味着替换整个中枢，
+	// 比升级单台 agent 的权限更高，更不该出现在 MCP 工具清单里。
+	mux.HandleFunc("GET /api/admin/panel-update", app.requireAuth(app.handleGetPanelUpdate))
+	mux.HandleFunc("PUT /api/admin/panel-update", app.requireAuth(app.handlePutPanelUpdate))
+	mux.HandleFunc("POST /api/admin/panel-update/start", app.requireAuth(app.handleStartPanelUpdate))
 	mux.HandleFunc("GET /api/admin/settings", app.requireAuth(app.handleGetSettings))
 	mux.HandleFunc("PUT /api/admin/settings", app.requireAuth(app.handlePutSettings))
 	mux.HandleFunc("PUT /api/admin/password", app.requireAuth(app.handleChangePassword))

@@ -116,11 +116,33 @@ export interface NotifySettings {
   memThreshold: number
   diskThreshold: number
   loadMinutes: number
+  /** 持续低于回差线多少秒才发恢复通知，负载与网速共用。10–3600，默认 60。 */
+  recoverSec: number
   netOn: boolean
   netThreshold: number
   netSeconds: number
   expireOn: boolean
   expireDays: number
+}
+
+/** 面板自更新。版本比较与可否更新的判定全在后端，前端只消费结论。 */
+export interface PanelUpdate {
+  current: string
+  config: { channel: 'stable' | 'beta'; auto: boolean; hostServer: string }
+  latest?: {
+    version: string
+    name: string
+    notes: string
+    published: string
+    prerelease: boolean
+  }
+  checkError?: string
+  /** none=已是最新 update=可更新 downgrade=目标更旧（不允许） unknown=无法比较 */
+  avail: { action: 'none' | 'update' | 'downgrade' | 'unknown'; reason?: string }
+  hostReady: boolean
+  hostHint?: string
+  stage?: string
+  stageErr?: string
 }
 
 /** 通用 Webhook 推送配置。后端不回传密钥明文，仅用 secretSet 标记是否已配置。 */

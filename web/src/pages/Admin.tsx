@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Bell, Bot, Cloud, LogOut, Radar, ScrollText, Server, SlidersHorizontal } from 'lucide-react'
+import { Bell, Bot, Cloud, LogOut, Radar, RefreshCw, ScrollText, Server, SlidersHorizontal } from 'lucide-react'
 import { get, post } from '../api/client'
 import type { ApiError } from '../api/client'
 import { btnGhost } from '../ui'
@@ -10,9 +10,10 @@ import { NotifyTab } from './admin/NotifyTab'
 import { GcpTab } from './admin/GcpTab'
 import { AiTab } from './admin/AiTab'
 import { AuditTab } from './admin/AuditTab'
+import { PanelUpdateTab } from './admin/PanelUpdateTab'
 import { SettingsTab } from './admin/SettingsTab'
 
-type TabKey = 'servers' | 'tasks' | 'notify' | 'gcp' | 'ai' | 'audit' | 'settings'
+type TabKey = 'servers' | 'tasks' | 'notify' | 'gcp' | 'ai' | 'audit' | 'update' | 'settings'
 
 // 审计单独成页，紧挨「AI 接入」：那一页里接入方式与密钥都是有限内容，
 // 只有审计随使用无限增长，挤在同一页里既看不清也翻不到。
@@ -23,6 +24,9 @@ const tabs: Array<{ key: TabKey; label: string; icon: typeof Server }> = [
   { key: 'gcp', label: 'GCP 守护', icon: Cloud },
   { key: 'ai', label: 'AI 接入', icon: Bot },
   { key: 'audit', label: '执行审计', icon: ScrollText },
+  // 面板更新紧挨站点设置：都属于「这套系统本身」的维护，与前面几项的
+  // 「被监控对象」不是一类东西。
+  { key: 'update', label: '面板更新', icon: RefreshCw },
   { key: 'settings', label: '站点设置', icon: SlidersHorizontal },
 ]
 
@@ -117,6 +121,7 @@ export default function Admin() {
           {tab === 'gcp' && <GcpTab toast={showToast} />}
           {tab === 'ai' && <AiTab toast={showToast} />}
           {tab === 'audit' && <AuditTab toast={showToast} />}
+          {tab === 'update' && <PanelUpdateTab toast={showToast} />}
           {tab === 'settings' && <SettingsTab toast={showToast} />}
         </div>
       </div>

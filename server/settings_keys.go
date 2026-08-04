@@ -25,6 +25,7 @@ const (
 	keyNotifyMem          = "notify_mem"
 	keyNotifyDisk         = "notify_disk"
 	keyNotifyLoadMin      = "notify_load_min"
+	keyNotifyRecoverSec   = "notify_recover_sec"
 	keyNotifyNet          = "notify_net"
 	keyNotifyNetMB        = "notify_net_mb"
 	keyNotifyNetSec       = "notify_net_sec"
@@ -35,7 +36,15 @@ const (
 	keyWebhookSecret = "webhook_secret"
 	keyWebhookOn     = "webhook_on"
 
-	keyGCPSAJSON        = "gcp_sa_json"
+	// 面板自更新
+	keyPanelChannel    = "panel_update_channel"
+	keyPanelAutoUpdate = "panel_update_auto"
+	// keyPanelHostServer 面板所在机器的 ID。必须显式指定，不做自动探测——
+	// NAT、多网卡、反代都会让「出口 IP 对得上」这种猜法出错，
+	// 而猜错的后果是把更新打到别的机器上。
+	keyPanelHostServer = "panel_host_server"
+
+	keyGCPSAJSON = "gcp_sa_json"
 	keyGCPAutoOn        = "gcp_auto_on"
 	keyGCPStartDelay    = "gcp_start_delay"
 	keyGCPStartCooldown = "gcp_start_cooldown"

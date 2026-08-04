@@ -16,7 +16,9 @@ import "errors"
 // 更关键的是 agent 在真 Windows Server 上的执行路径至今零真机验证，
 // 把两件都没验证过的事叠在一起风险不可控，故拆到后续版本单独做。
 
-var errUpgradeUnsupported = errors.New("Windows 暂不支持一键升级，请用安装脚本手动升级")
+// 首字母不用 "Windows"：Go 的错误串惯例是小写开头（会被层层包装成一句话），
+// 静态检查也会因此报 ST1005。
+var errUpgradeUnsupported = errors.New("当前系统（Windows）暂不支持一键升级，请用安装脚本手动升级")
 
 func spawnRollbackGuard(backup, target string, grace int) error {
 	return errUpgradeUnsupported

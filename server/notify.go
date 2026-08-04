@@ -27,6 +27,15 @@ type notifyConfig struct {
 	NetOn         bool   `json:"netOn"`
 	NetThreshold  int    `json:"netThreshold"` // MB/s（1MB=1024KB，与面板展示同口径），上/下行任一方向
 	NetSeconds    int    `json:"netSeconds"`   // 持续超阈值多少秒才告警
+	// RecoverSec 持续低于回差线多少秒才发恢复通知，负载与网速共用。
+	//
+	// 只靠回差带挡不住大幅波动：阈值 90 时，95↔75 来回摆会不断触发
+	// 「告警→恢复→告警」，因为 75 已经低于回差线 81。加上时间确认后，
+	// 恢复侧与告警侧的语义才对称——都是「持续这么久才算数」。
+	//
+	// 代价是恢复通知延迟这么久，但这个代价该付：恢复通知的作用是「告诉你不用管了」，
+	// 晚几十秒毫无损失；而误发一次会让人以为没事了，实际还在反复。
+	RecoverSec int `json:"recoverSec"`
 	ExpireOn      bool   `json:"expireOn"`
 	ExpireDays    int    `json:"expireDays"` // 到期前几天提醒，1~7
 }
@@ -42,6 +51,7 @@ func loadNotifyConfig(db *sql.DB) notifyConfig {
 		MemThreshold:  getSettingInt(db, keyNotifyMem, 90),
 		DiskThreshold: getSettingInt(db, keyNotifyDisk, 95),
 		LoadMinutes:   getSettingInt(db, keyNotifyLoadMin, 5),
+		RecoverSec:    getSettingInt(db, keyNotifyRecoverSec, 60),
 		NetOn:         getSetting(db, keyNotifyNet, "0") == "1",
 		NetThreshold:  getSettingInt(db, keyNotifyNetMB, 50),
 		NetSeconds:    getSettingInt(db, keyNotifyNetSec, 60),
@@ -56,6 +66,10 @@ type alertState struct {
 	offlineAlerted bool
 	highSince      map[string]time.Time // 指标 → 开始超阈值时间
 	highAlerted    map[string]bool
+	// lowSince 指标 → 开始低于回差线的时间，与 highSince 对称。
+	// 回差带内（回差线 ~ 阈值之间）两个计时都保持不动：那既不算高也不算低，
+	// 维持现状即可，否则指标在带内游走会把两侧的计时反复清零。
+	lowSince map[string]time.Time
 }
 
 // Notifier 离线/负载告警引擎，事件由 Hub 驱动，离线判定走独立检查循环。
@@ -126,6 +140,7 @@ func (n *Notifier) state(id string) *alertState {
 		st = &alertState{
 			highSince:   make(map[string]time.Time),
 			highAlerted: make(map[string]bool),
+			lowSince:    make(map[string]time.Time),
 		}
 		n.states[id] = st
 	}
@@ -196,13 +211,17 @@ func (n *Notifier) OnReport(id string, cpu, mem, disk, netUp, netDown float64) {
 	var fires []fire
 	now := time.Now()
 	hold := time.Duration(cfg.LoadMinutes) * time.Minute
+	// 恢复确认时长，负载与网速共用同一个设置。
+	recoverHold := time.Duration(cfg.RecoverSec) * time.Second
 
 	check := func(metric string, val float64, threshold int) {
 		th := float64(threshold)
 		if th <= 0 {
 			return
 		}
-		if val >= th {
+		switch {
+		case val >= th:
+			delete(st.lowSince, metric)
 			if st.highSince[metric].IsZero() {
 				st.highSince[metric] = now
 			}
@@ -214,15 +233,22 @@ func (n *Notifier) OnReport(id string, cpu, mem, disk, netUp, netDown float64) {
 					typ: evtLoadAlert, met: metric, val: val, thres: th,
 				})
 			}
-		} else if val < th*0.9 { // 按比例迟滞带（恢复回差），低阈值也可达，避免在阈值附近反复告警
-			if st.highAlerted[metric] {
+		// 按比例迟滞带（恢复回差），低阈值也可达，避免在阈值附近反复告警；
+		// 再叠加时间确认，挡住回差带兜不住的大幅波动。
+		case val < th*0.9:
+			delete(st.highSince, metric)
+			if st.lowSince[metric].IsZero() {
+				st.lowSince[metric] = now
+			}
+			if st.highAlerted[metric] && now.Sub(st.lowSince[metric]) >= recoverHold {
 				st.highAlerted[metric] = false
+				delete(st.lowSince, metric)
 				fires = append(fires, fire{
-					msg: fmt.Sprintf("✅ 负载恢复\n%%NAME%% %s 已回落至 %.1f%%", metric, val),
+					msg: fmt.Sprintf("✅ 负载恢复\n%%NAME%% %s 已回落至 %.1f%% 并持续 %d 秒", metric, val, cfg.RecoverSec),
 					typ: evtLoadRecovered, met: metric, val: val, thres: th,
 				})
 			}
-			delete(st.highSince, metric)
+			// 回差带内两个计时都不动：既不算高也不算低，维持现状。
 		}
 	}
 	if cfg.LoadOn {
@@ -239,7 +265,9 @@ func (n *Notifier) OnReport(id string, cpu, mem, disk, netUp, netDown float64) {
 		if netDown > speed {
 			speed = netDown
 		}
-		if speed >= th {
+		switch {
+		case speed >= th:
+			delete(st.lowSince, "net")
 			if st.highSince["net"].IsZero() {
 				st.highSince["net"] = now
 			}
@@ -251,15 +279,20 @@ func (n *Notifier) OnReport(id string, cpu, mem, disk, netUp, netDown float64) {
 					typ: evtNetAlert, met: "net", val: speed, thres: th,
 				})
 			}
-		} else if speed < th*0.9 {
-			if st.highAlerted["net"] {
+		case speed < th*0.9:
+			delete(st.highSince, "net")
+			if st.lowSince["net"].IsZero() {
+				st.lowSince["net"] = now
+			}
+			if st.highAlerted["net"] && now.Sub(st.lowSince["net"]) >= recoverHold {
 				st.highAlerted["net"] = false
+				delete(st.lowSince, "net")
 				fires = append(fires, fire{
-					msg: fmt.Sprintf("✅ 网速恢复\n%%NAME%% 网速已回落至 ↑ %.1f / ↓ %.1f MB/s", netUp/mb, netDown/mb),
+					msg: fmt.Sprintf("✅ 网速恢复\n%%NAME%% 网速已回落至 ↑ %.1f / ↓ %.1f MB/s 并持续 %d 秒",
+						netUp/mb, netDown/mb, cfg.RecoverSec),
 					typ: evtNetRecovered, met: "net", val: speed, thres: th,
 				})
 			}
-			delete(st.highSince, "net")
 		}
 	}
 	n.mu.Unlock()
@@ -465,6 +498,7 @@ func (s *App) handlePutNotify(w http.ResponseWriter, r *http.Request) {
 	setSetting(s.db, keyNotifyMem, strconv.Itoa(clampInt(v.MemThreshold, 1, 100, 90)))
 	setSetting(s.db, keyNotifyDisk, strconv.Itoa(clampInt(v.DiskThreshold, 1, 100, 95)))
 	setSetting(s.db, keyNotifyLoadMin, strconv.Itoa(clampInt(v.LoadMinutes, 1, 120, 5)))
+	setSetting(s.db, keyNotifyRecoverSec, strconv.Itoa(clampInt(v.RecoverSec, 10, 3600, 60)))
 	setSetting(s.db, keyNotifyNet, b2s(v.NetOn))
 	setSetting(s.db, keyNotifyNetMB, strconv.Itoa(clampInt(v.NetThreshold, 1, 100000, 50)))
 	setSetting(s.db, keyNotifyNetSec, strconv.Itoa(clampInt(v.NetSeconds, 10, 3600, 60)))

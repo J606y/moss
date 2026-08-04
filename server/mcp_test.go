@@ -150,7 +150,10 @@ func TestHashKeyStableAndDistinct(t *testing.T) {
 	if a == b {
 		t.Fatal("两次生成的 Key 不应相同")
 	}
-	if hashKey(a) != hashKey(a) {
+	// 故意对同一个 Key 算两次：验证 hashKey 不是加盐哈希（那样每次结果都不同，
+	// 就没法按哈希建索引查 Key 了）。拆成两个变量而非直接 hashKey(a) != hashKey(a)，
+	// 后者会被静态检查当成恒假表达式报警，读代码的人也看不出是故意算两次。
+	if h1, h2 := hashKey(a), hashKey(a); h1 != h2 {
 		t.Error("同一 Key 的哈希应稳定")
 	}
 	if hashKey(a) == hashKey(b) {
