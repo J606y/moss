@@ -168,6 +168,7 @@ func mcpTestApp(t *testing.T) *App {
 	db := testDB(t)
 	app := &App{db: db, hub: newHub(db)}
 	app.exec = newExecManager(db)
+	app.upgrade = newUpgradeManager() // 与 main.go 保持一致；handleAdminServers 会读它
 	app.notifier = newNotifier(db)
 	app.hub.notifier = app.notifier
 	app.exec.notifier = app.notifier // 与 main.go 保持一致，否则测不到拦截告警路径
@@ -457,6 +458,34 @@ func TestMCPListServersHidesUnauthorized(t *testing.T) {
 	}
 	if strings.Contains(text, "denied") {
 		t.Error("不应泄露白名单外的机器")
+	}
+}
+
+// TestMCPListServersReturnsAgentVersion 锁住 agentVersion 必须回给模型。
+//
+// 旧 agent 收到 exec / write 消息会静默丢弃（agent/main.go 的 switch 无 default
+// 分支），症状只是干等到超时。没有这个字段，模型排查执行失败时唯一的线索就没了，
+// 只能靠超时时长反推——实机上就这么浪费过一轮。
+func TestMCPListServersReturnsAgentVersion(t *testing.T) {
+	app := mcpTestApp(t)
+	if _, err := app.db.Exec(
+		`INSERT INTO servers(id, token, name, grp, created_at, agent_version)
+		 VALUES('srv','t1','A','默认',0,'1.4.0')`); err != nil {
+		t.Fatalf("插入测试服务器失败: %v", err)
+	}
+	raw := mcpKey(t, app, "read", "")
+
+	w := mcpPost(t, app, raw,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_servers","arguments":{}}}`)
+	resp := decodeRPC(t, w)
+	b, _ := json.Marshal(resp.Result)
+	var got mcpCallToolResult
+	json.Unmarshal(b, &got)
+	if got.IsError {
+		t.Fatalf("list_servers 不应失败: %+v", got.Content)
+	}
+	if !strings.Contains(got.Content[0].Text, `"agentVersion": "1.4.0"`) {
+		t.Errorf("list_servers 必须返回 agentVersion，实际: %s", got.Content[0].Text)
 	}
 }
 

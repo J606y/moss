@@ -2,6 +2,7 @@ package main
 
 import (
 	_ "embed"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
@@ -16,14 +17,49 @@ var installSh []byte
 //go:embed install/install.ps1
 var installPs1 []byte
 
+// 安装脚本里的默认版本行。server 下发时按自身版本改写，见 installScript。
+// 这两个字面量必须与脚本逐字节一致，由 TestInstallScriptPinsVersion 锁住。
+const (
+	shVersionLine    = `VERSION="${MOSS_VERSION:-latest}"`
+	shVersionFormat  = `VERSION="${MOSS_VERSION:-%s}"`
+	ps1VersionLine   = `[string]$Version = "latest"`
+	ps1VersionFormat = `[string]$Version = "%s"`
+)
+
+// defaultAgentVersion 返回安装脚本应当默认安装的 agent 版本（带 v 前缀的 tag 名）。
+// 开发态未注入版本，没有对应的 release tag，返回空表示保持脚本原样走 latest。
+func defaultAgentVersion() string {
+	if serverVersion == "" || serverVersion == "dev" {
+		return ""
+	}
+	return "v" + strings.TrimPrefix(serverVersion, "v")
+}
+
+// installScript 把安装脚本的默认 agent 版本钉到 server 自身版本。
+//
+// 面板是什么版本，它装出来的 agent 就是什么版本。两条理由：
+//   - agent 与 server 的 WS 协议随版本演进（exec / write 均为 v2 新增），
+//     版本错配不是“旧一点”，而是新功能静默失效；
+//   - GitHub 的 latest 按定义跳过预发布版，beta 面板若走 latest，
+//     会装回上一个正式版还照常提示安装成功。
+//
+// 未匹配到默认版本行时原样返回：脚本仍走 latest，不会因改写失败而拼出 404 的 URL。
+func installScript(raw []byte, line, format string) []byte {
+	v := defaultAgentVersion()
+	if v == "" {
+		return raw
+	}
+	return []byte(strings.Replace(string(raw), line, fmt.Sprintf(format, v), 1))
+}
+
 func serveInstallSh(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Write(installSh)
+	w.Write(installScript(installSh, shVersionLine, shVersionFormat))
 }
 
 func serveInstallPs1(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Write(installPs1)
+	w.Write(installScript(installPs1, ps1VersionLine, ps1VersionFormat))
 }
 
 // spaHandler 服务前端构建产物，未命中文件时回退到 index.html。

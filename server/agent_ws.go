@@ -164,6 +164,9 @@ func (s *App) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 			s.hub.SetTotals(serverID, info.MemTotal, info.SwapTotal, info.DiskTotal)
 			s.hub.BroadcastMeta()
 			s.pushConfig(serverID)
+			// 升级的成功判据就在这里：agent 重连并上报版本号。
+			// 版本等于目标即成功；仍是旧版本说明 agent 侧守护已经回滚。
+			s.upgrade.OnRegister(serverID, info.AgentVersion)
 
 		case "report":
 			if msg.Stats == nil {
@@ -182,6 +185,9 @@ func (s *App) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 
 		case "exec_result":
 			s.exec.OnResult(msg.Exec)
+
+		case "upgrade_result":
+			s.upgrade.OnResult(serverID, msg.Upgrade)
 		}
 	}
 }

@@ -26,7 +26,15 @@ jobs:
           images: ghcr.io/j606y/moss
           tags: |
             type=semver,pattern={{version}}
-            type=raw,value=latest
+            # 带 - 的 tag（v2.0.0-beta.1 / -rc.1）不占用 latest，判据与 release.yml
+            # 的 prerelease 保持一致。原先是无条件 type=raw,value=latest：
+            # 每发一个测试版，所有按 README 用 :latest 部署的人都会被静默升级到
+            # 测试版，而 CHANGELOG 第一句写的是"生产环境建议等正式版"。
+            # 注意这与 GitHub Release 的 latest 语义相反——那边是自动跳过预发布的。
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+            # 测试版走独立的滚动 tag：自己的机器跟 :beta，外部用户跟 :latest。
+            # 没有它，部署测试版就得每次记住并改成具体版本号。
+            type=raw,value=beta,enable=${{ contains(github.ref_name, '-') }}
       - uses: docker/build-push-action@v6
         with:
           context: .

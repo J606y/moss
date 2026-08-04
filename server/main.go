@@ -26,7 +26,8 @@ type App struct {
 	trustProxy     bool         // 是否信任反代转发头获取真实来源 IP
 	trustedProxies []*net.IPNet // 可信代理网段；从 XFF 最右往左跳过这些地址取真实客户端
 
-	exec *execManager // 命令下发、分片聚合与审计
+	exec    *execManager    // 命令下发、分片聚合与审计
+	upgrade *upgradeManager // agent 一键升级的下发与状态跟踪
 
 	globalLimiter *limiter // 全局 /api 限流（按真实访客 IP）
 	authLimiter   *limiter // 登录等敏感端点的更严限流
@@ -79,6 +80,7 @@ func main() {
 
 	app := &App{db: db, hub: newHub(db), trustProxy: *trustProxy, trustedProxies: parseTrustedProxies(*trustedProxies)}
 	app.exec = newExecManager(db)
+	app.upgrade = newUpgradeManager()
 	app.notifier = newNotifier(db)
 	app.exec.notifier = app.notifier // 拦截告警走同一套通知配置
 	app.hub.notifier = app.notifier
@@ -132,6 +134,9 @@ func main() {
 	mux.HandleFunc("PUT /api/admin/gcp", app.requireAuth(app.handlePutGCP))
 	mux.HandleFunc("POST /api/admin/gcp/test", app.requireAuth(app.handleTestGCP))
 	mux.HandleFunc("POST /api/admin/servers/{id}/gcp-start", app.requireAuth(app.handleGCPManualStart))
+	// agent 一键升级：只挂在后台管理接口下，刻意不进 MCP 工具清单——
+	// 让 AI 升级自己脚下的 agent 等于绕过闸 2「篡改 moss 自身」的硬拦。
+	mux.HandleFunc("POST /api/admin/servers/{id}/upgrade", app.requireAuth(app.handleUpgradeAgent))
 	mux.HandleFunc("GET /api/admin/keys", app.requireAuth(app.handleListKeys))
 	mux.HandleFunc("POST /api/admin/keys", app.requireAuth(app.handleCreateKey))
 	mux.HandleFunc("POST /api/admin/keys/{id}/revoke", app.requireAuth(app.handleRevokeKey))

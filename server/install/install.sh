@@ -4,6 +4,10 @@
 set -euo pipefail
 
 REPO="${MOSS_REPO:-j606y/moss}"   # GitHub 仓库
+# 默认版本由 server 下发脚本时改写为它自身的版本（见 server/static.go installScript）。
+# agent 与 server 的 WS 协议随版本演进，版本错配会让新功能静默失效；而 GitHub 的
+# latest 按定义跳过预发布版，beta 面板若走 latest 会装回上一个正式版还提示成功。
+# 直接从仓库取用本脚本时未经改写，仍走 latest。
 VERSION="${MOSS_VERSION:-latest}"
 ENDPOINT=""
 TOKEN=""
@@ -64,9 +68,22 @@ chmod +x /tmp/moss-agent
 $SUDO mv /tmp/moss-agent "$BIN"
 
 if [[ "$OS" == "linux" ]] && command -v systemctl >/dev/null; then
-  # token 写入受限环境文件（600, root），不出现在 unit / 进程命令行 / ps 输出中
-  $SUDO install -m 600 /dev/null /etc/moss-agent.env
-  printf 'MOSS_TOKEN=%s\n' "$TOKEN" | $SUDO tee /etc/moss-agent.env >/dev/null
+  # token 写入受限环境文件（600, root），不出现在 unit / 进程命令行 / ps 输出中。
+  #
+  # 重装 / 升级必须保留用户自己加的其它变量——典型是 MOSS_ALLOW_EXEC=1。
+  # 整个文件重写会把它们静默抹掉：升级完执行能力就没了，且全程无任何提示。
+  ENV_FILE=/etc/moss-agent.env
+  KEEP=""
+  if [ -f "$ENV_FILE" ]; then
+    KEEP="$($SUDO grep -v '^[[:space:]]*MOSS_TOKEN=' "$ENV_FILE" || true)"
+  fi
+  $SUDO install -m 600 /dev/null "$ENV_FILE"
+  {
+    printf 'MOSS_TOKEN=%s\n' "$TOKEN"
+    # 用 if 而非 `[ -n "$KEEP" ] && printf`：后者在 KEEP 为空时返回 1，
+    # 作为块内最后一条命令会让整个管道在 set -o pipefail 下失败退出。
+    if [ -n "$KEEP" ]; then printf '%s\n' "$KEEP"; fi
+  } | $SUDO tee "$ENV_FILE" >/dev/null
   $SUDO tee /etc/systemd/system/moss-agent.service >/dev/null <<EOF
 [Unit]
 Description=Moss Agent

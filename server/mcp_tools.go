@@ -24,9 +24,12 @@ import (
 func mcpTools() []mcpTool {
 	return []mcpTool{
 		{
-			Name:        "list_servers",
-			Title:       "列出服务器",
-			Description: "列出所有服务器及其在线状态、系统信息。返回的 id 是后续所有工具的目标标识，任何操作前都应先调用本工具确认 id。",
+			Name:  "list_servers",
+			Title: "列出服务器",
+			Description: "列出所有服务器及其在线状态、系统信息。返回的 id 是后续所有工具的目标标识，任何操作前都应先调用本工具确认 id。" +
+				"agentVersion 是该机 agent 的版本：exec / write_file 需要 2.0.0 及以上，" +
+				"低于此版本的 agent 会静默丢弃这两类任务，症状是干等到超时而非报错。" +
+				"因此命令执行超时却查不出原因时，应先回来核对本字段，而不是反复重试。",
 			InputSchema: map[string]any{
 				"type":                 "object",
 				"properties":           map[string]any{},
@@ -294,13 +297,17 @@ type mcpServerInfo struct {
 	DiskGB   uint64 `json:"diskTotalBytes,omitempty"`
 	IP       string `json:"ip,omitempty"`
 	Note     string `json:"note,omitempty"`
+	// AgentVersion 必须返回给模型：agent 版本过低时 exec / write_file 的消息会被
+	// 旧 agent 静默丢弃（agent/main.go 的 switch 无 default 分支），症状只是干等到
+	// 超时，没有任何"版本过低"的提示。没有这个字段，模型只能靠超时时长反推。
+	AgentVersion string `json:"agentVersion,omitempty"`
 }
 
 func (s *App) toolListServers(key *apiKey) mcpCallToolResult {
 	if f := requireCap(key, capRead); f != nil {
 		return *f
 	}
-	rows, err := s.db.Query(`SELECT id, name, grp, os, arch, cpu_cores, mem_total, disk_total, ip, note
+	rows, err := s.db.Query(`SELECT id, name, grp, os, arch, cpu_cores, mem_total, disk_total, ip, note, agent_version
 	                         FROM servers ORDER BY sort, id`)
 	if err != nil {
 		return toolFailure("查询服务器列表失败: " + err.Error())
@@ -311,7 +318,7 @@ func (s *App) toolListServers(key *apiKey) mcpCallToolResult {
 	for rows.Next() {
 		var it mcpServerInfo
 		if err := rows.Scan(&it.ID, &it.Name, &it.Group, &it.OS, &it.Arch,
-			&it.CPUCores, &it.MemTotal, &it.DiskGB, &it.IP, &it.Note); err != nil {
+			&it.CPUCores, &it.MemTotal, &it.DiskGB, &it.IP, &it.Note, &it.AgentVersion); err != nil {
 			return toolFailure("读取服务器列表失败: " + err.Error())
 		}
 		// 只返回这把 Key 有权访问的机器：让模型看见它碰不到的机器毫无意义，

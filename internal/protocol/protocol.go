@@ -79,6 +79,50 @@ type WriteTask struct {
 // 都在几 KB 量级，48KB 覆盖绝大多数场景；更大的文件本就应当用 exec 去目标机拉取。
 const WriteSizeCap = 48 << 10
 
+// UpgradeTask server → agent 的自升级任务。
+//
+// 不复用 ExecTask 下发安装脚本，两条理由：
+//   - 闸 2 硬拦「动 agent 二进制 / 配置 / systemd 单元」，走 exec 会被自己的闸拦下；
+//   - 更要紧的是，能下发任意升级脚本等于开了一条绕过命令黑名单的通道。
+//
+// 升级逻辑内置在 agent 里，server 只给「升到哪个版本、从哪下载」，不给可执行内容。
+type UpgradeTask struct {
+	ID      string `json:"id"`      // 幂等 ID，agent 侧据此去重
+	Version string `json:"version"` // 目标版本，带 v 前缀的 tag 名，如 v2.0.0-beta.2
+	// BaseURL 是 release 的下载目录，文件名由 agent 按自身 runtime.GOOS/GOARCH 拼。
+	//
+	// 不由 server 拼好完整 URL：库里的 os 列存的是「Debian 13」这类人类可读的发行版名，
+	// 靠字符串匹配反推平台既脆又容易在新系统上悄悄猜错，而 agent 自己一定知道
+	// 它是什么平台什么架构。命名规则与 release.yml 的产物一致。
+	BaseURL string `json:"baseUrl"`
+	// GraceSec 回滚判据：重启后多少秒内没连回 server 就判定失败并回滚。
+	// 0 表示用 UpgradeDefaultGrace。
+	GraceSec int `json:"graceSec,omitempty"`
+}
+
+// 升级阶段。replaced 之后连接必然中断，界面据此显示「正在重启，等待重连」，
+// 而不是把断连误报成升级失败。
+const (
+	UpgradeStageDownloading = "downloading"
+	UpgradeStageVerified    = "verified"
+	UpgradeStageReplaced    = "replaced"
+	UpgradeStageRestarting  = "restarting"
+)
+
+// UpgradeDefaultGrace 新 agent 重启后允许的最长失联时间（秒）。
+// 正常重连在数秒内完成，60s 给足富余；再长则机器失联时间不可接受。
+const UpgradeDefaultGrace = 60
+
+// UpgradeResult agent → server 的升级进度。
+//
+// 收不到最终成功回执是正常的：agent 在 restarting 阶段就会被重启掐断连接。
+// 真正的成功判据是「agent 重新连上来且上报的版本号等于目标版本」，由 server 侧判定。
+type UpgradeResult struct {
+	ID    string `json:"id"`
+	Stage string `json:"stage"`
+	Error string `json:"error,omitempty"` // 非空表示升级在该阶段失败，此时不会重启
+}
+
 // ExecResult agent → server 的执行输出分片。
 // 输出流式回传：同一个 ID 会产生多条 Seq 递增的分片，最后一条 Done=true 且携带退出码。
 type ExecResult struct {
@@ -98,22 +142,24 @@ type ExecResult struct {
 
 // AgentMsg agent → server。
 type AgentMsg struct {
-	Type      string     `json:"type"` // register / report / ping / exec_result
+	Type      string     `json:"type"` // register / report / ping / exec_result / upgrade_result
 	Info      *AgentInfo `json:"info,omitempty"`
 	Stats     *Stats     `json:"stats,omitempty"`
 	UptimeSec uint64     `json:"uptimeSec,omitempty"`
 	TaskID    int64      `json:"taskId,omitempty"`
 	Ms        int        `json:"ms"` // -1 表示探测失败/丢包；agent 将 <1ms 记为 1ms，故 0 不会出现
 
-	Exec *ExecResult `json:"exec,omitempty"`
+	Exec    *ExecResult    `json:"exec,omitempty"`
+	Upgrade *UpgradeResult `json:"upgrade,omitempty"`
 }
 
 // ServerMsg server → agent。
 type ServerMsg struct {
-	Type     string     `json:"type"` // config / exec / write
+	Type     string     `json:"type"` // config / exec / write / upgrade
 	Interval int        `json:"interval,omitempty"`
 	Tasks    []PingTask `json:"tasks,omitempty"`
 
-	Exec  *ExecTask  `json:"exec,omitempty"`
-	Write *WriteTask `json:"write,omitempty"`
+	Exec    *ExecTask    `json:"exec,omitempty"`
+	Write   *WriteTask   `json:"write,omitempty"`
+	Upgrade *UpgradeTask `json:"upgrade,omitempty"`
 }

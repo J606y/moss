@@ -77,6 +77,15 @@ export interface AdminServer {
   ip: string
   ipv6: string
   online: boolean
+  // agent 版本与一键升级状态。
+  // 版本比对规则全在后端（upgradeAvailability），前端只消费结论：
+  // upgradable 决定按钮显不显示，upgradeHint 说明不能一键升级的原因。
+  agentVersion: string
+  targetVersion: string
+  upgradable: boolean
+  upgradeHint?: string
+  upgradeStage?: string
+  upgradeErr?: string
   // GCP Spot 自动开机配置与运行态（运行态为内存值，面板重启归零）
   gcpEnabled: boolean
   gcpProject: string

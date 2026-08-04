@@ -21,15 +21,36 @@
 
 | ID | 名称 | 系统 | agent 版本 |
 |---|---|---|---|
-| `uQ8B6wha` | TW NGINX SERVER | Debian 13 | **已升 beta.1 ✅ 已验证** |
-| `NhjbVUHB` | United States WEB SERVER | Debian 13 / aarch64 | 升级中 |
-| `TNeWg5XB` | JP NGINX SERVER | Debian 13 | 升级中 |
+| `uQ8B6wha` | TW NGINX SERVER | Debian 13 | **已升 beta.1 ✅ exec 实测可用** |
+| `NhjbVUHB` | United States WEB SERVER | Debian 13 / aarch64 | **已升 beta.1 ✅ exec 实测可用**（**moss server 本体在这台**） |
+| `TNeWg5XB` | JP NGINX SERVER | Debian 13 | **已升 beta.1 ✅ exec 实测可用** |
 | `T5s5WDHB` | HK PROXY SERVER | Debian 13 | v1.4.0 待升 |
 | `TMVEKaQa` | KR PROXY SERVER | Debian 13 | v1.4.0 待升 |
 | `FwCxdg8F` | GUANGZHOU DNS SERVER | Debian 13 | v1.4.0 待升（**境内，GitHub 下载会超时**） |
 | `AkijA4Zu` | JP SCUM SERVER | **Windows Server 2022** | v1.4.0 待升 |
 
-**moss server 自身部署在哪台机器上尚未确认** —— 这是设计「用 moss 部署 moss」自举路径的前提，接手后需先问用户。
+**待升 4 台**（2026-08-04 逐台下发 `echo` 实测：前三台正常返回，后四台无响应）。
+
+### moss server 部署位置（已确认）
+
+跑在 **`NhjbVUHB`**（United States WEB SERVER，129.153.73.56，Debian 13 / aarch64）：
+
+| 项 | 值 |
+|---|---|
+| 形态 | Docker 容器 `moss`，镜像 `ghcr.io/j606y/moss:latest` |
+| 启动参数 | `--listen :8787 --data /app/data --trust-proxy`，运行用户 uid 65532 |
+| 端口 | `127.0.0.1:8787`，不对外 |
+| 编排 | **无 compose 文件**，是 `docker run` 起的——重建前须先 `docker inspect moss` 取回原参数与挂载 |
+
+⚠️ **部署 beta.2 时必须把镜像从 `:latest` 改成 `:beta`。**
+`docker.yml` 改掉之后，预发布版不再占用 `latest`——`:latest` 会一直停在 beta.1，
+`docker pull :latest` 拉不到 beta.2，而且不会报错，只会提示已是最新。
+
+入口链路：`jk.20051212.xyz` →（TW `35.194.160.146` / JP `35.200.29.75` 两台 nginx 反代）
+→ `origin-jk.20051212.xyz` → `129.153.73.56:443` → 容器 `127.0.0.1:8787`。
+
+**自举的核心约束：MCP 端点就在这个容器里。** 重启它等于自己切断自己的手——
+下发重启命令后必然拿不到返回，只能等待重连后再确认结果。阶段 4 必须按这个前提设计。
 
 ## 已在真机验证通过
 
@@ -42,28 +63,56 @@
 
 ## 待办（按建议优先级）
 
-### 一、beta.2 必修的三个坑（实机踩出来的，剩余机器会重复踩）
+### 一、beta.2 必修的坑（实机踩出来的，剩余机器会重复踩）—— 四项已全部修完
 
-1. **安装脚本重写 `/etc/moss-agent.env`**（`server/install/install.sh`）：
-   `install -m 600 /dev/null` 先清空文件，再用 `tee`（非 `-a`）只写回 token，
+1. ~~**安装脚本重写 `/etc/moss-agent.env`**~~ **已修**（`server/install/install.sh`）：
+   原先 `install -m 600 /dev/null` 先清空文件，再用 `tee`（非 `-a`）只写回 token，
    **用户自定义的 `MOSS_ALLOW_EXEC=1` 会被静默抹掉**，且无任何提示。
-   修法：重写时保留非 `MOSS_TOKEN` 行，或把 token 拆到独立文件。
-2. **`latest` 不含预发布**：脚本默认走 `/releases/latest/download/`，
-   而 GitHub 的 `latest` 按定义跳过 Pre-release，**静默装回 v1.4.0 还提示"已安装"**。
-   装 beta 必须显式 `MOSS_VERSION=v2.0.0-beta.1`。
-   修法：文档写明，或脚本检测到装入版本低于当前运行版本时告警。
-3. **`list_servers` 缺 `agentVersion` 字段**：库里有这个数据，工具没返回。
-   导致 AI 排查执行失败时看不到最关键信息，只能靠超时时长反推。
+   现改为先读出非 `MOSS_TOKEN` 行、重写后再追加回去。
+   注意块内用 `if` 而非 `[ -n "$KEEP" ] && printf`——后者在 KEEP 为空时返回 1，
+   作为块内最后一条命令会让整个管道在 `set -o pipefail` 下失败退出，首装即中断。
+2. ~~**`latest` 不含预发布**~~ **已修**：GitHub 的 `latest` 按定义跳过 Pre-release，
+   原先**静默装回 v1.4.0 还提示"已安装"**。
+   现改为 **agent 版本跟随 server 自身版本**：`server/static.go installScript` 在下发脚本时
+   把默认版本行改写为 server 的 `serverVersion`（开发态 `dev` 保持 `latest`）。
+   面板是什么版本，它装出来的 agent 就是什么版本，不再依赖 GitHub 的 latest 语义。
+   根因不只是"装旧了"：**agent 与 server 的 WS 协议随版本演进**（`exec` / `write` 均为 v2 新增），
+   版本错配不是功能旧一点，而是新功能静默失效——现网 5 台 v1.4.0 agent 接在 v2.0.0 server 上，
+   `exec` 根本不工作。
+3. ~~**`list_servers` 缺 `agentVersion` 字段**~~ **已修**：库里有这个数据
+   （`servers.agent_version`，REST 的 `/api/servers` 与前端 `types.ts` 都有），
+   只有 MCP 工具没返回，AI 排查执行失败时只能靠超时时长反推。
+   除补字段外，工具描述里也写明了"低于 2.0.0 的 agent 会静默丢弃 exec / write，
+   症状是干等到超时而非报错"——光有字段而模型不知道怎么用它，等于没加。
+   实测佐证：2026-08-04 对 4 台 v1.4.0 下发 `echo`，全部无响应，
+   server 在 `timeout` 之上加 30s 宽限后才收敛报"等待执行结果超时"。
+4. ~~**Docker 的 `latest` 会被预发布版占用**~~ **已修**（`.github/workflows/docker.yml`）：
+   原先是无条件 `type=raw,value=latest`，**语义与 GitHub Release 的 latest 正好相反**
+   ——后者自动跳过预发布，前者不跳。后果是每发一个 beta，所有按 README 用
+   `ghcr.io/j606y/moss:latest` 部署的人都会被静默升级到测试版，
+   而 CHANGELOG 第一句写的是"生产环境建议等正式版"。线上容器跑着 beta.1 就是这么来的。
+   现改为：带 `-` 的 tag 只打版本号 tag 与 `beta`，不动 `latest`。
+   **自己的机器跟 `:beta`，外部用户跟 `:latest`。**
 
-### 二、剩余 5 台 agent 升级
+### 二、剩余 4 台 agent 升级（HK / KR / GZ / Win）
 
-正确顺序（**先装后配，反了会被脚本抹掉**）：
+⚠️ **坑 1、坑 2 的修复内嵌在 server 二进制里（`go:embed`），必须先重新部署 server 才生效。**
+在那之前，线上 `https://jk.20051212.xyz/install.sh` 仍是旧脚本，升级必须沿用旧命令。
+
+**server 重新部署前**（先装后配，反了会被脚本抹掉）：
 
 ```bash
 MOSS_VERSION=v2.0.0-beta.1 bash <(curl -fsSL https://jk.20051212.xyz/install.sh) \
   --endpoint https://jk.20051212.xyz --token <该机 token> \
   && echo 'MOSS_ALLOW_EXEC=1' >> /etc/moss-agent.env \
   && systemctl restart moss-agent && cat /etc/moss-agent.env
+```
+
+**server 重新部署后**（版本自动对齐，env 自动保留，顺序不再有要求）：
+
+```bash
+bash <(curl -fsSL https://jk.20051212.xyz/install.sh) \
+  --endpoint https://jk.20051212.xyz --token <该机 token>
 ```
 
 ### 三、从未在真机验证的代码路径 ⚠️ 风险最高
@@ -82,10 +131,40 @@ MOSS_VERSION=v2.0.0-beta.1 bash <(curl -fsSL https://jk.20051212.xyz/install.sh)
 
 ### 五、功能
 
-- **agent 自动升级**：走专用协议消息（不走 exec 通道，否则与黑名单冲突）、
-  分批推送、失败自动回滚。注意升级动作必须 `setsid` 脱离 agent 进程树，
-  否则 agent 重启时进程组一杀，升级到一半就断了。
-- **用 moss 部署 moss**（需先确认 server 部署位置）
+#### agent 更新按钮（已定形态，未实现）
+
+后台服务器列表每台一个「更新」按钮，**版本与 server 不一致时才出现**，人选哪台点哪台。
+
+**不做自动推送**（推翻原「分批自动推送」方案，用户决策）：手动逐台点，一次坏也只坏一台，
+还剩六台是好的。自动推送的爆炸半径是全集群。
+
+**手动降低的是爆炸半径，不是失败概率**——被点的那一台，新二进制起不来照样失联，
+且 systemd `Restart=always` 会把失败进程反复拉起，agent 永远连不回来。
+所以下面四条一条都不能省：
+
+1. **不走 exec 通道**。闸 2 硬拦「动 agent 二进制 / agent 配置 / agent systemd 单元」，
+   按钮若下发 install.sh 会被自己的闸拦下。必须新增 `ServerMsg.Type = "upgrade"` 专用消息。
+2. **升级动作必须 `setsid` 脱离 agent 进程树**。脚本末尾要 `systemctl restart moss-agent`，
+   而脚本本身是 agent 的子进程——重启时进程组一杀，脚本自己被杀在半截，
+   二进制处于半替换状态，机器直接失联。
+3. **必须自动回滚**：备份旧二进制 → 替换 → 启动 → 探测是否重新连回 server →
+   超时未连回则换回旧二进制重启。
+4. **绝不开放给 MCP / AI**。人点是人的决定；AI 自己升级自己脚下的 agent，
+   等于绕过「篡改 moss 自身」的硬拦。这个按钮只走后台管理接口，不进工具清单。
+
+版本对齐（坑 2）落地后，按钮语义是「对齐到 server 当前版本」，
+不需要版本下拉框——面板是什么版本，agent 就该是什么版本。
+
+**Windows 是另一条路径**：运行中的 exe 有文件锁，不能像 Linux 那样直接覆盖 inode，
+必须先停计划任务或改名再替换。且 `install.ps1` 的 `Register-ScheduledTask -Force`
+会覆盖整个任务定义，用户手动加在 `-Argument` 里的 `--allow-exec` 会被抹掉
+（坑 1 的 Windows 版，Linux 侧已修，Windows 侧未修）。目标机 `AkijA4Zu` 的
+执行路径本身也还没在真机验证过。
+
+#### 其它
+
+- **用 moss 部署 moss**（阶段 4）：部署位置已确认，见《moss server 部署位置》。
+  容器化部署，重建需先 `docker inspect moss` 取回原参数；难点是重启会切断 MCP 通道本身。
 
 ### 六、安全
 
@@ -103,6 +182,8 @@ MOSS_VERSION=v2.0.0-beta.1 bash <(curl -fsSL https://jk.20051212.xyz/install.sh)
 | **只推拦截、不推正常执行** | 逐条推送会让通知沦为噪音，两天后就被关掉 |
 | **MCP 基线定在 legacy（2025-11-25）** | 2026-07-28 是断代改动，现网客户端生态都在 legacy 代 |
 | **agent 执行能力默认关闭** | 装了 agent 不等于同意被远程操作 |
+| **agent 不做自动升级，只做手动更新按钮** | 见《agent 更新按钮》——自动推送的爆炸半径是全集群，手动逐台点坏也只坏一台 |
+| **agent 版本跟随 server 版本** | 协议随版本演进，错配 = 新功能静默失效；`latest` 又跳过预发布版 |
 
 ---
 
@@ -493,6 +574,108 @@ MCP 在 `2026-07-28` 做了断代改动——废除协议级会话与 `Mcp-Sessi
 | 点「清除密钥」（`clearSecret: true`） | 清空 |
 
 「留空 = 不修改」而非「留空 = 清空」，否则用户每次改地址都会意外把密钥清掉。
+
+### 进行中：agent 更新按钮
+
+分四段做，每段独立可验证。**段 1 已完成**。
+
+#### 段 1 · 协议 + agent 自升级端（已完成）
+
+| 文件 | 内容 |
+|---|---|
+| `internal/protocol/protocol.go` | `UpgradeTask` / `UpgradeResult`；`ServerMsg` 增 `upgrade`，`AgentMsg` 增 `upgrade_result`；阶段常量与 `UpgradeDefaultGrace=60` |
+| `agent/upgrade.go` | 幂等与串行准入、下载、SHA256 校验、原子替换、拉起守护、回滚守护本体、连接标记 |
+| `agent/upgrade_unix.go` | `Setsid` 拉起守护、`systemctl restart`、平台与 root 检查 |
+| `agent/upgrade_windows.go` | 如实返回不支持（原因见文件注释），不假装成功 |
+| `agent/upgrade_test.go` | 7 项，集中在校验和与大小上限这两条安全关键路径 |
+| `agent/main.go` | `--rollback-guard` 分流（在 token 校验**之前**）、`case "upgrade"`、连上后 `markConnected()` |
+
+实现中确认并处理的要点：
+
+1. **回滚必须由旧二进制守护**。新二进制若根本起不来，就没有任何进程能执行回滚，
+   而 systemd 的 `Restart=always` 会把失败进程反复拉起 → 机器永久失联。
+   旧二进制此刻正在运行，是唯一能确定可执行的东西，因此备份成 `<bin>.bak` 后由它当守护。
+2. **守护必须 `Setsid` 脱离进程组**。它接下来要 `systemctl restart moss-agent`，
+   而重启会终止 agent 所在的整个进程组——守护若还在组里会被一起杀在半路，
+   二进制已换新、服务没起来、也没人回滚。
+   用 `syscall.SysProcAttr{Setsid:true}` 而非调 `setsid(1)`：后者来自 util-linux，精简镜像未必有。
+3. **成功判据是「连回 server」而不是「进程活着」**。只看 `systemctl is-active` 不够：
+   进程起来了但 token 失效、endpoint 写错时同样连不上，那种状态与失联无异。
+   agent 每次连上刷新 `/run/moss-agent.connected` 的 mtime，守护比较 mtime 是否变新。
+4. **备份用 `rename` 而非 copy**：原子，且保留原 inode——正在运行的进程不受影响，
+   `.bak` 也就必然是一个完整可执行的文件。
+5. **守护起不来就不重启**。没有回滚兜底的重启是在赌运气，此时把备份换回去，回到升级前状态。
+6. **自升级的校验和比安装脚本更严格**。`install.sh` 拿不到 `SHA256SUMS` 时告警后继续
+   （老 release 确实没有该文件），而自升级**必须**校验通过才替换——
+   这里没有人在旁边看告警，装错一次就是机器失联。
+7. **守护日志落文件**（`os.TempDir()/moss-agent-upgrade.log`）：它脱离了 systemd，stderr 无处可去。
+8. **平台检查前置**：等下载完几十兆才发现这台机器没法重启服务，既费带宽，
+   也让失败发生在更靠近替换的地方。
+
+#### 段 2 · server 下发端（已完成）
+
+| 文件 | 内容 |
+|---|---|
+| `server/upgrade.go` | `upgradeManager`、版本判定、下发、状态机、`handleUpgradeAgent`、`releaseBase` |
+| `server/admin_api.go` | `adminServer` 补 `agentVersion` / `targetVersion` / `upgradable` / `upgradeHint` / `upgradeStage` / `upgradeErr` |
+| `server/agent_ws.go` | `upgrade_result` 分发；register 时调 `OnRegister` 判定结果 |
+| `server/main.go` | `POST /api/admin/servers/{id}/upgrade`，**只在后台管理接口下，不进 MCP 工具清单** |
+| `server/upgrade_test.go` | 9 项 |
+
+测试期间发现并修掉的两个真缺陷：
+
+1. **并发检查必须排在在线检查之前**。升级中的机器**必然**会短暂离线（替换后重启），
+   若先判在线，用户在这个窗口重复点击看到的是「机器离线」，而真实情况是「正在升级中」
+   ——那是两种完全不同的处置。
+2. **版本判定要排在在线判定之前**。离线是会自行恢复的临时状态，而版本过旧决定了
+   「必须换一种方式升级」。反过来的话，一台离线的旧 agent 只显示「机器离线」，
+   等它上线用户点了还是失败。
+
+另外两处刻意的设计：
+
+- **`OnAgentGone` 什么都不做**。升级过程中掉线是预期行为，把正常的重启窗口
+  误报成失败，会让每一次成功的升级都先闪一下红。
+- **`MOSS_RELEASE_BASE` 可覆盖下载源**。不是为了测试方便：境内机器直连 GitHub 会超时
+  （广州那台装 agent 时踩过），不给覆盖入口，一键升级对这类机器永远是坏的。
+
+#### 段 3 · 前端（已完成）
+
+`web/src/types.ts` 补字段，`ServersTab.tsx` 桌面表格与移动卡片两处各加一个按钮，挨着 GCP 开机。
+
+- **版本比对规则全在后端**，前端只消费 `upgradable` / `upgradeHint` 结论。
+  否则「哪些 agent 认识升级指令」这条判据会散落两处，改一处漏一处。
+- **离线机器不显示按钮**（整行已有离线标识，再挂个点不动的按钮只是噪音），
+  但升级进行中要显示——那时机器正因重启而离线，恰恰是最该看到状态的时候。
+- 三种颜色：正常可升级为默认色，需手动升级为琥珀色，升级失败为红色且可点重试。
+- 有任务在途时每 3 秒轮询列表。依赖用布尔而非 list，否则每次刷新都重建定时器，永远等不满一个周期。
+
+#### 段 4 · 端到端验证（逻辑层已完成，系统行为待真机）
+
+`rollbackGuard` 已重构为可注入（路径、轮询间隔、重启动作全部外部给定），
+在开发机上验证了三条最危险的路径：
+
+| 场景 | 结果 |
+|---|---|
+| 新版本连回 server | 保留新二进制、删除备份，返回 0 |
+| 新版本起来了但连不回（token 失效 / endpoint 写错） | 判失败并恢复旧二进制 |
+| 连重启都失败 | 立即回滚，不干等满 grace |
+
+⚠️ **未验证的部分**：`Setsid` 是否真的脱离了进程组、`systemctl restart` 的真实行为，
+这两项在 Windows 开发机上无法验证，必须在 Linux 真机上确认。
+而按钮的首次真机验证只能发生在 beta.3——beta.2 的机器要先手动装上，
+按钮才有认识升级指令的 agent 可驱动。
+
+### beta.2 发版清单（代码已就绪）
+
+| # | 步骤 | 备注 |
+|---|---|---|
+| 1 | 推 `v2.0.0-beta.2` tag | `web/package.json` 与 CHANGELOG 已更新 |
+| 2 | 等 Release + 镜像构建 | 本版起测试版只打 `beta` 标签，不再占用 `latest` |
+| 3 | 部署 server 到 `NhjbVUHB` | **镜像必须从 `:latest` 改成 `:beta`**，否则停在 beta.1 且不报错 |
+| 4 | 手动升 agent（最后一次手动） | 后台的安装命令此时已自动装对版本，直接复制粘贴 |
+| 5 | 真机验证 `Setsid` 与 `systemctl restart` | 段 4 未覆盖的部分 |
+
+第 4 步建议留 KR（`TMVEKaQa`）不升，作为旧 agent 样本，用来验证按钮的前置拦截提示。
 
 ### 下一步
 

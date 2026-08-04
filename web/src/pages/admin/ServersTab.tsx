@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Eye, EyeOff, GripVertical, Pencil, Play, Plus, Terminal, Trash2 } from 'lucide-react'
+import { ArrowUpCircle, Eye, EyeOff, GripVertical, Loader2, Pencil, Play, Plus, Terminal, Trash2 } from 'lucide-react'
 import { del, get, post, put } from '../../api/client'
 import type { AdminServer } from '../../types'
 import { CmdBlock, ConfirmDelete, CopyBtn, Modal, StatusPill } from '../../components/ui'
@@ -10,6 +10,36 @@ import { useOptimisticList } from '../../hooks/useOptimisticList'
 import { useReorder } from '../../hooks/useReorder'
 import { emptyServerForm, ServerFormModal } from './ServerFormModal'
 import type { Toast } from './types'
+
+/** 升级阶段的中文说法。终态两项单列，其余都是进行中。 */
+const UPGRADE_STAGE_TEXT: Record<string, string> = {
+  downloading: '下载中',
+  verified: '校验通过，替换中',
+  replaced: '已替换，重启中',
+  restarting: '重启中',
+  success: '升级成功',
+  failed: '升级失败',
+}
+
+const isUpgrading = (s: AdminServer) =>
+  !!s.upgradeStage && s.upgradeStage !== 'success' && s.upgradeStage !== 'failed'
+
+/**
+ * 是否显示更新按钮。
+ *
+ * 离线机器不显示：整行已有离线标识，再挂一个点不动的按钮只是噪音。
+ * 但升级进行中要显示——那时机器正因为重启而离线，恰恰是最该看到状态的时候。
+ */
+const showUpgradeBtn = (s: AdminServer) =>
+  isUpgrading(s) || s.upgradeStage === 'failed' || (s.online && (s.upgradable || !!s.upgradeHint))
+
+const upgradeTitle = (s: AdminServer) => {
+  if (isUpgrading(s)) return `正在升级：${UPGRADE_STAGE_TEXT[s.upgradeStage!] ?? s.upgradeStage}`
+  if (s.upgradeStage === 'failed') return `升级失败：${s.upgradeErr || '原因未知'}｜点击重试`
+  if (s.upgradeHint) return s.upgradeHint
+  const from = s.agentVersion ? `v${s.agentVersion}` : '版本未知'
+  return `升级 agent：${from} → ${s.targetVersion}`
+}
 
 export function ServersTab({ toast }: { toast: Toast }) {
   const { items: list, setItems: setList, mutate } = useOptimisticList<AdminServer>([])
@@ -65,6 +95,31 @@ export function ServersTab({ toast }: { toast: Toast }) {
       setGcpStarting(null)
     }
   }
+  // agent 一键升级。逐台点，不做批量：一次坏也只坏一台。
+  // 能不能升由后端判定（upgradable / upgradeHint），前端不自己比较版本号。
+  const [upgradeSubmitting, setUpgradeSubmitting] = useState<string | null>(null)
+  const upgradeAgent = async (s: AdminServer) => {
+    setUpgradeSubmitting(s.id)
+    try {
+      const res = await post<{ message: string }>(`/api/admin/servers/${s.id}/upgrade`)
+      toast(res.message)
+      load()
+    } catch (e) {
+      toast(errMsg(e))
+    } finally {
+      setUpgradeSubmitting(null)
+    }
+  }
+
+  // 升级期间机器必然重启并短暂离线，状态只能靠轮询刷新。
+  // 依赖用布尔而非 list：否则每次列表刷新都会重建定时器，永远等不满一个周期。
+  const upgradeRunning = list.some((s) => isUpgrading(s))
+  useEffect(() => {
+    if (!upgradeRunning) return
+    const t = setInterval(load, 3000)
+    return () => clearInterval(t)
+  }, [upgradeRunning, load])
+
   const gcpTitle = (s: AdminServer) => {
     let t = 'GCP 立即开机'
     if (s.gcpTries > 0) {
@@ -178,6 +233,26 @@ export function ServersTab({ toast }: { toast: Toast }) {
                           <Play className="h-3.5 w-3.5" />
                         </button>
                       )}
+                      {showUpgradeBtn(s) && (
+                        <button
+                          className={`${iconBtn} ${
+                            s.upgradeStage === 'failed'
+                              ? '!text-rose-500'
+                              : s.upgradeHint
+                                ? '!text-amber-500'
+                                : ''
+                          }`}
+                          title={upgradeTitle(s)}
+                          disabled={isUpgrading(s) || upgradeSubmitting === s.id}
+                          onClick={() => upgradeAgent(s)}
+                        >
+                          {isUpgrading(s) || upgradeSubmitting === s.id ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <ArrowUpCircle className="h-3.5 w-3.5" />
+                          )}
+                        </button>
+                      )}
                       <button className={iconBtn} title="安装命令" onClick={() => setInstall(s)}>
                         <Terminal className="h-3.5 w-3.5" />
                       </button>
@@ -255,6 +330,22 @@ export function ServersTab({ toast }: { toast: Toast }) {
                     <Play className="h-4 w-4" />
                   </button>
                 )}
+                {showUpgradeBtn(s) && (
+                  <button
+                    className={`${iconBtn} ${
+                      s.upgradeStage === 'failed' ? '!text-rose-500' : s.upgradeHint ? '!text-amber-500' : ''
+                    }`}
+                    title={upgradeTitle(s)}
+                    disabled={isUpgrading(s) || upgradeSubmitting === s.id}
+                    onClick={() => upgradeAgent(s)}
+                  >
+                    {isUpgrading(s) || upgradeSubmitting === s.id ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <ArrowUpCircle className="h-4 w-4" />
+                    )}
+                  </button>
+                )}
                 <button className={iconBtn} title="安装命令" onClick={() => setInstall(s)}>
                   <Terminal className="h-4 w-4" />
                 </button>
@@ -281,6 +372,8 @@ export function ServersTab({ toast }: { toast: Toast }) {
               id: tempId, name: f.name, group: f.group, region: f.region, flag: f.flag,
               autoFlag: '', note: f.note, expireAt: f.expireAt, token: '',
               ip: '', ipv6: '', online: false,
+              // 新建的机器还没装 agent，版本与可升级性都由后端在下次拉取时填。
+              agentVersion: '', targetVersion: '', upgradable: false,
               gcpEnabled: f.gcpEnabled, gcpProject: f.gcpProject, gcpZone: f.gcpZone,
               gcpInstance: f.gcpInstance, gcpTries: 0, gcpLastTry: 0, gcpLastErr: '',
             }

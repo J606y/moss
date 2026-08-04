@@ -4,6 +4,7 @@ param(
   [Parameter(Mandatory = $true)][string]$Endpoint,
   [Parameter(Mandatory = $true)][string]$Token,
   [string]$Repo = "j606y/moss",
+  # 默认版本由 server 下发脚本时改写为它自身的版本，理由见 install.sh 同处注释。
   [string]$Version = "latest"
 )
 $ErrorActionPreference = "Stop"

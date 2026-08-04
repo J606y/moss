@@ -29,6 +29,18 @@ type adminServer struct {
 	LastSeen  int64  `json:"lastSeen"`
 	CreatedAt int64  `json:"createdAt"`
 
+	// agent 版本与一键升级状态。
+	//
+	// 版本比对规则全部收在后端（upgradeAvailability）：前端只消费结论，
+	// 不自己比较版本号——否则「哪些 agent 认识升级指令」这条判据会散落两处，
+	// 改一处漏一处。UpgradeStage / UpgradeErr 为内存态，面板重启归零。
+	AgentVersion  string `json:"agentVersion"`
+	TargetVersion string `json:"targetVersion"`          // server 自身版本对应的 tag，开发态为空
+	Upgradable    bool   `json:"upgradable"`             // 可一键升级：版本不一致、在线、且 agent 认识升级指令
+	UpgradeHint   string `json:"upgradeHint,omitempty"`  // 不可一键升级时的原因；已是最新时为空
+	UpgradeStage  string `json:"upgradeStage,omitempty"` // 进行中/终态阶段
+	UpgradeErr    string `json:"upgradeErr,omitempty"`
+
 	// GCP Spot 自动开机配置与运行态（运行态为内存值，面板重启归零）
 	GcpEnabled  bool   `json:"gcpEnabled"`
 	GcpProject  string `json:"gcpProject"`
@@ -55,7 +67,7 @@ type serverForm struct {
 func (s *App) handleAdminServers(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(
 		`SELECT id, name, grp, region, flag, auto_flag, note, expire_at, token, ip, ipv6, last_seen, created_at,
-		        gcp_enabled, gcp_project, gcp_zone, gcp_instance
+		        gcp_enabled, gcp_project, gcp_zone, gcp_instance, agent_version
 		 FROM servers ORDER BY sort, created_at`)
 	if err != nil {
 		log.Printf("handleAdminServers query: %v", err)
@@ -68,13 +80,16 @@ func (s *App) handleAdminServers(w http.ResponseWriter, r *http.Request) {
 		var a adminServer
 		if err := rows.Scan(&a.ID, &a.Name, &a.Group, &a.Region, &a.Flag, &a.AutoFlag, &a.Note,
 			&a.ExpireAt, &a.Token, &a.IP, &a.IPv6, &a.LastSeen, &a.CreatedAt,
-			&a.GcpEnabled, &a.GcpProject, &a.GcpZone, &a.GcpInstance); err != nil {
+			&a.GcpEnabled, &a.GcpProject, &a.GcpZone, &a.GcpInstance, &a.AgentVersion); err != nil {
 			log.Printf("handleAdminServers scan: %v", err)
 			writeErr(w, 500, "内部错误")
 			return
 		}
 		_, _, a.Online = s.hub.Snapshot(a.ID)
 		a.GcpTries, a.GcpLastTry, a.GcpLastErr = s.notifier.GCPStatus(a.ID)
+		a.TargetVersion = upgradeTarget()
+		a.Upgradable, a.UpgradeHint = upgradeAvailability(a.AgentVersion, a.Online)
+		a.UpgradeStage, a.UpgradeErr = s.upgrade.Status(a.ID)
 		out = append(out, a)
 	}
 	writeJSON(w, 200, out)

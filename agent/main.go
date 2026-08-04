@@ -72,7 +72,19 @@ func main() {
 	token := flag.String("token", "", "服务器 token（明文，不推荐；优先用 --token-file 或 MOSS_TOKEN 环境变量）")
 	tokenFile := flag.String("token-file", "", "从文件读取 token（推荐，文件权限设 600）")
 	allowExec := flag.Bool("allow-exec", false, "允许服务端下发命令在本机执行（默认关闭，也可用 MOSS_ALLOW_EXEC=1 开启）")
+	guard := flag.Bool("rollback-guard", false, "内部使用：升级回滚守护，由自升级流程拉起，勿手动运行")
+	guardTarget := flag.String("guard-target", "", "内部使用：回滚守护的目标二进制路径")
+	guardGrace := flag.Int("guard-grace", protocol.UpgradeDefaultGrace, "内部使用：回滚守护等待新版本连回的秒数")
 	flag.Parse()
+
+	// 守护模式必须在 token 校验之前分流：它只负责重启与回滚，不连 server，
+	// 也就没有 token 可用——升级中的机器此刻正处在两个版本之间。
+	if *guard {
+		if *guardTarget == "" {
+			log.Fatal("--rollback-guard 需要 --guard-target")
+		}
+		os.Exit(runRollbackGuard(*guardTarget, *guardGrace))
+	}
 
 	tok := resolveToken(*token, *tokenFile)
 	if *endpoint == "" || tok == "" {
@@ -92,12 +104,15 @@ func main() {
 	// runner 在重连间保持存活：幂等记录必须跨连接有效，
 	// 否则服务端在重连后重发同一任务会造成二次执行（例如重复跑一遍部署）。
 	runner := newExecRunner(allow)
+	// upgrader 同样跨重连存活：幂等记录若随连接重置，server 重发同一升级任务
+	// 会导致二次下载与二次替换。
+	up := newUpgrader()
 
 	const baseBackoff = 3 * time.Second
 	backoff := baseBackoff
 	for {
 		start := time.Now()
-		if err := runOnce(target, runner); err != nil {
+		if err := runOnce(target, runner, up); err != nil {
 			log.Printf("连接中断: %v，%v 后重连", err, backoff)
 		}
 		// 维持过一段在线再断（如服务端重启/部署）属正常掉线 → 退避归零，下次快速重连；
@@ -112,7 +127,7 @@ func main() {
 	}
 }
 
-func runOnce(target string, runner *execRunner) error {
+func runOnce(target string, runner *execRunner, up *upgrader) error {
 	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
 	conn, _, err := dialer.Dial(target, nil)
 	if err != nil {
@@ -120,6 +135,9 @@ func runOnce(target string, runner *execRunner) error {
 	}
 	defer conn.Close()
 	log.Printf("已连接服务端")
+	// 刷新连接标记：升级回滚守护靠它判断新版本是否真的活过来了。
+	// 必须放在真正连上之后——拨号成功即代表 token 有效、server 可达。
+	markConnected()
 	resetNetRates() // 重连后重置网速基准，避免断线期 dt 产生虚高毛刺
 
 	c := &client{conn: conn}
@@ -173,6 +191,10 @@ func runOnce(target string, runner *execRunner) error {
 			case "write":
 				if msg.Write != nil {
 					runner.HandleWrite(c, *msg.Write)
+				}
+			case "upgrade":
+				if msg.Upgrade != nil {
+					up.Handle(c, *msg.Upgrade)
 				}
 			}
 		}
