@@ -1,6 +1,110 @@
-# AI 运维接口设计（G0/G1 评审稿）
+# AI 运维接口设计
 
-> 状态：待评审 · 目标版本 v1.5.0 · 本文为内部设计文档，不面向终端用户
+> 内部设计文档，不面向终端用户。
+
+---
+
+# 接手须知（2026-08-04）
+
+**当前进度：v2.0.0-beta.1 已发布上线，核心链路已在真机验证通过，正在往 beta.2 推进。**
+
+## 环境速查
+
+| 项 | 值 |
+|---|---|
+| 面板地址 | `https://jk.20051212.xyz`（**同时是 README 里的公开演示地址**） |
+| MCP 端点 | `https://jk.20051212.xyz/mcp` |
+| 接入方式 | 已加到 Claude Code 用户级配置（`claude mcp add --scope user`），全项目可用 |
+| 密钥范围 | 全部 7 台机器，读/执行/写三项能力齐全 |
+
+七台机器（`list_servers` 可查最新状态）：
+
+| ID | 名称 | 系统 | agent 版本 |
+|---|---|---|---|
+| `uQ8B6wha` | TW NGINX SERVER | Debian 13 | **已升 beta.1 ✅ 已验证** |
+| `NhjbVUHB` | United States WEB SERVER | Debian 13 / aarch64 | 升级中 |
+| `TNeWg5XB` | JP NGINX SERVER | Debian 13 | 升级中 |
+| `T5s5WDHB` | HK PROXY SERVER | Debian 13 | v1.4.0 待升 |
+| `TMVEKaQa` | KR PROXY SERVER | Debian 13 | v1.4.0 待升 |
+| `FwCxdg8F` | GUANGZHOU DNS SERVER | Debian 13 | v1.4.0 待升（**境内，GitHub 下载会超时**） |
+| `AkijA4Zu` | JP SCUM SERVER | **Windows Server 2022** | v1.4.0 待升 |
+
+**moss server 自身部署在哪台机器上尚未确认** —— 这是设计「用 moss 部署 moss」自举路径的前提，接手后需先问用户。
+
+## 已在真机验证通过
+
+在 `uQ8B6wha`（台湾）上实测：
+
+- 读取：`list_servers` / `get_metrics` / `get_history` 全部正常
+- 执行：异步下发 + 轮询取回，往返 152ms，退出码与 stdout 正确
+- 拦截：`iptables -A INPUT -j DROP` 被服务端拦下，未下发
+- 不误伤：`iptables -L INPUT -n` 正常返回规则表
+
+## 待办（按建议优先级）
+
+### 一、beta.2 必修的三个坑（实机踩出来的，剩余机器会重复踩）
+
+1. **安装脚本重写 `/etc/moss-agent.env`**（`server/install/install.sh`）：
+   `install -m 600 /dev/null` 先清空文件，再用 `tee`（非 `-a`）只写回 token，
+   **用户自定义的 `MOSS_ALLOW_EXEC=1` 会被静默抹掉**，且无任何提示。
+   修法：重写时保留非 `MOSS_TOKEN` 行，或把 token 拆到独立文件。
+2. **`latest` 不含预发布**：脚本默认走 `/releases/latest/download/`，
+   而 GitHub 的 `latest` 按定义跳过 Pre-release，**静默装回 v1.4.0 还提示"已安装"**。
+   装 beta 必须显式 `MOSS_VERSION=v2.0.0-beta.1`。
+   修法：文档写明，或脚本检测到装入版本低于当前运行版本时告警。
+3. **`list_servers` 缺 `agentVersion` 字段**：库里有这个数据，工具没返回。
+   导致 AI 排查执行失败时看不到最关键信息，只能靠超时时长反推。
+
+### 二、剩余 5 台 agent 升级
+
+正确顺序（**先装后配，反了会被脚本抹掉**）：
+
+```bash
+MOSS_VERSION=v2.0.0-beta.1 bash <(curl -fsSL https://jk.20051212.xyz/install.sh) \
+  --endpoint https://jk.20051212.xyz --token <该机 token> \
+  && echo 'MOSS_ALLOW_EXEC=1' >> /etc/moss-agent.env \
+  && systemctl restart moss-agent && cat /etc/moss-agent.env
+```
+
+### 三、从未在真机验证的代码路径 ⚠️ 风险最高
+
+- **Windows 执行能力**（`agent/exec_windows.go`）：Job Object 终止进程树、
+  `cmd.exe` 的 `CmdLine` 转义——只跑过本地单元测试，**没在真 Windows Server 上验证过**，
+  而这是整个 agent 里最容易出问题的代码。目标机 `AkijA4Zu`。
+- **`write_file`**：一次真机都没跑过。
+- **告警推送**：用户未配任何通知渠道，`fire()` 的 webhook 分支从未在生产触发。
+
+### 四、文档与发布物
+
+- `README_EN.md` 仍是旧文案，中英不一致
+- 首页截图 `docs/home.png` 无「AI 接入」页签
+- **beta 安装说明缺失**：必须写明装测试版要指定 `MOSS_VERSION`
+
+### 五、功能
+
+- **agent 自动升级**：走专用协议消息（不走 exec 通道，否则与黑名单冲突）、
+  分批推送、失败自动回滚。注意升级动作必须 `setsid` 脱离 agent 进程树，
+  否则 agent 重启时进程组一杀，升级到一半就断了。
+- **用 moss 部署 moss**（需先确认 server 部署位置）
+
+### 六、安全
+
+- `/mcp` 端点挂在公开演示域名上，建议加 IP 白名单或换域名
+
+## 不要推翻的既有决策
+
+接手后如果想"改进"以下几点，先读对应章节的理由，这些都是权衡后定的：
+
+| 决策 | 理由所在 |
+|---|---|
+| **不做人工确认闸** | 见《为什么没有人工确认闸》——能救的直接放行，救不了的硬拦，中间没有地带 |
+| **不做 WebSSH** | 与命令拦截互斥，PTY 是字符流不是命令流，拦不住 |
+| **黑名单不提供批准入口** | 留批准按钮意味着一次误点即灾难，而人自己上机器成本仅两分钟 |
+| **只推拦截、不推正常执行** | 逐条推送会让通知沦为噪音，两天后就被关掉 |
+| **MCP 基线定在 legacy（2025-11-25）** | 2026-07-28 是断代改动，现网客户端生态都在 legacy 代 |
+| **agent 执行能力默认关闭** | 装了 agent 不等于同意被远程操作 |
+
+---
 
 ## 一句话灵魂
 
