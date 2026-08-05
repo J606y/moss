@@ -18,7 +18,7 @@ function ServerCard({ server }: { server: ServerMeta }) {
   return (
     <Link
       to={`/server/${server.id}`}
-      className={`${card} block p-4 transition hover:-translate-y-0.5 hover:bg-white/40 dark:hover:bg-zinc-900/50 ${
+      className={`${card} press-card block p-4 transition hover:-translate-y-0.5 hover:bg-white/40 dark:hover:bg-zinc-900/50 ${
         server.online ? '' : 'opacity-60'
       }`}
     >

@@ -25,7 +25,7 @@ const ServerRow = memo(function ServerRow({
   return (
     <tr
       onClick={() => onOpen(server.id)}
-      className={`cursor-pointer border-b border-zinc-500/10 transition last:border-0 hover:bg-white/40 dark:border-white/5 dark:hover:bg-white/5 ${
+      className={`press-row cursor-pointer border-b border-zinc-500/10 transition last:border-0 hover:bg-white/40 dark:border-white/5 dark:hover:bg-white/5 ${
         server.online ? '' : 'opacity-60'
       }`}
     >
@@ -114,10 +114,10 @@ export default function Dashboard() {
               <button
                 key={g}
                 onClick={() => setGroup(g)}
-                className={`rounded-lg px-3 py-1.5 text-sm transition ${
+                className={`press rounded-lg px-3 py-1.5 text-sm transition ${
                   group === g
                     ? 'bg-emerald-500/10 font-medium text-emerald-600 dark:text-emerald-400'
-                    : 'text-zinc-500 hover:bg-white/50 hover:text-zinc-800 dark:hover:bg-white/10 dark:hover:text-zinc-200'
+                    : 'text-zinc-500 hover:bg-white/50 hover:text-zinc-800 active:bg-white/75 dark:hover:bg-white/10 dark:hover:text-zinc-200 dark:active:bg-white/15'
                 }`}
               >
                 {g}
@@ -129,14 +129,14 @@ export default function Dashboard() {
         <div className="glass flex shrink-0 items-center gap-1 rounded-xl p-1">
           <button
             onClick={() => setView('grid')}
-            className={`rounded-md p-1.5 transition ${view === 'grid' ? 'bg-white/70 text-zinc-800 shadow-sm dark:bg-white/15 dark:text-zinc-100' : 'text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300'}`}
+            className={`press-sm rounded-md p-1.5 transition ${view === 'grid' ? 'bg-white/70 text-zinc-800 shadow-sm dark:bg-white/15 dark:text-zinc-100' : 'text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300'}`}
             title="卡片视图"
           >
             <LayoutGrid className="h-4 w-4" />
           </button>
           <button
             onClick={() => setView('table')}
-            className={`rounded-md p-1.5 transition ${view === 'table' ? 'bg-white/70 text-zinc-800 shadow-sm dark:bg-white/15 dark:text-zinc-100' : 'text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300'}`}
+            className={`press-sm rounded-md p-1.5 transition ${view === 'table' ? 'bg-white/70 text-zinc-800 shadow-sm dark:bg-white/15 dark:text-zinc-100' : 'text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300'}`}
             title="列表视图"
           >
             <List className="h-4 w-4" />

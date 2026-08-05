@@ -7,7 +7,7 @@ export function Toggle({ checked, label, onChange }: { checked: boolean; label: 
       role="checkbox"
       aria-checked={checked}
       onClick={() => onChange(!checked)}
-      className="flex cursor-pointer select-none items-center gap-2 text-left text-sm"
+      className="group flex cursor-pointer select-none items-center gap-2 text-left text-sm"
     >
       <CheckBox checked={checked} />
       {label}

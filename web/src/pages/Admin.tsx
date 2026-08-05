@@ -35,10 +35,10 @@ function TabButton({ t, tab, setTab }: { t: (typeof tabs)[number]; tab: TabKey; 
   return (
     <button
       onClick={() => setTab(t.key)}
-      className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition ${
+      className={`press flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition ${
         tab === t.key
           ? 'bg-emerald-500/10 font-medium text-emerald-600 dark:text-emerald-400'
-          : 'text-zinc-500 hover:bg-white/50 hover:text-zinc-800 dark:hover:bg-white/10 dark:hover:text-zinc-200'
+          : 'text-zinc-500 hover:bg-white/50 hover:text-zinc-800 active:bg-white/75 dark:hover:bg-white/10 dark:hover:text-zinc-200 dark:active:bg-white/15'
       }`}
     >
       <t.icon className="h-4 w-4 shrink-0" />

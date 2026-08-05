@@ -22,7 +22,7 @@ export function NumberInput({
   }
   const bump = (d: number) => onChange(clamp((Number(value) || 0) + d))
   const stepBtn =
-    'flex flex-1 items-center justify-center rounded-md px-1 text-zinc-400 transition hover:bg-white/55 hover:text-zinc-700 dark:hover:bg-white/10 dark:hover:text-zinc-200'
+    'press-sm flex flex-1 items-center justify-center rounded-md px-1 text-zinc-400 transition hover:bg-white/55 hover:text-zinc-700 active:bg-white/75 dark:hover:bg-white/10 dark:hover:text-zinc-200 dark:active:bg-white/15'
   return (
     <div className="relative">
       <input

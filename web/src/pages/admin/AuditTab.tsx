@@ -97,10 +97,10 @@ export function AuditTab({ toast }: { toast: Toast }) {
           {/* 「仅拦截」单独给一个按钮而不是塞进下拉：被拦下的尝试是这里最该被
               一眼捞出来的记录，混在日常流水里很快就被刷到翻不到的地方。 */}
           <button
-            className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs transition ${
+            className={`press inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs transition ${
               onlyBlocked
                 ? 'bg-rose-500/15 text-rose-600 dark:text-rose-400'
-                : 'text-zinc-500 hover:bg-white/50 dark:hover:bg-white/5'
+                : 'text-zinc-500 hover:bg-white/50 active:bg-white/75 dark:hover:bg-white/5 dark:active:bg-white/12'
             }`}
             onClick={() => changeFilter(() => setOnlyBlocked((v) => !v))}
           >
@@ -218,10 +218,10 @@ function PageBtn({
     <button
       disabled={disabled}
       onClick={onClick}
-      className={`min-w-[1.75rem] rounded-lg px-2 py-1 transition disabled:opacity-40 ${
+      className={`press-sm min-w-[1.75rem] rounded-lg px-2 py-1 transition disabled:opacity-40 ${
         active
           ? 'bg-emerald-500/15 font-medium text-emerald-600 dark:text-emerald-400'
-          : 'hover:bg-white/50 dark:hover:bg-white/5'
+          : 'hover:bg-white/50 active:bg-white/75 dark:hover:bg-white/5 dark:active:bg-white/12'
       }`}
     >
       {children}

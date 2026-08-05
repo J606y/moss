@@ -297,7 +297,7 @@ function KeyFormModal({
     setScope(next.size === 0 ? '' : servers.filter((s) => next.has(s.id)).map((s) => s.id).join(','))
   }
   const row =
-    'flex w-full cursor-pointer select-none items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition hover:bg-white/50 dark:hover:bg-white/10'
+    'group flex w-full cursor-pointer select-none items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition duration-100 hover:bg-white/50 active:bg-white/75 dark:hover:bg-white/10 dark:active:bg-white/15'
 
   return (
     <Modal title={edit ? `编辑「${edit.name}」` : "新建接入密钥"} onClose={onClose}>

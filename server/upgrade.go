@@ -26,8 +26,8 @@ import (
 // handleUpgradeAgent 后台「更新」按钮的入口。
 func (s *App) handleUpgradeAgent(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	var agentVersion string
-	err := s.db.QueryRow(`SELECT agent_version FROM servers WHERE id=?`, id).Scan(&agentVersion)
+	var agentVersion, agentOS string
+	err := s.db.QueryRow(`SELECT agent_version, os FROM servers WHERE id=?`, id).Scan(&agentVersion, &agentOS)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeErr(w, 404, "服务器不存在")
 		return
@@ -37,7 +37,7 @@ func (s *App) handleUpgradeAgent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "内部错误")
 		return
 	}
-	if err := s.upgrade.Start(s.hub, id, agentVersion); err != nil {
+	if err := s.upgrade.Start(s.hub, id, agentVersion, agentOS); err != nil {
 		// 校验不通过属于用户可理解、可纠正的情况（版本过旧、已是最新、机器离线），
 		// 原因原样回给前端，而不是笼统的「操作失败」。
 		writeErr(w, 400, err.Error())
@@ -222,13 +222,25 @@ func upgradeTarget() string {
 // 判定规则集中在这里一处，前端只消费结论，不自己比较版本。
 //
 // 返回 (可否一键升级, 提示语)。提示语在不可升级时说明原因，可升级时为空。
-func upgradeAvailability(agentVersion string, online bool) (bool, string) {
+func upgradeAvailability(agentVersion, agentOS string, online bool) (bool, string) {
 	target := upgradeTarget()
 	if target == "" {
 		return false, "服务端为开发版本，没有对应的 release 可供安装"
 	}
 	if sameVersion(agentVersion, target) {
 		return false, ""
+	}
+	// 平台判定放在版本之后、在线之前：这类系统无论版本多新、是否在线都升不了，
+	// 是最确定的一条，早点告诉用户比让他点一次再看错误强。
+	// 但必须排在「已是最新」之后，否则一台早已跟上版本的 Mac 会常年挂着
+	// 「不支持自动升级」的提示，而它其实没有任何问题。
+	//
+	// 用字符串匹配而非 GOOS：AgentInfo 只上报人类可读的系统名，没有 GOOS 字段。
+	// 判断「是不是这两个平台」用它足够；但**不要**用同样的方式去推 goos/goarch
+	// 拼下载地址，那种精确用途必须由 agent 自己用 runtime 值来做
+	//（见 protocol.UpgradeTask.BaseURL 的注释）。
+	if upgradeOSUnsupported(agentOS) {
+		return false, upgradeOSUnsupportedHint
 	}
 	// 版本判定排在在线判定之前：离线是会自行恢复的临时状态，
 	// 而版本过旧决定了「必须换一种方式升级」，是更根本、需要用户采取不同行动的原因。
@@ -240,6 +252,38 @@ func upgradeAvailability(agentVersion string, online bool) (bool, string) {
 		return false, "机器离线"
 	}
 	return true, ""
+}
+
+// upgradeOSUnsupportedHint 平台不支持自升级时的统一提示。
+//
+// 不点名具体系统：Windows 与 macOS 的原因不同，但对用户是同一件事——
+// 这台机器得手动升。安装命令就在同一行的「命令」按钮里，提示直接指向它。
+const upgradeOSUnsupportedHint = "该系统暂不支持自动升级，请复制安装命令手动升级"
+
+// upgradeOSUnsupported 判断该系统上的 agent 有没有自升级能力。
+//
+// 依据是 agent 侧的事实而非猜测，两个平台各自的原因：
+//
+//   - Windows：agent/upgrade_windows.go 的 upgradeSupported() 恒返回错误。
+//     运行中的 .exe 有文件锁不能 rename 覆盖、没有 systemd 可重启、
+//     没有 setsid 可脱离进程树，三条都要另写一套，本版未实现。
+//   - macOS：agent/upgrade_unix.go 的构建约束是 !windows，**包含 darwin**，
+//     但它 LookPath systemctl 与 systemd-run 才放行，而 macOS 没有 systemd，
+//     必然失败。区别只是失败发生在运行时而非编译期。
+//
+// 两者都是「无论版本多新、是否在线都升不了」，拦在 server 侧不是新增限制，
+// 只是省掉用户点一次才知道。
+//
+// 匹配子串而非精确相等：库里存的是 gopsutil 上报的人类可读名，没有固定格式。
+// Windows 形如 "Microsoft Windows Server 2022 Datacenter 21H2"；
+// macOS 取的是 kern.ostype 小写再拼主版本号，形如 "Darwin 15"——**不是** "macOS"，
+// 所以必须认 darwin 这个词；"macos" 一并匹配，作为上报格式变化时的冗余。
+//
+// 空串（从未上报过）不匹配，交给后面的版本与在线判定处理——
+// 不知道是什么系统时不该替用户下结论。
+func upgradeOSUnsupported(agentOS string) bool {
+	s := strings.ToLower(agentOS)
+	return strings.Contains(s, "windows") || strings.Contains(s, "darwin") || strings.Contains(s, "macos")
 }
 
 func displayVersion(v string) string {
@@ -254,7 +298,7 @@ func displayVersion(v string) string {
 var errUpgradeBusy = errors.New("该机器已有升级任务在进行")
 
 // Start 校验并下发升级任务。校验不通过时不下发，直接返回原因。
-func (m *upgradeManager) Start(hub *Hub, serverID, agentVersion string) error {
+func (m *upgradeManager) Start(hub *Hub, serverID, agentVersion, agentOS string) error {
 	// 并发检查必须最先做：升级中的机器**必然**会短暂离线（替换后要重启），
 	// 若先判在线，用户在这个窗口里重复点击看到的是「机器离线」，
 	// 而真实情况是「正在升级中」——那是两种完全不同的处置。
@@ -264,7 +308,7 @@ func (m *upgradeManager) Start(hub *Hub, serverID, agentVersion string) error {
 
 	target := upgradeTarget()
 	online := hub.AgentConn(serverID) != nil
-	if ok, why := upgradeAvailability(agentVersion, online); !ok {
+	if ok, why := upgradeAvailability(agentVersion, agentOS, online); !ok {
 		if why == "" {
 			return fmt.Errorf("已是最新版本 %s", displayVersion(target))
 		}

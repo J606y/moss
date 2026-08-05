@@ -36,7 +36,7 @@ export default function Layout() {
       {/* 顶部 dock 栏：状态栏铺满后画布从屏幕最顶开始，故 top 额外加上 safe-area-inset-top 让 dock 视觉位置保持不变（非 iOS 独立模式该值为 0） */}
       <header className="sticky top-[calc(0.75rem_+_env(safe-area-inset-top))] z-40 px-3 sm:px-4">
         <div className="glass mx-auto flex h-14 max-w-7xl items-center justify-between rounded-2xl px-4">
-          <Link to="/" className="flex items-center gap-2">
+          <Link to="/" className="press flex items-center gap-2">
             <MossEye className="h-6 w-6" />
             <span className="text-lg font-bold tracking-tight">Moss</span>
             <span className="mt-0.5 hidden text-xs text-zinc-500 sm:inline">智控中心</span>

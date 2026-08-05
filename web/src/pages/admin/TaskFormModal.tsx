@@ -32,7 +32,7 @@ function ServerPicker({
     onChange(next.size === 0 ? '' : servers.filter((s) => next.has(s.id)).map((s) => s.id).join(','))
   }
   const row =
-    'flex w-full cursor-pointer select-none items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition hover:bg-white/50 dark:hover:bg-white/10'
+    'group flex w-full cursor-pointer select-none items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition duration-100 hover:bg-white/50 active:bg-white/75 dark:hover:bg-white/10 dark:active:bg-white/15'
   return (
     <div className="glass-sheen max-h-44 space-y-0.5 overflow-y-auto rounded-xl border border-white/50 bg-white/45 p-1.5 dark:border-white/10 dark:bg-zinc-900/40">
       <button type="button" role="checkbox" aria-checked={all} className={row} onClick={() => onChange('')}>

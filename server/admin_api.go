@@ -67,7 +67,7 @@ type serverForm struct {
 func (s *App) handleAdminServers(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(
 		`SELECT id, name, grp, region, flag, auto_flag, note, expire_at, token, ip, ipv6, last_seen, created_at,
-		        gcp_enabled, gcp_project, gcp_zone, gcp_instance, agent_version
+		        gcp_enabled, gcp_project, gcp_zone, gcp_instance, agent_version, os
 		 FROM servers ORDER BY sort, created_at`)
 	if err != nil {
 		log.Printf("handleAdminServers query: %v", err)
@@ -78,9 +78,12 @@ func (s *App) handleAdminServers(w http.ResponseWriter, r *http.Request) {
 	out := []adminServer{}
 	for rows.Next() {
 		var a adminServer
+		// agentOS 只用于判可升级性，不进响应体：后台列表不显示系统名，
+		// 加进 JSON 只会让契约多背一个没人消费的字段。
+		var agentOS string
 		if err := rows.Scan(&a.ID, &a.Name, &a.Group, &a.Region, &a.Flag, &a.AutoFlag, &a.Note,
 			&a.ExpireAt, &a.Token, &a.IP, &a.IPv6, &a.LastSeen, &a.CreatedAt,
-			&a.GcpEnabled, &a.GcpProject, &a.GcpZone, &a.GcpInstance, &a.AgentVersion); err != nil {
+			&a.GcpEnabled, &a.GcpProject, &a.GcpZone, &a.GcpInstance, &a.AgentVersion, &agentOS); err != nil {
 			log.Printf("handleAdminServers scan: %v", err)
 			writeErr(w, 500, "内部错误")
 			return
@@ -88,7 +91,7 @@ func (s *App) handleAdminServers(w http.ResponseWriter, r *http.Request) {
 		_, _, a.Online = s.hub.Snapshot(a.ID)
 		a.GcpTries, a.GcpLastTry, a.GcpLastErr = s.notifier.GCPStatus(a.ID)
 		a.TargetVersion = upgradeTarget()
-		a.Upgradable, a.UpgradeHint = upgradeAvailability(a.AgentVersion, a.Online)
+		a.Upgradable, a.UpgradeHint = upgradeAvailability(a.AgentVersion, agentOS, a.Online)
 		a.UpgradeStage, a.UpgradeErr = s.upgrade.Status(a.ID)
 		out = append(out, a)
 	}

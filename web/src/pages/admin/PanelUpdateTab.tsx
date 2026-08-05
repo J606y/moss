@@ -207,7 +207,7 @@ export function PanelUpdateTab({ toast }: { toast: Toast }) {
             {d.latest?.notes && d.avail.action === 'update' && (
               <div className="mt-3">
                 <button
-                  className="inline-flex items-center gap-1 text-xs text-emerald-600 hover:underline dark:text-emerald-400"
+                  className="press inline-flex items-center gap-1 text-xs text-emerald-600 transition hover:underline active:text-emerald-700 dark:text-emerald-400 dark:active:text-emerald-300"
                   onClick={() => setShowNotes((v) => !v)}
                 >
                   <ChevronDown className={`h-3.5 w-3.5 transition ${showNotes ? 'rotate-180' : ''}`} />

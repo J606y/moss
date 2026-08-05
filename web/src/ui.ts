@@ -5,17 +5,20 @@ export const card = 'glass rounded-2xl'
 export const glassPanel =
   'glass-sheen border border-white/50 bg-white/80 shadow-2xl backdrop-blur-2xl dark:border-white/10 dark:bg-zinc-900/80'
 
+// press / press-sm 是 index.css 里的按下反馈原语（缩放 + 时长曲线 + 移动端处理）。
+// 阴影同步收缩：按钮压下去离表面更近，投影本就该变小变紧——只缩不移，
+// 位移交给 scale，两者叠加才是「按下去」而不是「缩小了」。
 export const btnPrimary =
-  'inline-flex items-center gap-1.5 rounded-xl border border-emerald-400/40 bg-emerald-500/85 px-3 py-1.5 text-sm font-medium text-white shadow-lg shadow-emerald-500/20 backdrop-blur-md transition hover:bg-emerald-500 dark:border-emerald-400/25 dark:bg-emerald-500/75 dark:hover:bg-emerald-500/90'
+  'press inline-flex items-center gap-1.5 rounded-xl border border-emerald-400/40 bg-emerald-500/85 px-3 py-1.5 text-sm font-medium text-white shadow-lg shadow-emerald-500/20 backdrop-blur-md transition hover:bg-emerald-500 active:bg-emerald-600 active:shadow-md dark:border-emerald-400/25 dark:bg-emerald-500/75 dark:hover:bg-emerald-500/90 dark:active:bg-emerald-500'
 
 export const btnGhost =
-  'glass-sheen inline-flex items-center gap-1.5 rounded-xl border border-white/45 bg-white/40 px-3 py-1.5 text-sm shadow-sm backdrop-blur-md transition hover:bg-white/65 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10'
+  'press glass-sheen inline-flex items-center gap-1.5 rounded-xl border border-white/45 bg-white/40 px-3 py-1.5 text-sm shadow-sm backdrop-blur-md transition hover:bg-white/65 active:bg-white/80 active:shadow-none dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10 dark:active:bg-white/15'
 
 export const btnDanger =
-  'inline-flex items-center gap-1.5 rounded-xl border border-rose-300/50 bg-rose-500/10 px-3 py-1.5 text-sm text-rose-600 backdrop-blur-md transition hover:bg-rose-500/20 dark:border-rose-500/25 dark:text-rose-400'
+  'press inline-flex items-center gap-1.5 rounded-xl border border-rose-300/50 bg-rose-500/10 px-3 py-1.5 text-sm text-rose-600 backdrop-blur-md transition hover:bg-rose-500/20 active:bg-rose-500/30 dark:border-rose-500/25 dark:text-rose-400'
 
 export const iconBtn =
-  'rounded-lg p-1.5 text-zinc-500 transition hover:bg-white/55 hover:text-zinc-800 dark:hover:bg-white/10 dark:hover:text-zinc-200'
+  'press-sm rounded-lg p-1.5 text-zinc-500 transition hover:bg-white/55 hover:text-zinc-800 active:bg-white/75 dark:hover:bg-white/10 dark:hover:text-zinc-200 dark:active:bg-white/15'
 
 // text-base sm:text-sm：手机端用 16px 字体，避免 iOS Safari 聚焦输入框时自动放大页面；
 // 桌面端（≥640px）恢复 14px 紧凑观感。

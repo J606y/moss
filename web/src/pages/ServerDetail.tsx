@@ -229,7 +229,7 @@ export default function ServerDetail() {
         {timeWin && (
           <button
             onClick={() => setTimeWin(null)}
-            className="shrink-0 rounded-md px-2 py-0.5 text-xs font-medium text-emerald-600 transition hover:bg-emerald-500/10 dark:text-emerald-400"
+            className="press shrink-0 rounded-md px-2 py-0.5 text-xs font-medium text-emerald-600 transition hover:bg-emerald-500/10 active:bg-emerald-500/20 dark:text-emerald-400"
           >
             重置
           </button>
@@ -322,10 +322,10 @@ export default function ServerDetail() {
             <button
               key={t.key}
               onClick={() => setTab(t.key)}
-              className={`flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-sm transition ${
+              className={`press flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-sm transition ${
                 tab === t.key
                   ? 'bg-emerald-500/15 font-medium text-emerald-600 dark:text-emerald-400'
-                  : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'
+                  : 'text-zinc-500 hover:text-zinc-800 active:bg-white/60 dark:hover:text-zinc-200 dark:active:bg-white/10'
               }`}
             >
               <t.icon className="h-4 w-4" />

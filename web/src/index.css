@@ -83,6 +83,68 @@ body {
   );
 }
 
+/* ── 按下反馈 ──────────────────────────────────────────────────────────
+   所有可点击元素共用的下压手感：按下 100ms 压到目标比例，松手 150ms 回弹。
+   时长不对称是刻意的——按下要跟手，回弹可以从容。
+
+   只声明 transition-duration，不碰 transition-property：各处已有的 Tailwind
+   `transition` 已把 transform 纳入过渡，这里只改快慢，两者叠加不冲突。
+   本规则未分层，优先级高于 Tailwind 的 @layer utilities，无需 !important。
+
+   :not(:disabled) —— 禁用态不该有任何"按得动"的暗示。
+   <a> / <Link> 没有 disabled 属性，该条件对它们恒真。
+
+   user-select: none —— 快速连点时按钮文字会被选中，蓝色选区糊在玻璃上很脏。 */
+.press,
+.press-sm,
+.press-card,
+.press-row {
+  transition-duration: 150ms;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+}
+/* 用独立的 scale / translate 属性，不用合成 transform：Tailwind v4 的
+   translate-* / scale-* 生成的正是这两个属性（`transform` 已不参与）。
+   写成 transform 不会覆盖它们，只会与之叠加——卡片按下时就会「保持抬起再缩小」，
+   而不是压下去。同体系才能精确覆盖。 */
+.press:active:not(:disabled) {
+  scale: 0.97;
+  transition-duration: 100ms;
+}
+/* 图标按钮边长仅 28–32px，0.97 的位移不足 1px，肉眼无感，需压得更狠 */
+.press-sm:active:not(:disabled) {
+  scale: 0.9;
+  transition-duration: 100ms;
+}
+/* 卡片面积大，同样比例会显得整块塌陷；translate 归零抵消 hover 的抬起，
+   让「浮起 → 压下」连成一个动作，而不是缩放与位移各走各的 */
+.press-card:active {
+  translate: 0;
+  scale: 0.99;
+  transition-duration: 100ms;
+}
+/* 表格行退回背景加深：transform 在 table-row 上的行为各浏览器不一致，
+   与其赌渲染结果，不如换一种确定生效的反馈 */
+.press-row:active {
+  @apply bg-white/70 dark:bg-white/10;
+  transition-duration: 100ms;
+}
+
+/* 系统开启「减弱动态效果」时去掉缩放，只留颜色变化：
+   前庭失调人群对缩放尤其敏感，而反馈本身不能一起消失 */
+@media (prefers-reduced-motion: reduce) {
+  .press:active:not(:disabled),
+  .press-sm:active:not(:disabled),
+  .press-card:active {
+    scale: 1;
+  }
+  /* 位移也交还给 hover 那一层，按下不产生任何几何变化 */
+  .press-card:active {
+    translate: revert-layer;
+  }
+}
+
 /* 隐藏原生数字输入的上下箭头，改用自定义液态玻璃步进按钮 */
 input[type="number"]::-webkit-inner-spin-button,
 input[type="number"]::-webkit-outer-spin-button {
