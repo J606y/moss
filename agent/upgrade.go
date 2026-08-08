@@ -27,6 +27,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -205,15 +206,53 @@ func releaseURLs(base string) (binURL, sumsURL, assetName string) {
 	return base + "/" + assetName, base + "/SHA256SUMS", assetName
 }
 
-func downloadTo(dst, url string, cap int64) error {
-	cli := &http.Client{Timeout: upgradeDownloadTimeout}
-	resp, err := cli.Get(url)
+// requireHTTPS 拒绝非 https 的下载地址。
+//
+// 这道闸是「自升级不检查 --allow-exec」这个决定的前提条件。main.go 里的理由是
+// 升级「只能升到 server 当前版本、从**固定地址**装带校验和的**官方**二进制」，
+// 但 BaseURL 是服务端下发的、源头是 MOSS_RELEASE_BASE 环境变量，
+// 早就是自定义下载源了——那个前提其实已经不成立。
+//
+// 更要命的是 SHA256SUMS 与二进制同源：校验和只能证明「传输没坏」，
+// 证不了「二进制是官方的」——能替换二进制的人同样能替换清单。
+// 于是「明文 http 镜像 + 中间人」= agent 以 root 装上任意二进制并重启，
+// 覆盖所有机器，**包括没开 --allow-exec 的那些**。
+//
+// 刻意不提供 MOSS_RELEASE_ALLOW_INSECURE 之类的逃生门：这种开关会被人
+// 为了「先跑起来」打开，然后永远忘掉。境内镜像走 https 是能做到的；
+// 做不到的场景应该手动装，而不是让整个机队降级。
+func requireHTTPS(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("下载地址无法解析: %w", err)
+	}
+	if !strings.EqualFold(u.Scheme, "https") {
+		return fmt.Errorf("下载地址必须是 https，拒绝从 %q 安装", rawURL)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("下载地址缺少主机名: %q", rawURL)
+	}
+	return nil
+}
+
+// upgradeHTTP 是下载 release 资产用的客户端。
+//
+// 做成包级变量而非每次新建，一是复用连接，二是让测试能换成信任自签证书的实例：
+// requireHTTPS 刻意不给 127.0.0.1 开后门，所以测试必须真的走 TLS。
+// 「本机地址就放行」这类特例看着无害，但它会变成绕过整道闸的既成事实。
+var upgradeHTTP = &http.Client{Timeout: upgradeDownloadTimeout}
+
+func downloadTo(dst, rawURL string, cap int64) error {
+	if err := requireHTTPS(rawURL); err != nil {
+		return err
+	}
+	resp, err := upgradeHTTP.Get(rawURL)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d（%s）", resp.StatusCode, url)
+		return fmt.Errorf("HTTP %d（%s）", resp.StatusCode, rawURL)
 	}
 	f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 	if err != nil {
@@ -245,8 +284,12 @@ func verifySum(file, sumsURL, name string) error {
 	if sumsURL == "" {
 		return errors.New("未提供校验和地址，拒绝安装")
 	}
-	cli := &http.Client{Timeout: 2 * time.Minute}
-	resp, err := cli.Get(sumsURL)
+	// 校验和地址与二进制同源，同样必须走 https——否则中间人把清单一并换掉，
+	// 校验就成了自欺欺人。
+	if err := requireHTTPS(sumsURL); err != nil {
+		return err
+	}
+	resp, err := upgradeHTTP.Get(sumsURL)
 	if err != nil {
 		return fmt.Errorf("获取校验和失败: %w", err)
 	}

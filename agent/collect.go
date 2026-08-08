@@ -19,15 +19,71 @@ import (
 	"moss/internal/protocol"
 )
 
-// 虚拟/只读文件系统，统计磁盘容量时跳过
+// 虚拟/只读文件系统，统计磁盘容量时跳过。
+//
+// 网络文件系统也在此列，但理由不同：它们不是「不真实」，而是**会挂死**。
+// disk.Usage 底层是阻塞且不可中断的 statfs(2)，对端失联时会在内核态无限期挂起。
+// gopsutil 的 Partitions(false) 已经滤掉了 NFS 与 sshfs（挂载源不以 / 开头），
+// 但 CIFS/SMB 的挂载源是 //server/share，以 / 开头，会穿过那道过滤。
 var skipFs = map[string]bool{
 	"tmpfs": true, "devtmpfs": true, "devfs": true, "overlay": true, "squashfs": true,
 	"iso9660": true, "ramfs": true, "proc": true, "sysfs": true, "cgroup": true,
 	"cgroup2": true, "fuse.snapfuse": true, "nsfs": true, "autofs": true,
+	"cifs": true, "smbfs": true, "smb3": true, "nfs": true, "nfs4": true,
+	"fuse.sshfs": true, "fuse.s3fs": true, "fuse.rclone": true,
 }
 
+// diskCollectTimeout 是磁盘采集的整体上限。
+//
+// statfs(2) 不接受 context、不可中断，挂起的挂载点无法用超时打断。所以这里
+// 不是「取消它」，而是「不等它」——超时后沿用上一拍的值，让上报继续。
+// 不设这个上限的话，一个失联的挂载点会永久冻结整个上报协程：
+// 所有指标从此停更，而 WS 心跳在独立协程里仍然活着，面板还显示「在线」。
+const diskCollectTimeout = 3 * time.Second
+
+// 上一拍成功取到的磁盘用量。采集挂起时沿用，避免把「取不到」显示成 0。
+var (
+	lastDiskMu    sync.Mutex
+	lastDiskTotal uint64
+	lastDiskUsed  uint64
+)
+
 // diskTotals 汇总真实分区的容量与占用（按设备去重）。
+//
+// 采集放到独立协程里跑：挂起的挂载点会把那个协程永久泄漏掉，这是没办法的事
+// （statfs 不可中断），但至少不会连累上报主循环。泄漏的协程只有一个，
+// 因为挂起期间后续拍次都走「沿用上一拍」的快路径，不会再起新的。
 func diskTotals() (total, used uint64) {
+	type result struct{ total, used uint64 }
+	ch := make(chan result, 1)
+	go func() {
+		t, u := diskTotalsBlocking()
+		ch <- result{t, u}
+	}()
+
+	select {
+	case r := <-ch:
+		if r.total == 0 {
+			// 一个分区都没取到，多半是采集失败而非机器真的没有磁盘，
+			// 同样沿用上一拍，不要把界面刷成 0。
+			return lastDisk()
+		}
+		lastDiskMu.Lock()
+		lastDiskTotal, lastDiskUsed = r.total, r.used
+		lastDiskMu.Unlock()
+		return r.total, r.used
+	case <-time.After(diskCollectTimeout):
+		return lastDisk()
+	}
+}
+
+func lastDisk() (uint64, uint64) {
+	lastDiskMu.Lock()
+	defer lastDiskMu.Unlock()
+	return lastDiskTotal, lastDiskUsed
+}
+
+func diskTotalsBlocking() (total, used uint64) {
 	parts, err := disk.Partitions(false)
 	if err != nil {
 		return 0, 0
@@ -205,13 +261,52 @@ var (
 	prevRecv    uint64
 )
 
+// 不计入网速统计的接口名前缀。
+//
+// 之前用 IOCounters(false) 让 gopsutil 把**所有**接口求和，包括 lo、docker0、
+// veth*、tun*。后果是容器出网流量在 eth0 和 veth 上各算一次，本机回环调用
+// （本地服务互调、agent 自己跟本机组件通信）也被算成「网速」——
+// 装了 Docker 的机器必现，包括跑面板的那台。数字系统性偏高且不可信。
+var virtualNicPrefixes = []string{
+	"lo", "docker", "br-", "veth", "virbr", "tun", "tap", "wg", "zt",
+	"cni", "flannel", "cali", "kube-", "vmnet", "utun",
+	"loopback", "vethernet", // Windows 上的回环与 Hyper-V 虚拟交换机
+}
+
+func isVirtualNic(name string) bool {
+	n := strings.ToLower(name)
+	for _, p := range virtualNicPrefixes {
+		if strings.HasPrefix(n, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // netRates 返回总收发字节数与瞬时速率（B/s）。
 func netRates() (totalUp, totalDown uint64, up, down float64) {
-	counters, err := gnet.IOCounters(false)
+	counters, err := gnet.IOCounters(true)
 	if err != nil || len(counters) == 0 {
 		return
 	}
-	totalUp, totalDown = counters[0].BytesSent, counters[0].BytesRecv
+	var matched int
+	for _, c := range counters {
+		if isVirtualNic(c.Name) {
+			continue
+		}
+		matched++
+		totalUp += c.BytesSent
+		totalDown += c.BytesRecv
+	}
+	// 一张物理网卡都没剩：纯 VPN 出网的机器主网卡可能就叫 tun0，
+	// 这时宁可算多也不能算成 0——0 会被当成「网络不通」，比偏高更误导。
+	if matched == 0 {
+		totalUp, totalDown = 0, 0
+		for _, c := range counters {
+			totalUp += c.BytesSent
+			totalDown += c.BytesRecv
+		}
+	}
 
 	netMu.Lock()
 	defer netMu.Unlock()

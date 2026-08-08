@@ -160,6 +160,7 @@ func runOnce(target string, runner *execRunner, up *upgrader) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// 容量 1 + replaceLatest = 「只保留最新一份配置」。见 replaceLatest 的注释。
 	intervalCh := make(chan int, 1)
 	tasksCh := make(chan []protocol.PingTask, 1)
 
@@ -174,14 +175,13 @@ func runOnce(target string, runner *execRunner, up *upgrader) error {
 			conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 			switch msg.Type {
 			case "config":
-				select {
-				case intervalCh <- msg.Interval:
-				default:
-				}
-				select {
-				case tasksCh <- msg.Tasks:
-				default:
-				}
+				// 两个 channel 容量都是 1，语义是「只保留最新一份配置」。
+				// 原来的写法是「塞不进去就丢弃本次」——丢的是新值、留的是旧值，
+				// 正好反了：连续改两次配置或重连补发时，第二次的变更会被静默吞掉，
+				// 探测任务与上报间隔停在过时状态，且没有任何日志。
+				// 正确做法是先把陈旧的那份排空，再放新的进去。
+				replaceLatest(intervalCh, msg.Interval)
+				replaceLatest(tasksCh, msg.Tasks)
 			case "exec":
 				if msg.Exec != nil {
 					// 异步受理：执行可能持续数分钟，不能阻塞本读取循环，
@@ -228,6 +228,28 @@ func runOnce(target string, runner *execRunner, up *upgrader) error {
 			if err := c.send(protocol.AgentMsg{Type: "report", Stats: &stats, UptimeSec: uptime}); err != nil {
 				return err
 			}
+		}
+	}
+}
+
+// replaceLatest 把 v 放进容量为 1 的 channel，必要时先丢掉里面陈旧的那一份。
+//
+// 这是「只保留最新值」的正确写法。此前用的是非阻塞发送 + default，
+// 那个写法在 channel 已满时丢弃的是**新**值、保留的是旧值——语义正好相反，
+// 结果是最新配置静默不生效，且没有任何日志。
+//
+// 只有读取循环这一个生产者，所以最多循环两次即返回：要么直接发进去，
+// 要么排掉旧值后发进去。
+func replaceLatest[T any](ch chan T, v T) {
+	for {
+		select {
+		case ch <- v:
+			return
+		default:
+		}
+		select {
+		case <-ch: // 丢掉陈旧的那一份，回头再发
+		default: // 已被消费者取走，直接重试
 		}
 	}
 }

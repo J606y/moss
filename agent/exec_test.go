@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -107,6 +108,63 @@ func TestExecTimeoutKillsProcessTree(t *testing.T) {
 	if size2 != size1 {
 		t.Fatalf("孙进程仍在运行：文件从 %d 字节增长到 %d 字节，进程树未被终止", size1, size2)
 	}
+}
+
+// TestExecEscapedChildReleasesSlot 是本模块最关键的一条。
+//
+// setsid 出去的子孙不在原进程组内，KillTree 杀不到它，它会一直攥着 stdout
+// 管道的写端 —— 于是 pumpPipe 永远读不到 EOF、ch 永不关闭、run 永久挂起，
+// 而 run 不返回就意味着并发槽永不释放。execMaxConcurrent 是 4，
+// 累计 4 次之后这台机器再也执行不了任何命令，只能重启 agent。
+//
+// 只在 Linux 上跑：
+//   - macOS 默认没有 setsid，构造不出逃逸；
+//   - Windows 用 Job Object 而非进程组，子孙在 Start 后被一并纳入 Job，
+//     TerminateJobObject 收得到，本就不存在这条逃逸路径。
+//
+// appendLoopCmd 那条用例覆盖不到这里：它的孙进程与父 shell 同进程组，
+// 必然被 SIGKILL 收走，所以这个洞此前在 CI 上完全不可见。
+func TestExecEscapedChildReleasesSlot(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skipf("需要 setsid 构造进程组逃逸，当前平台 %s 不适用", runtime.GOOS)
+	}
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skip("本机没有 setsid，无法构造进程组逃逸")
+	}
+
+	r := newExecRunner(true)
+	// 逃逸的子孙持有 stdout（不重定向），父 shell 立刻退出。
+	escape := "setsid sleep 30 & echo spawned"
+
+	const rounds = execMaxConcurrent + 1
+	for i := 0; i < rounds; i++ {
+		fs := newFakeSender()
+		start := time.Now()
+		r.Handle(fs, protocol.ExecTask{ID: fmt.Sprintf("esc%d", i), Cmd: escape, Timeout: 1})
+
+		// 1 秒超时 + 5 秒排空宽限，留足余量。卡死的话这里会直接失败。
+		res := fs.waitDone(t, 20*time.Second)
+		elapsed := time.Since(start)
+
+		if res.Error == "" {
+			t.Fatalf("第 %d 轮：逃逸子进程导致的强制收尾必须带错误说明，实际 %+v", i, res)
+		}
+		if elapsed > 15*time.Second {
+			t.Fatalf("第 %d 轮：未能在宽限内收尾，耗时 %v", i, elapsed)
+		}
+
+		// 核心断言：并发槽必须回落。不回落的话第 5 轮会被「并发执行数已达上限」拒绝。
+		if got := runningCount(r); got != 0 {
+			t.Fatalf("第 %d 轮结束后并发槽未释放，running=%d", i, got)
+		}
+	}
+}
+
+// runningCount 读取当前占用的并发槽数。
+func runningCount(r *execRunner) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.running
 }
 
 func fileSize(t *testing.T, path string) int64 {

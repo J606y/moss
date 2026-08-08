@@ -14,11 +14,47 @@ import (
 )
 
 // upgradeServer 起一个假的 release 服务：/bin 给二进制，/SHA256SUMS 给清单。
+// useTestClient 让升级下载走测试服务器的自签证书。
+//
+// requireHTTPS 刻意不给 127.0.0.1 之类的本机地址开后门，所以测试必须真的走
+// TLS——否则「测试方便」就会变成生产上绕过整道闸的既成事实。
+func useTestClient(t *testing.T, srv *httptest.Server) {
+	t.Helper()
+	prev := upgradeHTTP
+	upgradeHTTP = srv.Client()
+	t.Cleanup(func() { upgradeHTTP = prev })
+}
+
+// TestUpgradeRejectsInsecureSource 是这条闸的核心用例。
+//
+// 自升级以 root 替换二进制并重启，且不检查 --allow-exec；而 SHA256SUMS 与
+// 二进制同源，校验和证不了「二进制是官方的」。所以传输层必须是 https，
+// 否则一个明文镜像加中间人就等于全机队的 root 代码分发通道。
+func TestUpgradeRejectsInsecureSource(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "bin")
+	bad := []string{
+		"http://example.com/moss-agent-linux-amd64",
+		"HTTP://example.com/moss-agent-linux-amd64",
+		"ftp://example.com/moss-agent-linux-amd64",
+		"file:///tmp/evil",
+		"example.com/moss-agent-linux-amd64", // 无 scheme
+		"https://",                           // 无主机名
+	}
+	for _, u := range bad {
+		if err := downloadTo(dst, u, 1024); err == nil {
+			t.Errorf("非 https 下载地址必须拒绝，却放行了: %q", u)
+		}
+		if err := verifySum(dst, u, "moss-agent-linux-amd64"); err == nil {
+			t.Errorf("非 https 校验和地址必须拒绝，却放行了: %q", u)
+		}
+	}
+}
+
 func upgradeServer(t *testing.T, body []byte, sumName string) *httptest.Server {
 	t.Helper()
 	sum := sha256.Sum256(body)
 	line := fmt.Sprintf("%s  %s\n", hex.EncodeToString(sum[:]), sumName)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/moss-agent-linux-amd64":
 			w.Write(body)
@@ -29,6 +65,7 @@ func upgradeServer(t *testing.T, body []byte, sumName string) *httptest.Server {
 		}
 	}))
 	t.Cleanup(srv.Close)
+	useTestClient(t, srv)
 	return srv
 }
 
@@ -83,10 +120,11 @@ func TestVerifySumRejects(t *testing.T) {
 func TestVerifySumAcceptsBinaryMarker(t *testing.T) {
 	body := []byte("bin")
 	sum := sha256.Sum256(body)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "%s  *moss-agent-linux-amd64\n", hex.EncodeToString(sum[:]))
 	}))
 	t.Cleanup(srv.Close)
+	useTestClient(t, srv)
 
 	f := filepath.Join(t.TempDir(), "bin")
 	if err := os.WriteFile(f, body, 0o755); err != nil {
@@ -99,10 +137,11 @@ func TestVerifySumAcceptsBinaryMarker(t *testing.T) {
 
 // 下载地址若被指向超大文件，必须在写爆磁盘前停手。
 func TestDownloadRejectsOversize(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write(make([]byte, 1024))
 	}))
 	t.Cleanup(srv.Close)
+	useTestClient(t, srv)
 
 	dst := filepath.Join(t.TempDir(), "big")
 	if err := downloadTo(dst, srv.URL, 512); err == nil {
@@ -115,13 +154,14 @@ func TestDownloadRejectsOversize(t *testing.T) {
 }
 
 func TestDownloadRejectsEmptyAndHTTPError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/empty" {
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	t.Cleanup(srv.Close)
+	useTestClient(t, srv)
 
 	dst := filepath.Join(t.TempDir(), "x")
 	if err := downloadTo(dst, srv.URL+"/empty", 1024); err == nil {

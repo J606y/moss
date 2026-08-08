@@ -20,6 +20,20 @@ const (
 	execMaxConcurrent  = 4                // 同时执行的命令数上限，防止一次性下发过多把机器压垮
 	execSeenTTL        = 30 * time.Minute // 幂等记录保留时长，超时后清理避免无限增长
 	execDefaultTimeout = 60               // 服务端未指定超时时的默认值（秒）
+
+	// execDrainGrace 是强杀之后仍等待输出管道关闭的宽限。
+	//
+	// 这个上限是必须的，不是保险。KillTree 在 Unix 侧只对原进程组发信号，
+	// 已经 setsid 的子孙不在该组内、杀不掉，它们会继续持有 stdout 管道的写端，
+	// 于是 pumpPipe 永远读不到 EOF、ch 永不关闭、run 永久挂起——
+	// 而 run 挂起意味着 defer r.done() 不执行、并发槽永不回落。
+	// 累计 execMaxConcurrent 次之后，这台机器再也无法执行任何命令，
+	// 只能重启 agent，且服务端只看到宽限超时，没有任何线索指向真因。
+	//
+	// 触发它不需要恶意：`setsid sleep 3600 &`、自行 fork+setsid 守护化的程序、
+	// 部分 `xxx start` 脚本都会。panel_update 的下发命令刻意写了
+	// `>/dev/null 2>&1 < /dev/null` 来避开，但 agent 侧本身必须有兜底。
+	execDrainGrace = 5 * time.Second
 )
 
 // sender 是执行端回传消息的出口。抽成接口而非直接依赖 *client，
@@ -151,9 +165,26 @@ func (r *execRunner) run(c sender, task protocol.ExecTask) {
 	// 超时强杀。timedOut 必须用原子量：写在定时器协程，读在 Wait() 之后的主协程，
 	// 而“杀进程 → Wait 返回”是经由操作系统传递的，不构成 Go 内存模型的 happens-before。
 	var timedOut atomic.Bool
+	var forcedDrain atomic.Bool
 	timer := time.AfterFunc(time.Duration(timeout)*time.Second, func() {
 		timedOut.Store(true)
 		killer.KillTree()
+
+		// 强杀之后再给一段宽限收尾。到点仍未 EOF，说明有子孙逃出了进程组、
+		// 正攥着管道写端不放——这时主动关掉父进程侧的读端，逼 pumpPipe 的
+		// Read 出错退出，ch 才能关闭、run 才能返回、并发槽才能释放。
+		//
+		// 关读端而不是直接 return 不排空：后者会漏掉两个 pumpPipe goroutine
+		// 和一对管道 fd，把「槽泄漏」换成「fd 泄漏」，没解决问题。
+		//
+		// 也不能改成并发 cmd.Wait() 来提前得知进程已退出——Wait 在进程回收后
+		// 会立即关闭父进程侧管道（closeDescriptors(parentIOPipes)），
+		// 那会把还缓冲在管道里、尚未读出的输出直接截断。
+		time.AfterFunc(execDrainGrace, func() {
+			forcedDrain.Store(true)
+			stdout.Close()
+			stderr.Close()
+		})
 	})
 
 	ch := make(chan chunk, 8)
@@ -204,7 +235,14 @@ func (r *execRunner) run(c sender, task protocol.ExecTask) {
 	killer.Close()
 
 	if timedOut.Load() {
-		sendExecFinal(c, task.ID, sent, "执行超时，进程树已终止", truncated)
+		msg := "执行超时，进程树已终止"
+		if forcedDrain.Load() {
+			// 有子孙逃出了进程组，输出是被强制掐断的，不是自然结束——
+			// 这一点必须说出来，否则使用者会把不完整的输出当成全部。
+			msg = "执行超时；有子进程脱离进程组未能终止，输出已强制截断"
+			truncated = true
+		}
+		sendExecFinal(c, task.ID, sent, msg, truncated)
 		return
 	}
 	exitCode := 0
