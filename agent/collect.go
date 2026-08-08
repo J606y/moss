@@ -1,13 +1,16 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
@@ -18,6 +21,48 @@ import (
 	"github.com/shirou/gopsutil/v4/process"
 	"moss/internal/protocol"
 )
+
+// 采集入口做成变量，供测试注入故障。
+//
+// 权限不足、/proc 被容器屏蔽这类失败在 CI 里构造不出来（跑测试的进程通常有权限），
+// 不注入就永远测不到失败分支——而失败分支恰恰是这几个指标最需要被守住的地方。
+var (
+	cpuPercent  = cpu.Percent
+	processPids = process.Pids
+	loadAvg     = load.Avg
+	netConns    = gnet.Connections
+)
+
+// collectWarnInterval 同一类采集失败的日志间隔。
+//
+// 采集失败几乎都是持续性的（权限不足、/proc 不可读、内核不支持），
+// 按每 2 秒一拍的上报频率不限流的话一天能刷出 4 万条相同的日志，
+// 把 journal 撑爆并淹掉真正有价值的记录。按「错误类别」限流而不是按次数丢弃，
+// 保证每一类故障始终看得见，运维至少能发现「这台机器的某个指标一直取不到」。
+const collectWarnInterval = 10 * time.Minute
+
+var (
+	collectWarnMu sync.Mutex
+	collectWarnAt = map[string]time.Time{}
+)
+
+// warnCollect 限流地记录一次采集失败。
+//
+// 必须记这条日志的原因：协议里这些字段是裸数值，没有「不可用」的表示法，
+// 而结构体是 server 与 agent 的共享契约不能随手改。采集失败时字段保持零值上报，
+// 与「系统真的空闲 / 连接数真的是 0」在界面上完全无法区分。
+// 日志是这条信息唯一的出口——没有它，一台机器的 CPU 曲线可以永远是 0 而无人察觉。
+func warnCollect(kind string, err error) {
+	collectWarnMu.Lock()
+	if last, ok := collectWarnAt[kind]; ok && time.Since(last) < collectWarnInterval {
+		collectWarnMu.Unlock()
+		return
+	}
+	collectWarnAt[kind] = time.Now()
+	collectWarnMu.Unlock()
+	log.Printf("采集%s失败，该指标将以 0 上报，请勿据此判断机器状态（同类问题 %v 内不再重复记录）: %v",
+		kind, collectWarnInterval, err)
+}
 
 // 虚拟/只读文件系统，统计磁盘容量时跳过。
 //
@@ -116,9 +161,7 @@ func collectInfo() protocol.AgentInfo {
 			// debian + 12 → Debian 12；Windows 的 Platform 已含版本号
 			osName = fmt.Sprintf("%s %s", osName, strings.SplitN(hi.PlatformVersion, ".", 2)[0])
 		}
-		if len(osName) > 0 {
-			info.OS = strings.ToUpper(osName[:1]) + osName[1:]
-		}
+		info.OS = titleFirstRune(osName)
 		if hi.KernelArch != "" {
 			info.Arch = hi.KernelArch
 		}
@@ -134,8 +177,32 @@ func collectInfo() protocol.AgentInfo {
 		info.SwapTotal = sm.Total
 	}
 	info.DiskTotal, _ = diskTotals()
-	info.IP, info.IPv6, info.CountryCode = publicNetCached()
+	// 只读 GeoIP 缓存，绝不在这里外呼：collectInfo 挂在 register 的关键路径上，
+	// 外呼最坏要 15 秒，那期间 agent 对 server 而言是「连上了却迟迟不注册」。
+	// 公网信息由 refreshGeoAndReregister 在后台取到后补发一条 register 更新。
+	info.IP, info.IPv6, info.CountryCode = publicNetCachedOnly()
 	return info
+}
+
+// titleFirstRune 把首字符转为大写（debian → Debian）。
+//
+// 不能写成 strings.ToUpper(s[:1]) + s[1:]：那是按**字节**切。平台名首字符是
+// 非 ASCII 时（麒麟、统信这类中文发行版名，或本地化的 Windows 版本串），
+// 切点落在多字节 UTF-8 序列中间，产出的是非法字节序列；encoding/json 会把它
+// 静默替换成 U+FFFD 落库，界面上就是一个永远修不好的乱码。
+// 当前 gopsutil 返回的平台名恰好都是 ASCII，但那是上游的实现细节而不是承诺。
+func titleFirstRune(s string) string {
+	if s == "" {
+		return ""
+	}
+	r, size := utf8.DecodeRuneInString(s)
+	if r == utf8.RuneError && size <= 1 {
+		// 输入本身就不是合法 UTF-8，再切一刀只会更糟，原样返回。
+		return s
+	}
+	// 用 strings.ToUpper 而非 unicode.ToUpper：前者带特殊大小写规则
+	// （德语 ß → SS），后者会原样返回，与改动前的行为不一致。
+	return strings.ToUpper(string(r)) + s[size:]
 }
 
 // detectVirt 判定虚拟化类型。gopsutil 在部分云厂商（DMI 被屏蔽）上识别不到
@@ -333,35 +400,56 @@ func resetNetRates() {
 }
 
 func connCount(kind string) int {
-	conns, err := gnet.Connections(kind)
+	conns, err := netConns(kind)
 	if err != nil {
+		warnCollect(kind+"连接数", err)
 		return 0
 	}
 	return len(conns)
 }
 
+// collectStats 采集一拍实时指标。
+//
+// 每个失败分支都必须走 warnCollect：协议里这些字段没有「不可用」的表示法
+// （改结构体会破坏与 server 的兼容），失败时上报的零值和真实的空闲值一模一样。
+// 静默的 0 比缺数据更糟——它会被当成事实，进而被告警规则和容量判断采信。
 func collectStats() (protocol.Stats, uint64) {
 	var s protocol.Stats
 
-	if pcts, err := cpu.Percent(0, false); err == nil && len(pcts) > 0 {
+	if pcts, err := cpuPercent(0, false); err != nil {
+		warnCollect("CPU 使用率", err)
+	} else if len(pcts) == 0 {
+		warnCollect("CPU 使用率", errors.New("返回了空的采样结果"))
+	} else {
 		s.CPU = pcts[0]
 	}
 	if vm, err := mem.VirtualMemory(); err == nil {
 		s.MemUsed = vm.Used
+	} else {
+		warnCollect("内存用量", err)
 	}
 	if sm, err := mem.SwapMemory(); err == nil {
 		s.SwapUsed = sm.Used
+	} else {
+		warnCollect("交换区用量", err)
 	}
 	_, s.DiskUsed = diskTotals()
 	s.TotalUp, s.TotalDown, s.NetUp, s.NetDown = netRates()
 	s.TCP = connCount("tcp")
-	if pids, err := process.Pids(); err == nil {
+	if pids, err := processPids(); err == nil {
 		s.Processes = len(pids)
+	} else {
+		warnCollect("进程数", err)
 	}
-	if avg, err := load.Avg(); err == nil {
+	if avg, err := loadAvg(); err == nil {
 		s.Load1, s.Load5, s.Load15 = avg.Load1, avg.Load5, avg.Load15
+	} else {
+		warnCollect("负载", err)
 	}
 
-	uptime, _ := host.Uptime()
+	uptime, err := host.Uptime()
+	if err != nil {
+		warnCollect("运行时长", err)
+	}
 	return s, uptime
 }

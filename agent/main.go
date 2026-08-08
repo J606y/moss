@@ -142,7 +142,7 @@ func runOnce(target string, runner *execRunner, up *upgrader) error {
 
 	c := &client{conn: conn}
 
-	// 注册主机信息
+	// 注册主机信息。collectInfo 只读 GeoIP 缓存，不外呼，所以这条消息立刻就能发出去。
 	info := collectInfo()
 	if err := c.send(protocol.AgentMsg{Type: "register", Info: &info}); err != nil {
 		return err
@@ -159,6 +159,9 @@ func runOnce(target string, runner *execRunner, up *upgrader) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// 公网 IP / 国家码在后台补：见 refreshGeoAndReregister。
+	go refreshGeoAndReregister(ctx, c, info)
 
 	// 容量 1 + replaceLatest = 「只保留最新一份配置」。见 replaceLatest 的注释。
 	intervalCh := make(chan int, 1)
@@ -230,6 +233,41 @@ func runOnce(target string, runner *execRunner, up *upgrader) error {
 			}
 		}
 	}
+}
+
+// refreshGeoAndReregister 在后台取公网 IP / 国家码，拿到新值后补发一条 register。
+//
+// 为什么是「先注册再补发」而不是「注册前先查」：publicNet 的 v4 分支要依次试
+// ip-api → ip.sb → ipinfo，每个 5 秒超时，全失败时顺序耗时可达 15 秒。
+// 那 15 秒卡在 register 之前，agent 在面板上就是「连上了却迟迟不注册」，
+// 而 ip-api 免费版只有 http、境内访问本就不稳，这是常见路径不是边缘路径。
+// 30 分钟 TTL 缓存救不了冷启动：首次安装、升级重启、崩溃重启都从空缓存开始。
+//
+// 补发是安全的：server 的 register 分支是一条纯 UPDATE，重复收到只是再写一次
+// 同样的值；升级成功与否在第一条 register 就已判定（版本号不依赖 GeoIP），
+// 补发这条落在终态上不会改变结论。
+//
+// 取不到就不发——没有新信息就不必打扰 server；缓存已被这次外呼填上，
+// 下次重连的第一条 register 自然会带上。
+func refreshGeoAndReregister(ctx context.Context, c sender, sent protocol.AgentInfo) {
+	ipv4, ipv6, country := refreshPublicNet()
+	if ipv4 == sent.IP && ipv6 == sent.IPv6 && country == sent.CountryCode {
+		return
+	}
+	// 外呼期间连接可能早就断了。此时不发：这条 register 属于那条已死的连接，
+	// 新连接自己会带着刚填好的缓存重新注册。
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+	info := collectInfo()
+	if err := c.send(protocol.AgentMsg{Type: "register", Info: &info}); err != nil {
+		// 发失败无需重试，也不该把连接判死：真断了的话读取循环会先一步收尾。
+		log.Printf("补发公网信息失败: %v", err)
+		return
+	}
+	log.Printf("公网信息已补报: ip=%s ipv6=%s cc=%s", info.IP, info.IPv6, info.CountryCode)
 }
 
 // replaceLatest 把 v 放进容量为 1 的 channel，必要时先丢掉里面陈旧的那一份。

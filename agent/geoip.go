@@ -70,22 +70,50 @@ func publicNet() (ipv4, ipv6, country string) {
 
 const geoTTL = 30 * time.Minute
 
+// geoRetryInterval 两次外呼之间的最小间隔，失败后同样适用。
+//
+// 没有这个节流的话，一台外网不通的机器每次重连都会重跑一遍全部端点：
+// 重连退避最短 3 秒，而一轮失败要烧掉约 15 秒和 3 个请求。境内机器连不上
+// ip-api / ipinfo 是常态，那就是一台机器持续不断地空转外呼——既打免费接口的
+// 配额，也让 agent 长期挂着一个没有意义的协程。
+const geoRetryInterval = 5 * time.Minute
+
 var (
 	geoMu      sync.Mutex
 	geoCache   struct{ ipv4, ipv6, country string }
 	geoCacheAt time.Time
+	geoTriedAt time.Time // 上一次真正外呼的起始时刻，兼作单飞标记
 )
 
-// publicNetCached 带 TTL 缓存的 publicNet：缓存有效期内直接返回上次结果，
-// 避免掉线抖动时每次重连都外呼免费 GeoIP 接口（ip-api 免费版 45 次/分，易被限流）。
-// 仅在成功拿到 IPv4 时刷新缓存，避免把一次全失败缓存 30 分钟。
-func publicNetCached() (ipv4, ipv6, country string) {
+// publicNetCachedOnly 只读缓存，永不外呼、永不阻塞。
+//
+// register 走这条路径。公网信息对注册来说是锦上添花（server 拿不到会回退到
+// 连接来源 IP），却要用最坏 15 秒的外呼去换——那 15 秒里 agent 在面板上是
+// 「连上了但没注册」，冷启动、升级重启、崩溃重启后每次都要再经历一遍。
+func publicNetCachedOnly() (ipv4, ipv6, country string) {
 	geoMu.Lock()
-	if !geoCacheAt.IsZero() && time.Since(geoCacheAt) < geoTTL && geoCache.ipv4 != "" {
+	defer geoMu.Unlock()
+	if geoCacheAt.IsZero() || time.Since(geoCacheAt) >= geoTTL {
+		return "", "", ""
+	}
+	return geoCache.ipv4, geoCache.ipv6, geoCache.country
+}
+
+// refreshPublicNet 外呼刷新缓存并返回最新结果，最坏阻塞约 15 秒，只能在后台调用。
+//
+// 缓存仍然有效、或距上次外呼不足 geoRetryInterval 时直接返回现有缓存不外呼，
+// 后者同时起到单飞作用：重连风暴中后来的调用不会再叠一轮外呼上去。
+// 仅在成功拿到 IPv4 时刷新缓存，避免把一次全失败缓存 30 分钟。
+func refreshPublicNet() (ipv4, ipv6, country string) {
+	geoMu.Lock()
+	fresh := !geoCacheAt.IsZero() && time.Since(geoCacheAt) < geoTTL && geoCache.ipv4 != ""
+	throttled := !geoTriedAt.IsZero() && time.Since(geoTriedAt) < geoRetryInterval
+	if fresh || throttled {
 		c := geoCache
 		geoMu.Unlock()
 		return c.ipv4, c.ipv6, c.country
 	}
+	geoTriedAt = time.Now() // 先占位再外呼，否则并发的第二个调用会同时穿过节流
 	geoMu.Unlock()
 
 	ipv4, ipv6, country = publicNet()

@@ -38,10 +38,36 @@ func (r *execRunner) HandleWrite(c sender, task protocol.WriteTask) {
 	}()
 }
 
+// writeDefaultMode 目标文件不存在、调用方也没指定权限时用的默认值。
+const writeDefaultMode os.FileMode = 0o644
+
+// resolveOverwriteMode 决定覆盖写落地时用什么权限。
+//
+// 规则只有一条：调用方显式给了 mode 就听调用方的；没给就保留目标文件现有的权限；
+// 目标不存在时才用默认值。
+//
+// 为什么必须保留：覆盖写是「换掉内容」而不是「重建文件」，调用方没提权限就不该
+// 悄悄改权限。但实现上走的是「临时文件 + rename 顶替」，原 inode 连同它的权限位
+// 一起被换掉了，不显式续上就等于丢失。旧代码在这里补的是默认的 0644，于是一次
+// 不带 mode 的改配置，会把 0600 的 .env / 私钥 / token 静默放宽到 0644——
+// 同机的其他用户从此可读，而审计日志上只写着「写入成功」。
+//
+// 抽成纯函数是为了能在所有平台上测：Windows 的文件权限只有「可写 / 只读」两态，
+// 端到端的用例在那里必须跳过，但这条判断本身不该跟着一起失去守护。
+func resolveOverwriteMode(taskMode uint32, existing os.FileMode, exists bool) os.FileMode {
+	if taskMode != 0 {
+		return os.FileMode(taskMode)
+	}
+	if exists {
+		return existing.Perm()
+	}
+	return writeDefaultMode
+}
+
 func writeFile(task protocol.WriteTask) error {
 	mode := os.FileMode(task.Mode)
 	if mode == 0 {
-		mode = 0o644
+		mode = writeDefaultMode
 	}
 	if task.Mkdir {
 		if err := os.MkdirAll(filepath.Dir(task.Path), 0o755); err != nil {
@@ -65,6 +91,16 @@ func writeFile(task protocol.WriteTask) error {
 	// 会留下一个半截的配置文件，比完全没写更危险——服务可能就此起不来。
 	// 先写同目录下的临时文件，落盘后再 rename 顶替。同目录是必要条件，
 	// 跨文件系统的 rename 会失败。
+	//
+	// 顶替会丢掉原 inode 的权限位，所以要先问清楚该落什么权限，见 resolveOverwriteMode。
+	// append 分支没有这个问题：它写的是原 inode，OpenFile 的 mode 只在创建时生效。
+	var existing os.FileMode
+	var exists bool
+	if fi, err := os.Stat(task.Path); err == nil && fi.Mode().IsRegular() {
+		existing, exists = fi.Mode().Perm(), true
+	}
+	mode = resolveOverwriteMode(task.Mode, existing, exists)
+
 	dir := filepath.Dir(task.Path)
 	tmp, err := os.CreateTemp(dir, ".moss-write-*")
 	if err != nil {
