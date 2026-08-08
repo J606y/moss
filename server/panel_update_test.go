@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -135,5 +138,77 @@ func TestPanelUpdateViewSurvivesCheckFailure(t *testing.T) {
 	}
 	if !strings.Contains(body, `"action":"unknown"`) {
 		t.Error("查不到版本时不能判成已是最新，应为 unknown")
+	}
+}
+
+// TestPanelUpdateScriptSyntax 生成的部署脚本必须语法正确。
+//
+// 这条脚本是拼字符串拼出来的，且只有到了目标机器上才会被执行——语法错一次
+// 就是「面板停了、新容器没起来、回滚逻辑也没跑到」。本地花 30 毫秒挡住它。
+func TestPanelUpdateScriptSyntax(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("本机没有 bash，跳过语法检查")
+	}
+	script := panelUpdateScript("ghcr.io/j606y/moss", "ghcr.io/j606y/moss:2.0.0")
+	p := filepath.Join(t.TempDir(), "panel-update.sh")
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("bash", "-n", p).CombinedOutput(); err != nil {
+		t.Fatalf("生成的部署脚本语法错误: %v\n%s", err, out)
+	}
+}
+
+// TestPanelUpdateScriptQuotesRunArgs docker run 的参数必须走数组展开。
+//
+// 退回 $ARGS 这种裸展开的话，含空格的单个 argv 会被 shell 重新分词拆散。
+// 最实际的受害者是 --trusted-proxies：用户填 "1.2.3.4, 5.6.7.8" 就会被拆成
+// 两段，边缘节点从可信名单里消失，XFF 取值退化，限流与登录锁定可被伪造头绕过，
+// 而且没有任何日志、下次更新读到的已是拆散版，不可自愈。
+func TestPanelUpdateScriptQuotesRunArgs(t *testing.T) {
+	script := panelUpdateScript("ghcr.io/j606y/moss", "ghcr.io/j606y/moss:2.0.0")
+
+	for _, want := range []string{`"${ARGS[@]}"`, `"${PORTS[@]}"`, `"${VOLS[@]}"`, `"${ENVS[@]}"`} {
+		if !strings.Contains(script, want) {
+			t.Errorf("docker run 应以数组展开传参，缺少 %s", want)
+		}
+	}
+	for _, bad := range []string{"$ARGS", "$PORTS", "$VOLS", "$ENVS"} {
+		if strings.Contains(script, bad+" ") || strings.Contains(script, bad+"\n") {
+			t.Errorf("发现裸展开 %s：含空格的单个参数会被重新分词拆散", bad)
+		}
+	}
+	// 端口探测必须带分隔符，否则多端口容器会拼成 87879090 并回滚一次成功的更新
+	if strings.Contains(script, `{{range $b}}{{.HostPort}}{{end}}`) {
+		t.Error("端口模板仍是无分隔符拼接，多端口容器会拿到错误的端口号")
+	}
+}
+
+// TestPanelUpdateClaimIsExclusive 占位必须是原子的。
+//
+// busy() 与 begin() 之间隔着一次 GitHub 查询和一次 SubmitWrite（30 秒超时），
+// 窗口是秒级的。两个管理员同时点更新会各自起一份部署脚本，交错执行时
+// 后一份会删掉前一份刚做的唯一回滚备份。
+func TestPanelUpdateClaimIsExclusive(t *testing.T) {
+	p := newPanelUpdater()
+
+	if !p.claim() {
+		t.Fatal("首次占位应当成功")
+	}
+	if p.claim() {
+		t.Fatal("已有更新在进行时不应再次占到位置")
+	}
+
+	// 下发前失败要放回位置，否则更新入口被锁死到进程重启
+	p.release()
+	if !p.claim() {
+		t.Fatal("release 之后应能重新占位")
+	}
+
+	// 已经交给 begin 接管的，release 不该把它撤掉
+	p.begin("v2.0.0", "job-1")
+	p.release()
+	if !p.busy() {
+		t.Fatal("begin 接管后 release 不应清掉进行中的状态")
 	}
 }

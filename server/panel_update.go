@@ -334,6 +334,34 @@ func (p *panelUpdater) status() (string, string) {
 	return p.stage, p.err
 }
 
+// claim 原子地占住「正在更新」这个位置，抢不到返回 false。
+//
+// 必须在真正动手之前就占住，而不是等下发完再置位：busy() 与 begin() 之间隔着
+// 一次 GitHub 版本查询和一次 SubmitWrite（30 秒超时），窗口是秒级的。
+// 两个管理员同时点更新，两次调用都能通过 busy() 检查，各自 setsid 起一份
+// 部署脚本；交错执行时脚本 B 会 `docker rm -f "${C}-old"` 删掉脚本 A 刚做的
+// 唯一备份，再把 A 新起的容器改名顶掉——此后任一侧健康探测失败就没有可回滚
+// 的目标了。upgrade.go 的同类流程早就补了这道持锁复查。
+func (p *panelUpdater) claim() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stage == "running" {
+		return false
+	}
+	p.stage, p.err, p.target, p.jobID = "running", "", "", ""
+	return true
+}
+
+// release 放弃已占住的位置。用于「占位之后、真正下发之前」失败的路径——
+// 不放的话，一次版本查询失败就会把更新入口锁死到进程重启。
+func (p *panelUpdater) release() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stage == "running" && p.jobID == "" {
+		p.stage, p.err, p.target = "", "", ""
+	}
+}
+
 func (p *panelUpdater) begin(target, jobID string) {
 	p.mu.Lock()
 	p.stage, p.err, p.target, p.jobID = "running", "", target, jobID
@@ -397,11 +425,29 @@ if [ -z "$C" ]; then
 fi
 log "面板容器: $C"
 
-# 逐项复刻运行参数，不假设任何默认值
-PORTS=$(docker inspect "$C" --format '{{range $p,$b := .HostConfig.PortBindings}}{{range $b}}-p {{if .HostIp}}{{.HostIp}}:{{end}}{{.HostPort}}:{{$p}} {{end}}{{end}}')
-VOLS=$(docker inspect "$C" --format '{{range .Mounts}}-v {{if eq .Type "volume"}}{{.Name}}{{else}}{{.Source}}{{end}}:{{.Destination}} {{end}}')
-ENVS=$(docker inspect "$C" --format '{{range .Config.Env}}--env={{.}} {{end}}')
-ARGS=$(docker inspect "$C" --format '{{range .Args}}{{.}} {{end}}')
+# 逐项复刻运行参数，不假设任何默认值。
+#
+# 全部按 NUL 分隔读成数组，不靠 shell 重新分词：含空格的**单个** argv 会被
+# 拆散。最实际的受害者是 --trusted-proxies —— 安装脚本让用户自由填写，
+# 填成 "1.2.3.4, 5.6.7.8"（逗号后带空格，最自然的写法）就会被拆成
+# "--trusted-proxies 1.2.3.4," 加一个被 flag 丢弃的游离参数，边缘节点从可信
+# 名单里消失，XFF 取值退化，限流与登录锁定可被伪造头绕过。而 parseTrustedProxies
+# 对空项静默跳过，没有任何日志；下一次更新读到的 .Args 已经是拆散后的版本，
+# 不可自愈。含空格的 env 值或 bind 路径同理，只是后果是 docker run 直接失败。
+#
+# 用 while read 而不是更短的 mapfile -d：后者要 bash 4.4+，而 CentOS 7 一类
+# 宿主机是 4.2。必须用进程替换而非命令替换——$(...) 会吞掉 NUL 字节。
+readarr() { # readarr <数组名> <docker inspect 模板>
+  local __name="$1" __fmt="$2" __item
+  eval "$__name=()"
+  while IFS= read -r -d '' __item; do
+    eval "$__name+=(\"\$__item\")"
+  done < <(docker inspect "$C" --format "$__fmt")
+}
+readarr PORTS '{{range $p,$b := .HostConfig.PortBindings}}{{range $b}}-p{{printf "\x00"}}{{if .HostIp}}{{.HostIp}}:{{end}}{{.HostPort}}:{{$p}}{{printf "\x00"}}{{end}}{{end}}'
+readarr VOLS '{{range .Mounts}}-v{{printf "\x00"}}{{if eq .Type "volume"}}{{.Name}}{{else}}{{.Source}}{{end}}:{{.Destination}}{{printf "\x00"}}{{end}}'
+readarr ENVS '{{range .Config.Env}}--env={{.}}{{printf "\x00"}}{{end}}'
+readarr ARGS '{{range .Args}}{{.}}{{printf "\x00"}}{{end}}'
 RESTART=$(docker inspect "$C" --format '{{.HostConfig.RestartPolicy.Name}}')
 NET=$(docker inspect "$C" --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' | awk '{print $1}')
 [ -z "$RESTART" ] && RESTART=unless-stopped
@@ -418,8 +464,8 @@ docker rm -f "${C}-old" >/dev/null 2>&1 || true
 docker rename "$C" "${C}-old"
 
 log "启动新容器"
-# shellcheck disable=SC2086
-if ! docker run -d --name "$C" --restart "$RESTART" ${NET:+--network "$NET"} $PORTS $VOLS $ENVS "$IMG" $ARGS; then
+if ! docker run -d --name "$C" --restart "$RESTART" ${NET:+--network "$NET"} \
+     "${PORTS[@]}" "${VOLS[@]}" "${ENVS[@]}" "$IMG" "${ARGS[@]}"; then
   log "启动失败，回滚"
   docker rm -f "$C" >/dev/null 2>&1 || true
   docker rename "${C}-old" "$C" && docker start "$C"
@@ -428,7 +474,11 @@ if ! docker run -d --name "$C" --restart "$RESTART" ${NET:+--network "$NET"} $PO
 fi
 
 log "等待服务就绪"
-PORT=$(docker inspect "$C" --format '{{range $p,$b := .HostConfig.PortBindings}}{{range $b}}{{.HostPort}}{{end}}{{end}}' | head -c 10)
+# 模板必须带分隔符再取第一个：原来是无分隔符拼接，容器发布两个端口
+# （-p 8787:8787 -p 9090:9090，或同一端口绑了两个 HostIp）就会拼成 87879090，
+# 非空所以不走 8787 兜底，curl 必然失败，20 次探测后把一次**本已成功**的更新
+# 回滚掉，日志还只说「40 秒内未就绪」。
+PORT=$(docker inspect "$C" --format '{{range $p,$b := .HostConfig.PortBindings}}{{range $b}}{{.HostPort}} {{end}}{{end}}' | awk '{print $1}')
 [ -z "$PORT" ] && PORT=8787
 for i in $(seq 1 20); do
   if curl -fsS -o /dev/null "http://127.0.0.1:${PORT}/"; then
@@ -454,10 +504,21 @@ exit 1
 const panelUpdateCaller = "panel-update"
 
 func (s *App) handleStartPanelUpdate(w http.ResponseWriter, r *http.Request) {
-	if s.panelUpd.busy() {
+	// 先占位再干活。检查与置位之间隔着网络调用的话，两个管理员同时点更新
+	// 会各自起一份部署脚本，互相删掉对方的回滚备份——详见 claim 的注释。
+	if !s.panelUpd.claim() {
 		writeErr(w, 400, "已有更新正在进行")
 		return
 	}
+	// 从这里到 begin 之间的每一条失败路径都必须放回位置，
+	// 否则一次版本查询失败就把更新入口锁死到进程重启。
+	claimed := true
+	defer func() {
+		if claimed {
+			s.panelUpd.release()
+		}
+	}()
+
 	cfg := loadPanelUpdateConfig(s)
 	if ready, hint := s.panelHostReady(cfg.HostServer); !ready {
 		writeErr(w, 400, hint)
@@ -509,6 +570,7 @@ func (s *App) handleStartPanelUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.panelUpd.begin(info.Version, jobID)
+	claimed = false // 已交给 begin 接管，defer 不再回收
 	log.Printf("面板更新已下发: %s → %s（机器 %s）", serverVersion, info.Version, cfg.HostServer)
 
 	writeJSON(w, 200, map[string]string{
