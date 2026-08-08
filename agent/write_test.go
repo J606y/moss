@@ -135,9 +135,8 @@ func TestWriteNewFileDefaultsTo644(t *testing.T) {
 	}
 }
 
-// TestWriteAppendKeepsExistingMode append 分支写的是原 inode，
-// OpenFile 的 mode 只在创建时生效，本就不会改权限。这条把该行为钉住，
-// 免得日后为了「两条分支一致」反手给它加上 chmod。
+// TestWriteAppendKeepsExistingMode 没给 mode 就是「不关心权限」，
+// 这时追加不该动它——与覆盖写的规则一致。
 func TestWriteAppendKeepsExistingMode(t *testing.T) {
 	requirePOSIXPerm(t)
 	path := writeExisting(t, "audit.log", 0o600)
@@ -165,5 +164,44 @@ func TestWriteMkdirCreatesParents(t *testing.T) {
 	b, err := os.ReadFile(path)
 	if err != nil || string(b) != "hi" {
 		t.Fatalf("内容应写入成功，实际 %q err=%v", b, err)
+	}
+}
+
+// TestWriteAppendAppliesExplicitMode 显式给了 mode，追加也必须让它生效。
+//
+// OpenFile 的 mode 只在**创建**文件时生效。追加到一个已存在的文件时，
+// 调用方要的 0600 完全不起作用：内容进去了、权限还是原来的 0644，
+// 而返回的是「写入成功」——一条追加进去的密钥就这样躺在人人可读的文件里。
+// 这条与覆盖写那条方向相反（该收紧却没收紧），但同属「权限与预期不符且无提示」。
+func TestWriteAppendAppliesExplicitMode(t *testing.T) {
+	requirePOSIXPerm(t)
+	path := writeExisting(t, "secrets.env", 0o644)
+
+	if err := writeFile(protocol.WriteTask{
+		Path: path, Data: []byte("TOKEN=abc"), Append: true, Mode: 0o600,
+	}); err != nil {
+		t.Fatalf("追加失败: %v", err)
+	}
+	if got := permOf(t, path); got != 0o600 {
+		t.Fatalf("显式指定的 mode 必须生效，实际 %#o —— 追加进去的密钥仍是人人可读", got)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil || string(b) != "oldTOKEN=abc" {
+		t.Fatalf("应为追加而非覆盖，实际 %q err=%v", b, err)
+	}
+}
+
+// TestWriteAppendCreatesWithExplicitMode 目标不存在时，创建就该带上指定权限。
+func TestWriteAppendCreatesWithExplicitMode(t *testing.T) {
+	requirePOSIXPerm(t)
+	path := filepath.Join(t.TempDir(), "new.env")
+
+	if err := writeFile(protocol.WriteTask{
+		Path: path, Data: []byte("A=1"), Append: true, Mode: 0o600,
+	}); err != nil {
+		t.Fatalf("追加失败: %v", err)
+	}
+	if got := permOf(t, path); got != 0o600 {
+		t.Fatalf("新建文件应带上指定权限，实际 %#o", got)
 	}
 }

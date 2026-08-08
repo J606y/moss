@@ -30,6 +30,36 @@ jobs:
         with:
           go-version: "1.26"
           cache: true
+      - run: gofmt -l . | tee /dev/stderr | (! read) # 有未格式化的文件就失败
       - run: go vet ./...
-      - run: go test ./...
+      # 竞态检测必须跑：这是 WebSocket + 多 goroutine + SQLite 并发写的架构，
+      # 而 -race 需要 CGO，在 Windows 开发机上装不起来（缺 gcc）。
+      # 不放进 CI 的话，本项目的竞态就永远没有任何一道关卡看得见。
+      - run: go test -race -count=1 ./...
       - run: go build ./... # 默认构建，靠 embed_dev.go 兜底，无需前端 dist
+
+  # POSIX 文件权限、setsid 进程组逃逸这类用例在 Windows 上只能 skip，
+  # 而 agent 三平台都要发布。这个矩阵保证「本机 skip 掉的」在别处真的跑过。
+  go-cross:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache: true
+      - run: go test -count=1 ./...
+
+  vuln:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache: true
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...

@@ -84,7 +84,24 @@ func writeFile(task protocol.WriteTask) error {
 			f.Close()
 			return err
 		}
-		return f.Close()
+		if err := f.Close(); err != nil {
+			return err
+		}
+		// OpenFile 的 mode 只在**创建**文件时生效。追加到一个已存在的文件时，
+		// 调用方要的 0600 完全不起作用：内容进去了，权限还是原来的 0644，
+		// 而返回的是「写入成功」——一条追加进去的密钥就这样躺在人人可读的文件里。
+		//
+		// 只在调用方显式给了 mode 时才动权限：没给就是「不关心」，
+		// 这时保持原样才对（与覆盖写的规则一致）。
+		// chmod 失败一律返回错误，不静默降级——调用方明确要求了这个权限，
+		// 给不了就该让他知道，而不是让他以为拿到了。
+		if task.Mode != 0 {
+			if err := os.Chmod(task.Path, os.FileMode(task.Mode)); err != nil {
+				return fmt.Errorf("内容已追加，但无法把权限设为 %04o（文件可能属于其他用户）: %w",
+					task.Mode, err)
+			}
+		}
+		return nil
 	}
 
 	// 覆盖写必须是原子的：直接截断目标文件再写，中途失败（磁盘满、进程被杀）
