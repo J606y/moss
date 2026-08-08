@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rand"
@@ -10,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -69,6 +71,10 @@ type mockGCP struct {
 	status     string // 实例状态
 	startCode  int    // start 响应码，0 = 200
 	srv        *httptest.Server
+
+	// omitExpiresIn 模拟不返回 expires_in 的 token 端点（自建/代理网关常见，
+	// 真实 Google 端点总会返回，所以这条路只能靠 mock 复现）。
+	omitExpiresIn bool
 }
 
 func newMockGCP(t *testing.T, status string) *mockGCP {
@@ -86,7 +92,11 @@ func (m *mockGCP) handle(w http.ResponseWriter, r *http.Request) {
 			m.t.Error("grant_type 错误")
 		}
 		m.verifyJWT(r.Form.Get("assertion"))
-		json.NewEncoder(w).Encode(map[string]any{"access_token": "tok-1", "expires_in": 3600})
+		body := map[string]any{"access_token": "tok-1", "expires_in": 3600}
+		if m.omitExpiresIn {
+			delete(body, "expires_in")
+		}
+		json.NewEncoder(w).Encode(body)
 	case strings.HasSuffix(r.URL.Path, "/start") && r.Method == "POST":
 		m.startCalls++
 		if r.Header.Get("Authorization") != "Bearer tok-1" {
@@ -175,6 +185,138 @@ func TestAccessTokenCache(t *testing.T) {
 	}
 	if m.tokenCalls != 2 {
 		t.Fatalf("过期后未刷新，调用 %d 次", m.tokenCalls)
+	}
+}
+
+// TestAccessTokenCachedWithoutExpiresIn 端点不返回 expires_in 时缓存仍须生效。
+//
+// 旧写法 now+expiresIn-60s 会把到期时刻算成 now-60s，缓存判断恒假，于是每次
+// API 调用都要重签一次 RSA JWT 并重换 token——功能看着正常，代价全在延迟与配额上。
+func TestAccessTokenCachedWithoutExpiresIn(t *testing.T) {
+	m := newMockGCP(t, "TERMINATED")
+	m.omitExpiresIn = true
+	cli := newTestClient(t, m)
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		if tok, err := cli.accessToken(ctx); err != nil || tok != "tok-1" {
+			t.Fatalf("accessToken: %v", err)
+		}
+	}
+	if m.tokenCalls != 1 {
+		t.Fatalf("缺 expires_in 时缓存失效，token 端点被调用 %d 次", m.tokenCalls)
+	}
+}
+
+func TestGCPTokenExpiry(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name      string
+		expiresIn int
+		wantTTL   time.Duration // 相对 now 的缓存时长
+	}{
+		{"正常一小时", 3600, 3540 * time.Second},
+		{"缺字段（解成 0）", 0, 3540 * time.Second},
+		{"负值同样不可信", -1, 3540 * time.Second},
+		{"短寿命按比例留余量", 30, 27 * time.Second},
+		{"恰好 60 秒", 60, 54 * time.Second},
+		{"离谱的长寿命封顶", 86400, 3540 * time.Second},
+	}
+	for _, c := range cases {
+		got := gcpTokenExpiry(now, c.expiresIn)
+		if !got.After(now) {
+			t.Errorf("%s: 到期时刻 %v 不在 now 之后，缓存等于没开", c.name, got.Sub(now))
+			continue
+		}
+		if d := got.Sub(now); d != c.wantTTL {
+			t.Errorf("%s: 缓存时长 %v，期望 %v", c.name, d, c.wantTTL)
+		}
+		// 提前量不能把到期时刻推到 token 真实寿命之外，否则缓存命中即 401。
+		if c.expiresIn > 0 && got.After(now.Add(time.Duration(c.expiresIn)*time.Second)) {
+			t.Errorf("%s: 缓存超出了 token 实际寿命", c.name)
+		}
+	}
+}
+
+// TestPutGCPFailsClosedWhenEncryptFails 加密不可用时必须整单拒绝，不能把私钥明文写进库。
+func TestPutGCPFailsClosedWhenEncryptFails(t *testing.T) {
+	useTestKey(t, "test-master-key")
+	app := mcpTestApp(t)
+	saJSON, _ := makeSA(t, "")
+
+	orig := secretRandRead
+	t.Cleanup(func() { secretRandRead = orig })
+	secretRandRead = func(b []byte) (int, error) { return 0, errors.New("熵源不可用") }
+
+	w := httptest.NewRecorder()
+	body, _ := json.Marshal(map[string]any{"saJson": saJSON, "autoOn": true})
+	app.handlePutGCP(w, httptest.NewRequest(http.MethodPut, "/api/admin/gcp", bytes.NewReader(body)))
+	if w.Code != 500 {
+		t.Fatalf("加密失败时应返回 500，得到 %d: %s", w.Code, w.Body.String())
+	}
+
+	stored := getSetting(app.db, keyGCPSAJSON, "")
+	if stored != "" {
+		t.Fatalf("加密失败却写了库: %q", stored)
+	}
+	if strings.Contains(stored, "PRIVATE KEY") {
+		t.Fatal("私钥明文落库")
+	}
+}
+
+// TestGetGCPStoresCiphertext 正常路径下库里必须是密文，读回是原文。
+func TestGetGCPStoresCiphertext(t *testing.T) {
+	useTestKey(t, "test-master-key")
+	app := mcpTestApp(t)
+	saJSON, _ := makeSA(t, "")
+
+	w := httptest.NewRecorder()
+	body, _ := json.Marshal(map[string]any{"saJson": saJSON})
+	app.handlePutGCP(w, httptest.NewRequest(http.MethodPut, "/api/admin/gcp", bytes.NewReader(body)))
+	if w.Code != 200 {
+		t.Fatalf("保存失败 %d: %s", w.Code, w.Body.String())
+	}
+	stored := getSetting(app.db, keyGCPSAJSON, "")
+	if !strings.HasPrefix(stored, encPrefix) || strings.Contains(stored, "PRIVATE KEY") {
+		t.Fatalf("凭证未加密落库: %q", stored)
+	}
+
+	w = httptest.NewRecorder()
+	app.handleGetGCP(w, httptest.NewRequest(http.MethodGet, "/api/admin/gcp", nil))
+	var v gcpSettingsView
+	if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
+		t.Fatal(err)
+	}
+	if !v.Configured || v.ProjectID != "test-proj" {
+		t.Fatalf("读回的概要不对: %+v", v)
+	}
+}
+
+// TestTestGCPReportsUndecryptable 主密钥变更后，「测试」入口必须说出真实原因。
+//
+// 只把解不开当成没配（400 请先粘贴凭证）会把排查方向从「密钥丢了」带偏到
+// 「再填一遍」，而再填一遍会覆盖掉还救得回来的密文。
+func TestTestGCPReportsUndecryptable(t *testing.T) {
+	useTestKey(t, "key-A")
+	app := mcpTestApp(t)
+	saJSON, _ := makeSA(t, "")
+	enc, err := encryptSecret(saJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setSetting(app.db, keyGCPSAJSON, enc)
+	useTestKey(t, "key-B") // 运维换了 MOSS_SECRET_KEY
+
+	w := httptest.NewRecorder()
+	app.handleTestGCP(w, httptest.NewRequest(http.MethodPost, "/api/admin/gcp/test", nil))
+	if w.Code == 400 {
+		t.Fatalf("解不开不能报成「没配」: %s", w.Body.String())
+	}
+	if w.Code != 500 {
+		t.Fatalf("应返回 500，得到 %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "解密") {
+		t.Fatalf("错误文案应点明解密失败，得到 %s", w.Body.String())
 	}
 }
 

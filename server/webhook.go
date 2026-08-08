@@ -95,7 +95,7 @@ type webhookConfig struct {
 func loadWebhookConfig(db *sql.DB) webhookConfig {
 	return webhookConfig{
 		URL:    getSetting(db, keyWebhookURL, ""),
-		Secret: getSetting(db, keyWebhookSecret, ""),
+		Secret: decryptSecret(getSetting(db, keyWebhookSecret, "")), // 加密列，历史明文透传
 		On:     getSetting(db, keyWebhookOn, "0") == "1",
 	}
 }
@@ -182,8 +182,15 @@ func (s *App) handlePutWebhook(w http.ResponseWriter, r *http.Request) {
 	// 留空表示不改动已有密钥，避免前端因不回传明文而在保存时意外清空
 	if f.ClearSecret {
 		setSetting(s.db, keyWebhookSecret, "")
-	} else if strings.TrimSpace(f.Secret) != "" {
-		setSetting(s.db, keyWebhookSecret, strings.TrimSpace(f.Secret))
+	} else if sec := strings.TrimSpace(f.Secret); sec != "" {
+		// 加密落库：这把密钥是对端 webhook 的 Bearer 凭证，明文存等于随库泄漏。
+		enc, err := encryptSecret(sec)
+		if err != nil {
+			log.Printf("加密 webhook 密钥失败: %v", err)
+			writeErr(w, 500, "密钥加密失败，未保存，请检查服务器状态后重试")
+			return
+		}
+		setSetting(s.db, keyWebhookSecret, enc)
 	}
 	on := "0"
 	if f.On {

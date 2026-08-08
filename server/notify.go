@@ -42,7 +42,7 @@ type notifyConfig struct {
 
 func loadNotifyConfig(db *sql.DB) notifyConfig {
 	return notifyConfig{
-		TgToken:       getSetting(db, keyNotifyTgToken, ""),
+		TgToken:       decryptSecret(getSetting(db, keyNotifyTgToken, "")), // 加密列，历史明文透传
 		TgChat:        getSetting(db, keyNotifyTgChat, ""),
 		OfflineOn:     getSetting(db, keyNotifyOffline, "0") == "1",
 		OfflineDelay:  getSettingInt(db, keyNotifyOfflineDelay, 60),
@@ -573,7 +573,13 @@ func (s *App) handlePutNotify(w http.ResponseWriter, r *http.Request) {
 		}
 		return "0"
 	}
-	setSetting(s.db, keyNotifyTgToken, strings.TrimSpace(v.TgToken))
+	// Bot Token 加密落库：拿到 moss.db 就等于拿到 bot 的完全控制权。
+	tgToken, err := encryptSecret(strings.TrimSpace(v.TgToken))
+	if err != nil {
+		writeErr(w, 500, "Bot Token 加密失败，未保存，请检查服务器状态后重试")
+		return
+	}
+	setSetting(s.db, keyNotifyTgToken, tgToken)
 	setSetting(s.db, keyNotifyTgChat, strings.TrimSpace(v.TgChat))
 	setSetting(s.db, keyNotifyOffline, b2s(v.OfflineOn))
 	setSetting(s.db, keyNotifyOfflineDelay, strconv.Itoa(clampInt(v.OfflineDelay, 30, 3600, 60)))

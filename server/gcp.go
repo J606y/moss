@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -146,8 +147,38 @@ func (c *gcpClient) accessToken(ctx context.Context) (string, error) {
 		return "", errors.New("令牌响应无效")
 	}
 	c.token = tok.AccessToken
-	c.exp = now.Add(time.Duration(tok.ExpiresIn-60) * time.Second)
+	c.exp = gcpTokenExpiry(now, tok.ExpiresIn)
 	return c.token, nil
+}
+
+const (
+	gcpTokenSkew       = 60 * time.Second   // 提前量：避免拿着「刚好到期」的 token 上路
+	gcpTokenDefaultTTL = 3600 * time.Second // 端点未给 expires_in 时的假定寿命，与 Google 的实际值一致
+	gcpTokenMaxTTL     = 3600 * time.Second // 上限：再长也当一小时用，多换几次无害，抱着假的长寿命有害
+)
+
+// gcpTokenExpiry 由 expires_in 推出缓存到期时刻。
+//
+// 直接 now+expiresIn-60s 有两个坑：expires_in 缺失（解码只校验 access_token 非空，
+// 缺字段会解成 0）时到期时刻落在 now-60s，缓存判断恒假，每次 API 调用都要重签 JWT
+// 再换一次 token；expires_in 本身小于 60 时同理。真实 Google 端点总会返回 3600，
+// 所以这条路只在换成自建或代理的 token 端点时才暴露。
+//
+// 提前量按寿命取比例封顶，而不是固定 60s：对一个 30 秒的短寿命 token，固定 60s
+// 会把到期时刻推到过去（还是不缓存），而直接去掉提前量又会缓存到真正失效之后换来 401。
+func gcpTokenExpiry(now time.Time, expiresIn int) time.Time {
+	ttl := time.Duration(expiresIn) * time.Second
+	if expiresIn <= 0 {
+		ttl = gcpTokenDefaultTTL
+	}
+	if ttl > gcpTokenMaxTTL {
+		ttl = gcpTokenMaxTTL
+	}
+	skew := gcpTokenSkew
+	if skew > ttl/10 {
+		skew = ttl / 10
+	}
+	return now.Add(ttl - skew)
 }
 
 func (c *gcpClient) instanceURL(project, zone, instance string) string {
@@ -287,7 +318,13 @@ type gcpSettingsView struct {
 func (s *App) handleGetGCP(w http.ResponseWriter, r *http.Request) {
 	cfg := loadGCPConfig(s.db)
 	v := gcpSettingsView{AutoOn: cfg.AutoOn, Delay: cfg.Delay, Cooldown: cfg.Cooldown, MaxTries: cfg.MaxTries}
-	if raw := decryptSecret(getSetting(s.db, keyGCPSAJSON, "")); strings.TrimSpace(raw) != "" {
+	raw, err := decryptSecretValue(getSetting(s.db, keyGCPSAJSON, ""))
+	if err != nil {
+		// 凭证仍在库里，只是解不开。这条日志是运维区分「密钥变了」和「没配过」的唯一线索：
+		// 视图本身只能显示未配置，照着未配置去重填会用新密钥盖掉还救得回来的密文。
+		log.Printf("读取 GCP 凭证失败: %v", err)
+	}
+	if strings.TrimSpace(raw) != "" {
 		v.Configured = true
 		if sa, _, err := parseGCPSA(raw); err == nil {
 			v.ClientEmail = sa.ClientEmail
@@ -317,7 +354,14 @@ func (s *App) handlePutGCP(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, "凭证无效: "+err.Error())
 			return
 		}
-		setSetting(s.db, keyGCPSAJSON, encryptSecret(sa)) // 私钥加密落库
+		enc, err := encryptSecret(sa) // 私钥加密落库
+		if err != nil {
+			// 加密不成就不落库：明文入库看不出异常，只会让私钥悄悄裸奔在数据库里。
+			log.Printf("加密 GCP 凭证失败: %v", err)
+			writeErr(w, 500, "凭证加密失败，未保存，请检查服务器状态后重试")
+			return
+		}
+		setSetting(s.db, keyGCPSAJSON, enc)
 	} // 留空且未清除 = 保留旧凭证
 	on := "0"
 	if f.AutoOn {
@@ -333,7 +377,13 @@ func (s *App) handlePutGCP(w http.ResponseWriter, r *http.Request) {
 
 // handleTestGCP 用当前保存的凭证真实换一次 access token，验证凭证可用。
 func (s *App) handleTestGCP(w http.ResponseWriter, r *http.Request) {
-	raw := decryptSecret(getSetting(s.db, keyGCPSAJSON, ""))
+	raw, err := decryptSecretValue(getSetting(s.db, keyGCPSAJSON, ""))
+	if err != nil {
+		// 「测试」正是运维用来定位问题的入口，这里必须说出真实原因，
+		// 而不是把解不开伪装成没填、让人去重填一遍。
+		writeErr(w, 500, "已保存的凭证无法解密，主密钥可能已变更；请恢复原 MOSS_SECRET_KEY 或 secret.key，或重新粘贴凭证")
+		return
+	}
 	if strings.TrimSpace(raw) == "" {
 		writeErr(w, 400, "请先粘贴并保存 Service Account 凭证")
 		return

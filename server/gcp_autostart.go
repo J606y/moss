@@ -16,7 +16,16 @@ var errGCPBusy = errors.New("自动开机执行中，请稍候")
 
 // getGCPClient 懒建 GCP 客户端，凭证内容不变时复用（token 缓存随之保留）。
 func (n *Notifier) getGCPClient() (*gcpClient, error) {
-	raw := strings.TrimSpace(decryptSecret(getSetting(n.db, keyGCPSAJSON, "")))
+	// 用带错误的版本，别让「凭证解不开」伪装成「没配凭证」。
+	//
+	// 两者的处置完全相反：没配是「去后台填一下」，解不开是「主密钥变了或
+	// secret.key 丢了，去把它找回来」。而自动开机是无人值守链路，
+	// 报错文案就是运维唯一能拿到的线索——说错了就是把人引向错误的方向。
+	stored, err := decryptSecretValue(getSetting(n.db, keyGCPSAJSON, ""))
+	if err != nil {
+		return nil, fmt.Errorf("已保存的 Service Account 凭证无法解密（主密钥可能已变更或 secret.key 丢失），请重新填写: %w", err)
+	}
+	raw := strings.TrimSpace(stored)
 	if raw == "" {
 		return nil, errors.New("未配置 Service Account 凭证")
 	}
