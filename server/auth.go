@@ -38,12 +38,46 @@ func loginLocked(ip string, now time.Time) bool {
 	return a != nil && now.Before(a.lockUntil)
 }
 
-// recordLoginFail 累加失败次数，达到阈值即锁定该 IP 固定时长。
+// beginLoginAttempt 在同一个临界区内完成「检查是否锁定」+「按失败预登记本次尝试」，
+// 返回是否放行去比对口令。需在**不**持有 loginMu 时调用。
+//
+// 必须先占位再验。口令比对要跑一次 bcrypt（约 60ms），它不能进锁——否则所有登录
+// 请求会被串行化。而一旦沿用「检查锁定 → 解锁 → 比对口令 → 再记失败」的写法，
+// 同一 IP 并发打进来的 N 个请求会在第一次记账之前全部通过锁定检查，于是 N 次口令
+// 比对全部真的执行：计数看着有上限，实际一轮并发就能试 N 个口令，退避完全不生效。
+// 先按失败记账、成功后由 clearLoginFail 撤销，就把「同时在验的请求数」卡死在
+// loginMaxFails 以内。
+//
+// 代价是：已累计 2 次失败的用户在本次输对口令的那 60ms 里该 IP 处于锁定态，
+// 恰好并发进来的另一个请求会被拒。现实中一次登录只发一个请求，取不到这个窗口；
+// 用它换掉并发爆破是划算的。
+func beginLoginAttempt(ip string, now time.Time) bool {
+	loginMu.Lock()
+	defer loginMu.Unlock()
+	if loginLocked(ip, now) {
+		return false
+	}
+	recordLoginFail(ip, now)
+	return true
+}
+
+// recordLoginFail 累加失败次数，达到阈值即锁定该 IP 固定时长。需在持有 loginMu 时调用。
+//
+// 锁定期一过就把计数清零，给一次干净的重新开始：fails 此前没有任何路径能降回去，
+// 而 clearLoginFail 只在登录成功时才触发。共用出口 IP（公司/校园 NAT）的正常用户
+// 只要历史上被别人打满过阈值，此后每一次手误都换来一次 30 分钟锁定，而他永远等不到
+// 一次成功去清账——被自己锁死在门外的死循环。
+// 清的是 fails 而不只是 lockUntil：只清 lockUntil 的话，锁定期满后再错 1 次，
+// fails 立刻又越过阈值重新锁 30 分钟，等价于没重置。
 func recordLoginFail(ip string, now time.Time) {
 	a := loginAttempts[ip]
 	if a == nil {
 		a = &loginAttempt{}
 		loginAttempts[ip] = a
+	}
+	if !a.lockUntil.IsZero() && !now.Before(a.lockUntil) {
+		a.fails = 0
+		a.lockUntil = time.Time{}
 	}
 	a.fails++
 	a.lastFail = now
@@ -118,16 +152,14 @@ func (s *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	ip := realIP(r, s.trustProxy, s.trustedProxies) // 真实访客 IP（--trust-proxy 下按可信代理名单从右取）
 
-	// 锁定期内直接拒绝，不去比对密码。
-	loginMu.Lock()
-	if loginLocked(ip, time.Now()) {
-		loginMu.Unlock()
+	// 锁定期内直接拒绝，不去比对密码。检查与登记必须在同一个临界区里完成，
+	// 否则并发请求会在第一次记账之前全部放行（详见 beginLoginAttempt）。
+	if !beginLoginAttempt(ip, time.Now()) {
 		writeErr(w, 429, "登录失败次数过多，该 IP 已被锁定 30 分钟")
 		return
 	}
-	loginMu.Unlock()
 
-	// 轻量防爆破：固定延迟提高单次试探成本。
+	// 轻量防爆破：固定延迟提高单次试探成本。这段延迟和下面的 bcrypt 都在锁外。
 	time.Sleep(300 * time.Millisecond)
 	wantUser := getSetting(s.db, keyUsername, "admin")
 	// 恒定成本校验：无论用户名是否正确都执行一次 bcrypt 比较，
@@ -135,8 +167,8 @@ func (s *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	userOK := subtle.ConstantTimeCompare([]byte(body.Username), []byte(wantUser)) == 1
 	passOK := s.checkPassword(body.Password)
 	if !userOK || !passOK {
+		// 本次失败已由 beginLoginAttempt 记过账，这里只读结论，不能再记一次。
 		loginMu.Lock()
-		recordLoginFail(ip, time.Now())
 		locked := loginLocked(ip, time.Now())
 		loginMu.Unlock()
 		if locked {
@@ -147,7 +179,7 @@ func (s *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 登录成功：清除该 IP 的失败记录。
+	// 登录成功：撤销 beginLoginAttempt 的预登记，并清除该 IP 的历史失败记录。
 	loginMu.Lock()
 	clearLoginFail(ip)
 	loginMu.Unlock()

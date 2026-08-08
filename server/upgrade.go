@@ -97,6 +97,10 @@ type upgradeJob struct {
 	// 下载耗时不可控，但「重启后多久该连回来」是有确定预期的。
 	restartedAt time.Time
 	graceSec    int
+	// notStarted 标记这次失败发生在 agent 真正开始动手之前（机器已离线 / 下发失败）。
+	// 目标机上什么都没发生，前提条件一恢复这条记录就该作废——清除条件与
+	// 「升到一半失败」完全不同，见 OnRegister。
+	notStarted bool
 }
 
 type upgradeManager struct {
@@ -335,7 +339,7 @@ func (m *upgradeManager) Start(hub *Hub, serverID, agentVersion, agentOS string)
 
 	conn := hub.AgentConn(serverID)
 	if conn == nil {
-		m.finish(serverID, job.ID, upgradeStageFailed, "机器已离线")
+		m.failBeforeStart(serverID, job.ID, "机器已离线")
 		return errors.New("机器已离线")
 	}
 	task := protocol.UpgradeTask{
@@ -345,7 +349,7 @@ func (m *upgradeManager) Start(hub *Hub, serverID, agentVersion, agentOS string)
 		GraceSec: job.graceSec,
 	}
 	if err := conn.send(protocol.ServerMsg{Type: "upgrade", Upgrade: &task}); err != nil {
-		m.finish(serverID, job.ID, upgradeStageFailed, "下发失败: "+err.Error())
+		m.failBeforeStart(serverID, job.ID, "下发失败: "+err.Error())
 		return fmt.Errorf("下发失败: %w", err)
 	}
 	log.Printf("已向 %s 下发升级任务 %s → %s", serverID, job.ID, target)
@@ -403,9 +407,16 @@ func (m *upgradeManager) OnRegister(serverID, reportedVersion string) {
 		return
 	}
 	if isTerminalStage(job.Stage) {
-		// 失败标记应当在问题解决后自行消失：agent 上报的版本已经等于目标版本，
-		// 说明人已经手动升上去了，界面再挂一个红色的失败按钮只会误导。
-		if job.Stage == upgradeStageFailed && sameVersion(reportedVersion, job.Target) {
+		// 失败标记应当在问题解决后自行消失，界面挂着一个已经不存在的问题只会误导。
+		// 两条清除条件对应两类失败：
+		//
+		//   - 升到一半失败（回滚 / 超时）：只有上报版本等于目标版本才算解决，
+		//     那说明人已经手动升上去了。
+		//   - 尚未开始就失败（机器已离线 / 下发失败）：目标机上什么都没发生，
+		//     它重新连上来本身就说明前提条件变了，直接作废。这类必须单独判——
+		//     离线的机器重连时上报的仍然是旧版本，靠 sameVersion 永远清不掉，
+		//     前端会一直渲染「升级失败：机器已离线｜点击重试」直到面板重启。
+		if job.Stage == upgradeStageFailed && (job.notStarted || sameVersion(reportedVersion, job.Target)) {
 			delete(m.jobs, serverID)
 		}
 		return
@@ -457,12 +468,18 @@ func (m *upgradeManager) expired(job *upgradeJob) bool {
 	return time.Since(job.Started) > upgradeOverallTimeout
 }
 
-func (m *upgradeManager) finish(serverID, jobID, stage, errMsg string) {
+// failBeforeStart 把任务判为「还没开始就失败了」。
+//
+// 单独一个方法而不是通用的 finish，是因为这类失败必须带上 notStarted 标记：
+// 它的清除条件与「升到一半失败」不同（见 OnRegister），漏标就会在界面上
+// 留下一个永远不会消失的红色失败按钮。
+func (m *upgradeManager) failBeforeStart(serverID, jobID, errMsg string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if job, ok := m.jobs[serverID]; ok && job.ID == jobID {
-		job.Stage = stage
+		job.Stage = upgradeStageFailed
 		job.Err = errMsg
+		job.notStarted = true
 	}
 }
 

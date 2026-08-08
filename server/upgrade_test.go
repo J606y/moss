@@ -325,6 +325,48 @@ func TestUpgradeFailureClearedAfterManualFix(t *testing.T) {
 	}
 }
 
+// 「机器已离线」「下发失败」属于尚未开始就失败：目标机上什么都没发生。
+// 机器重新连上来本身就说明前提条件变了，标记必须自动作废。
+//
+// 这类机器重连时上报的必然还是旧版本，靠「上报版本 == 目标版本」永远清不掉，
+// 前端会一直渲染「升级失败：机器已离线｜点击重试」，直到用户手动升成功或面板重启。
+func TestUpgradeNotStartedFailureClearedOnReconnect(t *testing.T) {
+	for _, errMsg := range []string{"机器已离线", "下发失败: write: broken pipe"} {
+		m := newUpgradeManager()
+		m.jobs["srv"] = &upgradeJob{
+			ID: "j1", ServerID: "srv", Target: "v2.0.0-beta.3",
+			Stage: protocol.UpgradeStageDownloading, Started: time.Now(), graceSec: 60,
+		}
+		m.failBeforeStart("srv", "j1", errMsg)
+		if stage, got := m.Status("srv"); stage != upgradeStageFailed || got != errMsg {
+			t.Fatalf("应记为失败并带上原因，实际 stage=%q err=%q", stage, got)
+		}
+
+		// 机器带着旧版本重新连上来：前提已变，红色标记不该再挂着。
+		m.OnRegister("srv", "2.0.0-beta.2")
+		if stage, got := m.Status("srv"); stage != "" || got != "" {
+			t.Errorf("%q：重连后标记应自动清除，实际 stage=%q err=%q", errMsg, stage, got)
+		}
+	}
+}
+
+// 与上一条相对：升到一半失败（回滚 / 超时）时目标机确实动过，重连本身不能说明问题已解决，
+// 标记必须保留到版本真的升上去。清除条件放宽到所有失败会把真问题一并抹掉。
+func TestUpgradeMidwayFailureSurvivesReconnect(t *testing.T) {
+	m := newUpgradeManager()
+	m.jobs["srv"] = &upgradeJob{
+		ID: "j1", ServerID: "srv", Target: "v2.0.0-beta.3",
+		Stage: protocol.UpgradeStageDownloading, Started: time.Now(), graceSec: 60,
+	}
+	m.OnResult("srv", &protocol.UpgradeResult{ID: "j1", Stage: protocol.UpgradeStageReplaced})
+	m.OnRegister("srv", "2.0.0-beta.2") // 带旧版本连回 = 已回滚，判失败
+
+	m.OnRegister("srv", "2.0.0-beta.2") // 之后每次重连仍是旧版本
+	if stage, _ := m.Status("srv"); stage != upgradeStageFailed {
+		t.Errorf("回滚导致的失败不该被重连清掉，实际: %q", stage)
+	}
+}
+
 // 同一台机器同时只允许一个升级任务在途。
 func TestUpgradeRejectsConcurrent(t *testing.T) {
 	old := serverVersion
