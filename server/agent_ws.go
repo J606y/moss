@@ -189,7 +189,7 @@ func (s *App) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case "exec_result":
-			s.exec.OnResult(msg.Exec)
+			s.exec.OnResult(serverID, msg.Exec)
 
 		case "upgrade_result":
 			s.upgrade.OnResult(serverID, msg.Upgrade)

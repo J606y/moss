@@ -67,6 +67,8 @@ type Hub struct {
 	agents   map[string]*agentConn // serverID → 连接
 	live     map[string]*liveState
 	browsers map[chan []byte]struct{}
+	// dropped 是已删除服务器的墓碑，见 Drop 的注释。
+	dropped map[string]time.Time
 
 	// sample_interval 进程内缓存：后台改设置后近实时生效，避免每次上报都查库。
 	siMu     sync.Mutex
@@ -186,6 +188,14 @@ func (h *Hub) HandleReport(id string, s *protocol.Stats, uptime uint64, _ time.D
 	now := time.Now()
 	sampleInterval := h.sampleInterval()
 	h.mu.Lock()
+	// 服务器刚被删除时，可能还有一条 report 阻塞在这把锁上。state() 是
+	// get-or-create，放进去就会把条目重新建回来，而之后再没有任何路径会清理它
+	// ——Snapshot 会一直报这台已删除的机器在线，同时往 history 插一行没有对应
+	// servers 行的孤儿数据（表间无外键），只能等 cleanupLoop 按时间清掉。
+	if h.isDropped(id) {
+		h.mu.Unlock()
+		return
+	}
 	st := h.state(id)
 	st.stats = *s
 	st.uptime = uptime
@@ -282,16 +292,43 @@ func (h *Hub) Recent(id string) []LivePoint {
 }
 
 // Drop 删除服务器时清理实时状态。
+// Drop 把一台服务器彻底从内存状态里摘掉（删除服务器时调用）。
+//
+// dropped 记住这个 ID：state() 是 get-or-create，删除之后若还有一条 report
+// 正阻塞在 h.mu 上，它会把 live 条目重新建回来，而此后再没有任何路径会清理它
+// ——Snapshot 会一直报这台已删除的机器在线。同时还会往 history 插一行
+// server_id 已无对应 servers 行的孤儿数据（表间无外键），只能等 cleanupLoop
+// 按时间清掉。
 func (h *Hub) Drop(id string) {
 	h.mu.Lock()
 	conn := h.agents[id]
 	delete(h.agents, id)
 	delete(h.live, id)
+	if h.dropped == nil {
+		h.dropped = make(map[string]time.Time)
+	}
+	h.dropped[id] = time.Now()
+	// 顺带清掉过期的墓碑，避免长期运行下无限增长。
+	for k, t := range h.dropped {
+		if time.Since(t) > dropTombstoneTTL {
+			delete(h.dropped, k)
+		}
+	}
 	h.mu.Unlock()
 	h.notifier.Forget(id)
 	if conn != nil {
 		conn.conn.Close()
 	}
+}
+
+// dropTombstoneTTL 墓碑保留时长。只需覆盖「删除瞬间仍在途的那几条 report」，
+// 给到分钟级已经绰绰有余；同一个 ID 被重新添加是人工操作，不会这么快。
+const dropTombstoneTTL = 5 * time.Minute
+
+// isDropped 判断该 ID 是否刚被删除。调用方必须已持锁。
+func (h *Hub) isDropped(id string) bool {
+	t, ok := h.dropped[id]
+	return ok && time.Since(t) <= dropTombstoneTTL
 }
 
 /* ---------- 浏览器订阅 ---------- */

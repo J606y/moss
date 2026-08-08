@@ -119,6 +119,13 @@ func (j *execJob) outcome() ExecOutcome {
 type finishedJob struct {
 	outcome ExecOutcome
 	at      time.Time
+	// serverID 是这条任务打在哪台机器上。
+	//
+	// 必须留着：get_result 此前只校验能力、不校验机器作用域，是六个 MCP 工具里
+	// 唯一没过第二道闸的——而根因就在这里，结果里没存 serverID，校验无处可做。
+	// jobID 有 116 bit 熵、猜不到，但 jobId 会经审计界面、日志、AI 会话原文外泄，
+	// 一旦泄漏就是无闸直读别人机器上的完整输出。
+	serverID string
 }
 
 // execManager 跟踪所有在途执行，并暂存异步任务的结果。
@@ -176,7 +183,7 @@ func newExecManager(db *sql.DB) *execManager {
 // finished 里还没有，Result 于是返回 found=false，get_result 回的是措辞很确定的
 // 「jobId 有误，或结果已超过 30 分钟保留期」——而命令其实刚刚成功执行完。
 // 轮询的模型据此判定 jobId 写错而放弃，或者干脆把一条非幂等的命令重跑一遍。
-func (m *execManager) remember(jobID string, out ExecOutcome) {
+func (m *execManager) remember(jobID, serverID string, out ExecOutcome) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now()
@@ -185,22 +192,32 @@ func (m *execManager) remember(jobID string, out ExecOutcome) {
 			delete(m.finished, id)
 		}
 	}
-	m.finished[jobID] = finishedJob{outcome: out, at: now}
+	m.finished[jobID] = finishedJob{outcome: out, at: now, serverID: serverID}
 	delete(m.jobs, jobID)
 }
 
 // Result 查询任务当前状态。
+//
+// serverID 是这条任务归属的机器，调用方据此校验 Key 的机器作用域。
 // running 为 true 表示仍在执行中；found 为 false 表示任务不存在或结果已过期。
-func (m *execManager) Result(jobID string) (out ExecOutcome, running, found bool) {
+func (m *execManager) Result(jobID string) (out ExecOutcome, serverID string, running, found bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.jobs[jobID]; ok {
-		return ExecOutcome{JobID: jobID}, true, true
+	now := time.Now()
+	if j, ok := m.jobs[jobID]; ok {
+		return ExecOutcome{JobID: jobID}, j.serverID, true, true
 	}
 	if f, ok := m.finished[jobID]; ok {
-		return f.outcome, false, true
+		// 读的时候也判一次过期。remember 只在有新任务落袋时顺带清理，
+		// 没有新任务的时段里，30 分钟前的结果照样读得到、占的内存也不释放，
+		// 与工具描述承诺的「结果保留 30 分钟」对不上。
+		if now.Sub(f.at) > execResultTTL {
+			delete(m.finished, jobID)
+			return ExecOutcome{}, "", false, false
+		}
+		return f.outcome, f.serverID, false, true
 	}
-	return ExecOutcome{}, false, false
+	return ExecOutcome{}, "", false, false
 }
 
 // prepare 校验、落审计、过拦截闸、下发，并把任务注册进在途表。
@@ -225,7 +242,11 @@ func (m *execManager) prepare(hub *Hub, serverID, caller string, task *protocol.
 
 	// 先落审计再下发：服务端若在执行途中崩溃，仍留有「曾经下发过什么」的痕迹。
 	// 只在完成后写审计，等于给了一个抹掉记录的窗口。
-	m.auditStart(job, serverID, caller, *task)
+	// 审计写不进去就不执行：没有痕迹的远程执行不该发生。
+	if err := m.auditStart(job, serverID, caller, *task); err != nil {
+		out := ExecOutcome{JobID: task.ID, Error: "审计写入失败，已拒绝执行（无法留痕的操作不予下发）"}
+		return nil, &out, err
+	}
 
 	// 拦截同样要留痕——「谁试图执行什么危险命令」是审计里最有价值的记录之一。
 	//
@@ -310,12 +331,12 @@ func (m *execManager) Start(hub *Hub, serverID, caller string, task protocol.Exe
 	if failed != nil {
 		// 下发前就失败也要留住结果：调用方拿到 jobID 后来查，
 		// 应当看到「命令被拦截」这类原因，而不是「任务不存在」。
-		m.remember(task.ID, *failed)
+		m.remember(task.ID, serverID, *failed)
 		return task.ID, err
 	}
 	go func() {
 		out, _ := m.await(context.Background(), job, task.Timeout)
-		m.remember(job.id, out)
+		m.remember(job.id, serverID, out)
 	}()
 	return job.id, nil
 }
@@ -342,11 +363,15 @@ func (m *execManager) SubmitWrite(ctx context.Context, hub *Hub, serverID, calle
 
 	// 审计记录写入意图：命令位置存路径，输出位置存文件内容原文。
 	// 这是 write_file 独立于 exec 的核心价值——「写了什么」可以逐字节回溯。
-	m.auditStart(job, serverID, caller, protocol.ExecTask{
+	// 同 exec：审计写不进去就不写文件。write_file 的可追溯性比 exec 更要紧——
+	// 它记的是文件内容原文，丢一条就等于「某次改动无从回溯」。
+	if err := m.auditStart(job, serverID, caller, protocol.ExecTask{
 		Cmd:     "[write_file] " + task.Path,
 		Dir:     "",
 		Timeout: 0,
-	})
+	}); err != nil {
+		return ExecOutcome{JobID: task.ID, Error: "审计写入失败，已拒绝写入（无法留痕的操作不予下发）"}, err
+	}
 
 	// 受保护路径的拦截与命令拦截同级：一样要留痕、一样要告警。
 	// 放在这里而非工具层，是为了让两条拦截路径共用同一套审计与推送逻辑。
@@ -404,7 +429,14 @@ func (m *execManager) auditFinishWrite(jobID string, out ExecOutcome, content []
 }
 
 // OnResult 处理 agent 回传的输出分片。
-func (m *execManager) OnResult(res *protocol.ExecResult) {
+// OnResult 收下 agent 回传的一片结果。
+//
+// fromServer 是回传方的身份，必须与任务归属的机器一致。不比对的话，任一持有
+// 合法 token 的 agent（含被入侵的受监控机）就能往**别的机器**的 job 里注入输出，
+// 或者直接 Done:true / ExitCode:0 抢先收敛掉，真机的输出随后被 addChunk 丢弃。
+// jobID 有 116 bit 熵、猜不到，所以不是可用漏洞——但 job.serverID 字段本来就在，
+// 比对只是一行，没有理由留着这个缺口。
+func (m *execManager) OnResult(fromServer string, res *protocol.ExecResult) {
 	if res == nil {
 		return
 	}
@@ -413,6 +445,10 @@ func (m *execManager) OnResult(res *protocol.ExecResult) {
 	m.mu.Unlock()
 	if job == nil {
 		return // 任务已收敛或服务端重启过，迟到的分片无处安放
+	}
+	if job.serverID != fromServer {
+		log.Printf("丢弃越权回传: 机器 %s 试图写入归属于 %s 的任务 %s", fromServer, job.serverID, res.ID)
+		return
 	}
 	if len(res.Data) > 0 {
 		job.addChunk(execChunk{seq: res.Seq, stream: res.Stream, data: res.Data})
@@ -441,13 +477,23 @@ func (m *execManager) OnAgentGone(serverID string) {
 	}
 }
 
-func (m *execManager) auditStart(job *execJob, serverID, caller string, task protocol.ExecTask) {
+// auditStart 在下发前落一条审计。返回错误即表示**不允许继续执行**。
+//
+// 改成 fail-closed 是有意的：原来 INSERT 失败只记一行日志、命令照常下发，
+// 之后 auditFinish 的 UPDATE 匹配 0 行，于是这条命令在库里完全无痕。
+// 而 MCP 的服务器说明对模型承诺「每次操作都有完整审计记录」，
+// 审计失效的那一刻恰恰是最需要它的时刻（通常是锁竞争或磁盘出问题）。
+// WAL + busy_timeout(5000) 让这条路径的失败概率很低，
+// 所以 fail-closed 的代价小，而 fail-open 的代价是「无从追溯」。
+func (m *execManager) auditStart(job *execJob, serverID, caller string, task protocol.ExecTask) error {
 	if _, err := m.db.Exec(
 		`INSERT INTO exec_audit(job_id, server_id, caller, cmd, dir, timeout, started_at) VALUES(?, ?, ?, ?, ?, ?, ?)`,
 		job.id, serverID, caller, task.Cmd, task.Dir, task.Timeout, job.started.UnixMilli(),
 	); err != nil {
-		log.Printf("写入执行审计失败: %v", err)
+		log.Printf("写入执行审计失败，拒绝执行: %v", err)
+		return err
 	}
+	return nil
 }
 
 func (m *execManager) auditFinish(jobID string, out ExecOutcome) {

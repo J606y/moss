@@ -69,9 +69,18 @@ func (s *App) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 批量请求（顶层数组）自 2025-06-18 起被移除，但 2025-03-26 里它是必须支持的，
+	// 而缺失协议头时我们恰好兜底到那个版本。本端不实现批量，但**语法合法的数组
+	// 不该回 Parse error**——那是「JSON 都读不懂」的意思，会把客户端引向错误方向。
+	// 按规范回 Invalid Request，并明说要拆成单条重发。
+	if isJSONArray(body) {
+		writeJSON(w, http.StatusBadRequest, rpcError(nil, jrpcInvalidRequest,
+			"本端点不支持批量请求，请逐条发送", nil))
+		return
+	}
+
 	var req jsonrpcRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		// 批量请求自 2025-06-18 起被移除；若收到数组，解析到此失败并回 Parse error。
 		writeJSON(w, http.StatusBadRequest, rpcError(nil, jrpcParseError, "JSON 解析失败", nil))
 		return
 	}
@@ -173,3 +182,19 @@ const mcpInstructions = `Moss 是服务器集群的监控与运维中枢。你�
 - 每次操作都有完整审计记录，包括被拦截的尝试。
 
 执行命令前先确认目标机器是对的。生产环境的破坏性变更应当先向人确认。`
+
+// isJSONArray 判断请求体是不是一个 JSON 数组（批量请求）。
+// 只看第一个非空白字符，不做完整解析——此时还没到能信任内容的阶段。
+func isJSONArray(body []byte) bool {
+	for _, b := range body {
+		switch b {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '[':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
+}

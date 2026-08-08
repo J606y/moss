@@ -248,14 +248,28 @@ func (s *App) handleBrowserWS(w http.ResponseWriter, r *http.Request) {
 		conn.Close()
 	}()
 
-	// 读循环只用于感知断开
+	// 读循环只用于感知断开。
+	//
+	// 必须设读超时并在收到 pong 时续期，与 agent 连接（agent_ws.go）保持一致。
+	// 不设的话，笔记本睡眠、NAT 表项被回收这类**半开**断连是感知不到的：
+	// 读协程永久阻塞在 ReadMessage，下面每 30 秒发的 ping 先灌进内核缓冲区
+	// 不报错，要等 TCP 重传超时（Linux 默认约 15 分钟）才失败。这段时间里
+	// goroutine、64 缓冲 channel 和 hub.browsers 里的条目一直占着。
+	// gorilla 默认的 PongHandler 是空实现，光发 ping 不校验回应等于没做心跳。
+	const browserReadWait = 70 * time.Second // > 两个 ping 周期，容忍一次丢包
 	go func() {
 		conn.SetReadLimit(1024)
+		conn.SetReadDeadline(time.Now().Add(browserReadWait))
+		conn.SetPongHandler(func(string) error {
+			return conn.SetReadDeadline(time.Now().Add(browserReadWait))
+		})
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
 				conn.Close()
 				return
 			}
+			// 浏览器端不会主动发消息，但真发了也算活着
+			conn.SetReadDeadline(time.Now().Add(browserReadWait))
 		}
 	}()
 

@@ -669,7 +669,7 @@ func (s *App) toolExec(key *apiKey, raw json.RawMessage) mcpCallToolResult {
 		// 拦截与掉线都在这里落地。带上 jobId：调用方仍可用 get_result 看到完整原因。
 		msg := err.Error()
 		if errors.Is(err, errExecBlocked) {
-			if out, _, ok := s.exec.Result(jobID); ok && out.Error != "" {
+			if out, _, _, ok := s.exec.Result(jobID); ok && out.Error != "" {
 				msg = out.Error
 			}
 			msg += "。这是服务端的安全拦截，改写命令绕过是不允许的；如确有必要请让人工上机操作。"
@@ -685,6 +685,60 @@ func (s *App) toolExec(key *apiKey, raw json.RawMessage) mcpCallToolResult {
 
 /* ---------- get_result ---------- */
 
+// getResultFromAudit 在内存里查不到 jobID 时回退查审计表。
+//
+// jobs 与 finished 都是纯内存，服务端一重启就全部归零；而 exec_audit 里明明
+// 有这条记录。此前一律回「jobId 有误，或结果已超过 30 分钟保留期」，
+// 等于把「服务端重启过」说成「你参数写错了」，会让模型往完全错误的方向排查，
+// 甚至把一条非幂等的命令重跑一遍。
+//
+// 审计里的输出被截到 32KB（内存留全量、审计留摘要），所以要明确告知这是
+// 降级结果，别让调用方把截断后的日志当成完整输出。
+func (s *App) getResultFromAudit(key *apiKey, jobID string) mcpCallToolResult {
+	var (
+		serverID   string
+		exitCode   int
+		errMsg     string
+		stdout     string
+		stderr     string
+		truncated  int
+		startedAt  int64
+		finishedAt int64
+	)
+	err := s.db.QueryRow(
+		`SELECT server_id, exit_code, error, stdout, stderr, truncated, started_at, finished_at
+		   FROM exec_audit WHERE job_id = ?`, jobID).
+		Scan(&serverID, &exitCode, &errMsg, &stdout, &stderr, &truncated, &startedAt, &finishedAt)
+	if err != nil {
+		return toolFailure("找不到任务 " + jobID + "：jobId 有误，或记录已被审计清理策略删除。")
+	}
+	// 审计表这条路同样要过机器作用域闸，不能因为走了降级分支就放行。
+	if _, f := s.resolveTarget(key, serverID); f != nil {
+		return *f
+	}
+	if finishedAt == 0 {
+		return toolFailure("任务 " + jobID + " 的结果已随服务端重启丢失，且它当时尚未执行完。" +
+			"命令可能仍在目标机上运行过——重跑前请先确认它是否幂等。")
+	}
+	res := map[string]any{
+		"jobId":      jobID,
+		"running":    false,
+		"exitCode":   exitCode,
+		"stdout":     stdout,
+		"stderr":     stderr,
+		"durationMs": finishedAt - startedAt,
+		"source":     "audit",
+		"sourceNote": "内存结果已随服务端重启丢失，这份取自审计表：输出被截断到 32KB，可能不完整。",
+	}
+	if truncated != 0 {
+		res["truncated"] = true
+	}
+	if errMsg != "" {
+		res["error"] = errMsg
+	}
+	return jsonResult(res)
+}
+
 func (s *App) toolGetResult(key *apiKey, raw json.RawMessage) mcpCallToolResult {
 	if f := requireCap(key, capExec); f != nil {
 		return *f
@@ -699,9 +753,20 @@ func (s *App) toolGetResult(key *apiKey, raw json.RawMessage) mcpCallToolResult 
 		return toolFailure("job_id 不能为空")
 	}
 
-	out, running, found := s.exec.Result(args.JobID)
+	out, serverID, running, found := s.exec.Result(args.JobID)
 	if !found {
-		return toolFailure("找不到任务 " + args.JobID + "：jobId 有误，或结果已超过 30 分钟保留期。")
+		// 查不到时回退查审计表，把两种完全不同的情况区分开。
+		//
+		// jobs/finished 都是纯内存：服务端一重启，在途任务与已完成结果一并归零，
+		// 而 exec_audit 里明明有这条记录（含 32KB 截断输出）。此前一律回
+		// 「jobId 有误」，等于把「服务端重启过」说成「你参数写错了」，
+		// 会让模型往完全错误的方向排查。
+		return s.getResultFromAudit(key, args.JobID)
+	}
+	// 闸 1 的后半：机器作用域。get_result 曾是六个工具里唯一漏掉这道闸的，
+	// 任何持 exec 能力的 Key 都能读到别的机器上的完整 stdout。
+	if _, f := s.resolveTarget(key, serverID); f != nil {
+		return *f
 	}
 	if running {
 		return jsonResult(map[string]any{

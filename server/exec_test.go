@@ -328,8 +328,8 @@ func TestOnResultAggregatesAndFinishes(t *testing.T) {
 	job := newTestJob("j6", "s1")
 	m.jobs["j6"] = job
 
-	m.OnResult(&protocol.ExecResult{ID: "j6", Seq: 0, Stream: "stdout", Data: []byte("hello")})
-	m.OnResult(&protocol.ExecResult{ID: "j6", Seq: 1, Done: true, ExitCode: 7})
+	m.OnResult("s1", &protocol.ExecResult{ID: "j6", Seq: 0, Stream: "stdout", Data: []byte("hello")})
+	m.OnResult("s1", &protocol.ExecResult{ID: "j6", Seq: 1, Done: true, ExitCode: 7})
 
 	select {
 	case <-job.done:
@@ -345,7 +345,7 @@ func TestOnResultAggregatesAndFinishes(t *testing.T) {
 func TestOnResultIgnoresUnknownJob(t *testing.T) {
 	m := newExecManager(testDB(t))
 	// 服务端重启后迟到的分片没有归属，必须安静丢弃而不是 panic。
-	m.OnResult(&protocol.ExecResult{ID: "ghost", Seq: 0, Done: true})
+	m.OnResult("s1", &protocol.ExecResult{ID: "ghost", Seq: 0, Done: true})
 }
 
 // TestAuditWrittenBeforeExecution 验证审计在下发前落库：
@@ -355,7 +355,7 @@ func TestAuditWrittenBeforeExecution(t *testing.T) {
 	m := newExecManager(db)
 	job := newTestJob("j7", "s1")
 
-	m.auditStart(job, "s1", "admin", protocol.ExecTask{Cmd: "echo hi", Dir: "/tmp", Timeout: 30})
+	_ = m.auditStart(job, "s1", "admin", protocol.ExecTask{Cmd: "echo hi", Dir: "/tmp", Timeout: 30})
 
 	var cmd string
 	var finishedAt int64
@@ -422,7 +422,7 @@ func TestRememberIsAtomicWithUnregister(t *testing.T) {
 				return
 			default:
 			}
-			if _, _, found := m.Result("atomic1"); !found {
+			if _, _, _, found := m.Result("atomic1"); !found {
 				select {
 				case missed <- struct{}{}:
 				default:
@@ -438,7 +438,7 @@ func TestRememberIsAtomicWithUnregister(t *testing.T) {
 		m.jobs["atomic1"] = job
 		delete(m.finished, "atomic1")
 		m.mu.Unlock()
-		m.remember("atomic1", ExecOutcome{JobID: "atomic1", ExitCode: 0})
+		m.remember("atomic1", "s1", ExecOutcome{JobID: "atomic1", ExitCode: 0})
 	}
 	close(stop)
 
@@ -449,7 +449,7 @@ func TestRememberIsAtomicWithUnregister(t *testing.T) {
 	}
 
 	// 转移完成后应当查得到、且不再是 running
-	out, running, found := m.Result("atomic1")
+	out, _, running, found := m.Result("atomic1")
 	if !found || running {
 		t.Fatalf("落袋后应能查到且不再是 running，实际 found=%v running=%v", found, running)
 	}

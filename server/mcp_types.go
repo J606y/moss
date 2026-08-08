@@ -65,21 +65,38 @@ type jsonrpcError struct {
 	Data    any    `json:"data,omitempty"`
 }
 
+// jsonrpcResponse 是一条 JSON-RPC 2.0 响应。
+//
+// ID 不能用 omitempty：规范规定响应的 id 是 REQUIRED，在无法确定请求 id 时
+// （解析失败、非法请求）必须显式为 null。omitempty 会让整个键消失，
+// 严格校验的客户端会判为非法响应。所以由 rpcResult / rpcError 保证 ID 非空——
+// 传进来的 nil 一律补成 JSON null。
 type jsonrpcResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id,omitempty"`
+	ID      json.RawMessage `json:"id"`
 	Result  any             `json:"result,omitempty"`
 	Error   *jsonrpcError   `json:"error,omitempty"`
 }
 
+// jsonNull 是字面量 null，供 id 未知时使用。
+var jsonNull = json.RawMessage("null")
+
+// normalizeID 把缺失的 id 补成 JSON null。
+func normalizeID(id json.RawMessage) json.RawMessage {
+	if len(id) == 0 {
+		return jsonNull
+	}
+	return id
+}
+
 func rpcResult(id json.RawMessage, result any) jsonrpcResponse {
-	return jsonrpcResponse{JSONRPC: jsonrpcVersion, ID: id, Result: result}
+	return jsonrpcResponse{JSONRPC: jsonrpcVersion, ID: normalizeID(id), Result: result}
 }
 
 func rpcError(id json.RawMessage, code int, msg string, data any) jsonrpcResponse {
 	return jsonrpcResponse{
 		JSONRPC: jsonrpcVersion,
-		ID:      id,
+		ID:      normalizeID(id),
 		Error:   &jsonrpcError{Code: code, Message: msg, Data: data},
 	}
 }
