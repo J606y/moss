@@ -128,20 +128,30 @@ func (h *Hub) RegisterAgent(id string, c *agentConn) {
 }
 
 // UnregisterAgent 仅当当前连接仍是该 ID 的活跃连接时标记离线。
-func (h *Hub) UnregisterAgent(id string, c *agentConn) {
+// 返回是否真的执行了下线，供调用方决定要不要连带做别的收尾。
+func (h *Hub) UnregisterAgent(id string, c *agentConn) bool {
 	h.mu.Lock()
 	if h.agents[id] != c {
 		h.mu.Unlock()
-		return
+		return false
 	}
 	delete(h.agents, id)
 	st := h.state(id)
 	st.online = false
 	st.stats = protocol.Stats{}
 	h.mu.Unlock()
-	h.db.Exec(`UPDATE servers SET last_seen = ? WHERE id = ?`, time.Now().Unix(), id)
+
+	// 这三个副作用必须与上面的身份判断同受保护。此前它们在锁外无条件执行，
+	// 于是当「旧连接的 goroutine 醒得比新连接的 RegisterAgent 晚」时：
+	// OnOnline 刚清掉的 offlineSince 会被这里的 OnOffline 重新写上，
+	// 而 Run() 只看 offlineSince、不看 hub 的在线状态，于是推一条假的
+	// 「🔴 离线」，并一直挂着，直到下次重连再补一条同样假的「🟢 恢复」。
+	if _, err := h.db.Exec(`UPDATE servers SET last_seen = ? WHERE id = ?`, time.Now().Unix(), id); err != nil {
+		log.Printf("更新 %s 的 last_seen 失败: %v", id, err)
+	}
 	h.notifier.OnOffline(id)
 	h.broadcast(map[string]any{"type": "offline", "id": id})
+	return true
 }
 
 // AgentConn 返回某服务器的活跃 agent 连接（可能为 nil）。

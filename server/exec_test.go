@@ -400,6 +400,64 @@ func TestClipForAuditMarksTruncation(t *testing.T) {
 	}
 }
 
+// TestRememberIsAtomicWithUnregister 结果落袋与摘除必须是同一个原子动作。
+//
+// 此前摘除由 await 的 defer 先执行、remember 在其后，两次加锁之间存在一个窗口：
+// jobs 里已经没有、finished 里还没有，Result 返回 found=false，
+// get_result 于是回「jobId 有误，或结果已超过 30 分钟保留期」这种措辞很确定的
+// 错误——而命令其实刚刚成功执行完。轮询的模型据此放弃，或者把一条非幂等的
+// 命令重跑一遍。窗口很窄，但高频轮询必然命中。
+func TestRememberIsAtomicWithUnregister(t *testing.T) {
+	m := newExecManager(testDB(t))
+	job := newTestJob("atomic1", "s1")
+	m.jobs["atomic1"] = job
+
+	// 一个持续轮询的调用方：任何一拍都不允许查不到这个 jobID。
+	stop := make(chan struct{})
+	missed := make(chan struct{}, 1)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if _, _, found := m.Result("atomic1"); !found {
+				select {
+				case missed <- struct{}{}:
+				default:
+				}
+				return
+			}
+		}
+	}()
+
+	// 反复做「收敛 → 落袋」的状态转移，给窗口足够多的命中机会
+	for i := 0; i < 2000; i++ {
+		m.mu.Lock()
+		m.jobs["atomic1"] = job
+		delete(m.finished, "atomic1")
+		m.mu.Unlock()
+		m.remember("atomic1", ExecOutcome{JobID: "atomic1", ExitCode: 0})
+	}
+	close(stop)
+
+	select {
+	case <-missed:
+		t.Fatal("存在 jobs 与 finished 都查不到的窗口：已完成的任务会被谎报成「jobId 有误」")
+	default:
+	}
+
+	// 转移完成后应当查得到、且不再是 running
+	out, running, found := m.Result("atomic1")
+	if !found || running {
+		t.Fatalf("落袋后应能查到且不再是 running，实际 found=%v running=%v", found, running)
+	}
+	if out.JobID != "atomic1" {
+		t.Fatalf("取回的结果不对: %+v", out)
+	}
+}
+
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db, err := openDB(filepath.Join(t.TempDir(), "test.db"))

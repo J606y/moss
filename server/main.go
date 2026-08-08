@@ -96,6 +96,10 @@ func main() {
 	app.globalLimiter = newLimiter(envInt("MOSS_RATELIMIT_PER_MIN", 600))
 	app.authLimiter = newLimiter(envInt("MOSS_RATELIMIT_AUTH_PER_MIN", 10))
 	app.ensurePassword()
+	// 播种必须在 Run 之前、且在 isOnline 注入之后：库里的机器先按「离线」计时，
+	// 谁连上来谁被 OnOnline 清掉。不播种的话，面板重启前就已经死掉的机器
+	// 永远不会触发离线告警——详见 SeedOfflineStates 的注释。
+	app.notifier.SeedOfflineStates(time.Now())
 	go cleanupLoop(db)
 	go app.notifier.Run()
 

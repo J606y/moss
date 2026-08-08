@@ -321,6 +321,51 @@ func (n *Notifier) Forget(id string) {
 	n.mu.Unlock()
 }
 
+// SeedOfflineStates 启动时按库里的服务器清单播种离线计时。
+//
+// 不做这件事，「机器死了」这件事会彻底静默——而这是监控系统存在的唯一理由。
+// states 的条目只能由 OnOnline / OnOffline / OnReport 创建，三者全部由 WS
+// 连接事件驱动；一台已经离线的机器在面板重启后从未在新进程里注册过，
+// Run() 根本遍历不到它，「🔴 离线」永远不会发。它日后恢复上线时
+// wasAlerted 为 false，连「🟢 恢复」也不会发。面板自更新成功后的那次重启
+// 同样会触发这一幕。gcp_autostart 早就绕开了这个坑（见其头注释），
+// 但告警引擎自己一直没有这层兜底。
+//
+// 计时起点取**进程启动时间**而不是 servers.last_seen：面板自己停机一周后
+// 重启，用 last_seen 会让所有机器一上来就越过 OfflineDelay，一口气补发
+// 一堆离线告警。用启动时间，等于启动后先给足一个 OfflineDelay 的重连窗口，
+// 到点仍然连不上的才告警一次——既不刷屏，也不静默。
+func (n *Notifier) SeedOfflineStates(startedAt time.Time) {
+	rows, err := n.db.Query(`SELECT id FROM servers`)
+	if err != nil {
+		log.Printf("播种离线告警状态失败，本次重启后已离线的机器将不会告警: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("播种离线告警状态时读取中断: %v", err)
+	}
+
+	n.mu.Lock()
+	for _, id := range ids {
+		// 已经有状态说明该机器在播种之前就连上来了，别覆盖它。
+		if _, exists := n.states[id]; exists {
+			continue
+		}
+		n.state(id).offlineSince = startedAt
+	}
+	n.mu.Unlock()
+}
+
 // Run 离线检查循环：离线超过 OfflineDelay 且未告警 → 推送。
 func (n *Notifier) Run() {
 	t := time.NewTicker(15 * time.Second)
@@ -333,10 +378,19 @@ func (n *Notifier) Run() {
 		if cfg.OfflineOn {
 			delay := time.Duration(cfg.OfflineDelay) * time.Second
 			for id, st := range n.states {
-				if !st.offlineSince.IsZero() && !st.offlineAlerted && time.Since(st.offlineSince) >= delay {
-					st.offlineAlerted = true
-					due = append(due, pending{id})
+				if st.offlineSince.IsZero() || st.offlineAlerted || time.Since(st.offlineSince) < delay {
+					continue
 				}
+				// 发之前跟 hub 的实时状态对一次。offlineSince 是事件驱动写上去的，
+				// 可能因为连接事件乱序而变陈旧（旧连接的 OnOffline 跑在新连接的
+				// OnOnline 之后）；只认 offlineSince 就会推一条假的离线告警。
+				// hub 说在线就说明这台机器好好的，清掉计时而不是告警。
+				if n.isOnline(id) {
+					st.offlineSince = time.Time{}
+					continue
+				}
+				st.offlineAlerted = true
+				due = append(due, pending{id})
 			}
 		}
 		n.mu.Unlock()

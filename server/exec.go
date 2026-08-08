@@ -168,7 +168,14 @@ func newExecManager(db *sql.DB) *execManager {
 	}
 }
 
-// remember 暂存异步任务结果，并顺带清理过期项，省去一个常驻 goroutine。
+// remember 把结果放进 finished 并同时把任务从 jobs 摘除，顺带清理过期项
+// （省去一个常驻 goroutine）。
+//
+// 「放进 finished」与「从 jobs 摘除」必须在同一把锁里完成。此前摘除由 await 的
+// defer 先执行、remember 在其后，两次加锁之间有一个窗口：jobs 里已经没有、
+// finished 里还没有，Result 于是返回 found=false，get_result 回的是措辞很确定的
+// 「jobId 有误，或结果已超过 30 分钟保留期」——而命令其实刚刚成功执行完。
+// 轮询的模型据此判定 jobId 写错而放弃，或者干脆把一条非幂等的命令重跑一遍。
 func (m *execManager) remember(jobID string, out ExecOutcome) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -179,6 +186,7 @@ func (m *execManager) remember(jobID string, out ExecOutcome) {
 		}
 	}
 	m.finished[jobID] = finishedJob{outcome: out, at: now}
+	delete(m.jobs, jobID)
 }
 
 // Result 查询任务当前状态。
@@ -255,9 +263,11 @@ func (m *execManager) unregister(jobID string) {
 }
 
 // await 等待任务收敛，落审计并返回结果。
+//
+// 刻意不在这里从 jobs 摘除：对异步任务而言，摘除必须与「把结果放进 finished」
+// 是同一个原子动作，否则中间那一瞬 Result 两张表都查不到（见 remember 的注释）。
+// 收尾方式由调用方决定——同步的 Submit 直接 unregister，异步的 Start 走 remember。
 func (m *execManager) await(ctx context.Context, job *execJob, timeout int) (ExecOutcome, error) {
-	defer m.unregister(job.id)
-
 	wait := time.Duration(timeout)*time.Second + execWaitGrace
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
@@ -285,7 +295,10 @@ func (m *execManager) Submit(ctx context.Context, hub *Hub, serverID, caller str
 	if failed != nil {
 		return *failed, err
 	}
-	return m.await(ctx, job, task.Timeout)
+	out, err := m.await(ctx, job, task.Timeout)
+	// 同步调用方直接拿到结果，不需要留在 finished 里供人回来查。
+	m.unregister(job.id)
+	return out, err
 }
 
 // Start 异步执行：下发后立即返回 jobID，结果由调用方稍后用 Result 取回。

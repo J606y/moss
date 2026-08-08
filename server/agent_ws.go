@@ -86,10 +86,15 @@ func (s *App) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 	s.hub.RegisterAgent(serverID, ac)
 	defer func() {
 		conn.Close()
-		s.hub.UnregisterAgent(serverID, ac)
-		// 立即收敛该 agent 名下所有在途执行：结果已注定拿不到，
-		// 不收敛的话调用方要一直等到宽限超时才知道。
-		s.exec.OnAgentGone(serverID)
+		// 只有这条连接仍是活跃连接时才收敛在途执行。
+		//
+		// OnAgentGone 按 serverID 扫全表，不区分任务是由哪条连接下发的。
+		// agent 抖动重连后，旧连接的 goroutine 才从 ReadJSON 醒来跑到这里，
+		// 此刻新连接早已在册、新的 exec 也可能刚下发——无条件调用会把它打成
+		// 「执行期间 agent 掉线」，而那条命令实际正在目标机上正常执行。
+		if s.hub.UnregisterAgent(serverID, ac) {
+			s.exec.OnAgentGone(serverID)
+		}
 		log.Printf("agent 已断开: %s", serverID)
 	}()
 
