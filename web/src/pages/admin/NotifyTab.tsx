@@ -9,6 +9,7 @@ import type { Toast } from './types'
 export function NotifyTab({ toast }: { toast: Toast }) {
   const [n, setN] = useState<NotifySettings | null>(null)
   const [testing, setTesting] = useState(false)
+  const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     get<NotifySettings>('/api/admin/notify')
@@ -21,6 +22,7 @@ export function NotifyTab({ toast }: { toast: Toast }) {
   const num = (k: keyof NotifySettings) => (v: number) => setN({ ...n, [k]: v })
 
   const save = async () => {
+    setSaving(true)
     try {
       await put('/api/admin/notify', n)
       const saved = await get<NotifySettings>('/api/admin/notify')
@@ -28,6 +30,8 @@ export function NotifyTab({ toast }: { toast: Toast }) {
       toast('通知设置已保存')
     } catch (e) {
       toast(errMsg(e))
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -67,7 +71,7 @@ export function NotifyTab({ toast }: { toast: Toast }) {
           />
         </div>
         <div className="flex justify-end">
-          <button className={btnGhost} onClick={test} disabled={testing}>
+          <button className={btnGhost} onClick={test} disabled={testing || saving}>
             {testing ? '发送中…' : '保存并发送测试消息'}
           </button>
         </div>
@@ -158,8 +162,8 @@ export function NotifyTab({ toast }: { toast: Toast }) {
       </div>
 
       <div className="flex justify-end">
-        <button className={btnPrimary} onClick={save}>
-          保存设置
+        <button className={btnPrimary} onClick={save} disabled={saving || testing}>
+          {saving ? '保存中…' : '保存设置'}
         </button>
       </div>
     </div>
@@ -174,7 +178,11 @@ function WebhookSection({ toast }: { toast: Toast }) {
   const [w, setW] = useState<WebhookSettings | null>(null)
   // 密钥单独用一个受控字段：留空提交 = 保留原密钥，绝不会被服务端回显的明文污染
   const [secret, setSecret] = useState('')
+  // 三个按钮打的都是同一个 PUT /api/admin/webhook，各自一个进行态：
+  // 既能显示自己的文案，又要在任一在途时互相禁用，否则并发提交会互相覆盖。
   const [testing, setTesting] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [clearing, setClearing] = useState(false)
 
   useEffect(() => {
     get<WebhookSettings>('/api/admin/webhook')
@@ -192,20 +200,26 @@ function WebhookSection({ toast }: { toast: Toast }) {
   }
 
   const onSave = async () => {
+    setSaving(true)
     try {
       await save()
       toast('Webhook 设置已保存')
     } catch (e) {
       toast(errMsg(e))
+    } finally {
+      setSaving(false)
     }
   }
 
   const onClearSecret = async () => {
+    setClearing(true)
     try {
       await save(true)
       toast('密钥已清除')
     } catch (e) {
       toast(errMsg(e))
+    } finally {
+      setClearing(false)
     }
   }
 
@@ -251,15 +265,19 @@ function WebhookSection({ toast }: { toast: Toast }) {
       </div>
       <div className="flex flex-wrap justify-end gap-2">
         {w.secretSet && (
-          <button className={`${btnGhost} !text-rose-500`} onClick={onClearSecret}>
-            清除密钥
+          <button
+            className={`${btnGhost} !text-rose-500`}
+            onClick={onClearSecret}
+            disabled={clearing || saving || testing}
+          >
+            {clearing ? '清除中…' : '清除密钥'}
           </button>
         )}
-        <button className={btnGhost} onClick={onTest} disabled={testing}>
+        <button className={btnGhost} onClick={onTest} disabled={testing || saving || clearing}>
           {testing ? '发送中…' : '保存并发送测试消息'}
         </button>
-        <button className={btnPrimary} onClick={onSave}>
-          保存
+        <button className={btnPrimary} onClick={onSave} disabled={saving || testing || clearing}>
+          {saving ? '保存中…' : '保存'}
         </button>
       </div>
     </div>

@@ -10,6 +10,11 @@ export function GcpTab({ toast }: { toast: Toast }) {
   const [g, setG] = useState<GcpSettings | null>(null)
   const [saJson, setSaJson] = useState('')
   const [busy, setBusy] = useState(false)
+  // 与 busy 分开：三个按钮各自显示自己的进行态文案，但互相禁用——
+  // 它们写的是同一个 /api/admin/gcp，并发提交只会互相覆盖。
+  const [saving, setSaving] = useState(false)
+  // 清除凭证连点会重复提交 clearSa，单独门控
+  const [clearing, setClearing] = useState(false)
 
   const load = useCallback(() => {
     get<GcpSettings>('/api/admin/gcp')
@@ -32,20 +37,26 @@ export function GcpTab({ toast }: { toast: Toast }) {
   }
 
   const onSave = async () => {
+    setSaving(true)
     try {
       await save()
       toast('GCP 设置已保存')
     } catch (e) {
       toast(errMsg(e))
+    } finally {
+      setSaving(false)
     }
   }
 
   const onClear = async () => {
+    setClearing(true)
     try {
       await save(true)
       toast('凭证已清除')
     } catch (e) {
       toast(errMsg(e))
+    } finally {
+      setClearing(false)
     }
   }
 
@@ -90,11 +101,15 @@ export function GcpTab({ toast }: { toast: Toast }) {
         </div>
         <div className="flex justify-end gap-2">
           {g.configured && (
-            <button className={`${btnGhost} !text-rose-500`} onClick={onClear}>
-              清除凭证
+            <button
+              className={`${btnGhost} !text-rose-500`}
+              onClick={onClear}
+              disabled={clearing || busy || saving}
+            >
+              {clearing ? '清除中…' : '清除凭证'}
             </button>
           )}
-          <button className={btnGhost} onClick={onTest} disabled={busy}>
+          <button className={btnGhost} onClick={onTest} disabled={busy || saving || clearing}>
             {busy ? '测试中…' : '保存并测试连接'}
           </button>
         </div>
@@ -130,8 +145,8 @@ export function GcpTab({ toast }: { toast: Toast }) {
           注意：面板本身请勿部署在被守护的 Spot 实例上；人为关机维护前请先关闭对应节点的自动开机开关，否则会被自动拉起。
         </p>
         <div className="flex justify-end">
-          <button className={btnPrimary} onClick={onSave}>
-            保存设置
+          <button className={btnPrimary} onClick={onSave} disabled={saving || busy || clearing}>
+            {saving ? '保存中…' : '保存设置'}
           </button>
         </div>
       </div>

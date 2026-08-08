@@ -11,6 +11,10 @@ export function SettingsTab({ toast }: { toast: Toast }) {
   const navigate = useNavigate()
   const [s, setS] = useState<Settings | null>(null)
   const [pwd, setPwd] = useState({ old: '', new1: '', new2: '' })
+  const [saving, setSaving] = useState(false)
+  // 改密单独一个门控：连点第二次会带着已经失效的旧密码再提交一遍，
+  // 除了一条多余的失败 toast 什么也得不到。
+  const [changing, setChanging] = useState(false)
 
   useEffect(() => {
     get<Settings>('/api/admin/settings')
@@ -23,6 +27,7 @@ export function SettingsTab({ toast }: { toast: Toast }) {
   const num = (k: keyof Settings) => (v: number) => setS({ ...s, [k]: v })
 
   const save = async () => {
+    setSaving(true)
     try {
       await put('/api/admin/settings', s)
       const saved = await get<Settings>('/api/admin/settings')
@@ -30,6 +35,8 @@ export function SettingsTab({ toast }: { toast: Toast }) {
       toast('设置已保存')
     } catch (e) {
       toast(errMsg(e))
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -42,12 +49,15 @@ export function SettingsTab({ toast }: { toast: Toast }) {
       toast('两次输入的新密码不一致')
       return
     }
+    setChanging(true)
     try {
       await put('/api/admin/password', { old: pwd.old, new: pwd.new1 })
       toast('密码已修改，请重新登录')
+      // 成功后不解除门控：跳转前的这 800ms 里旧密码已经失效，再点一次只会换来一条失败提示
       setTimeout(() => navigate('/login'), 800)
     } catch (e) {
       toast(errMsg(e))
+      setChanging(false)
     }
   }
 
@@ -104,8 +114,8 @@ export function SettingsTab({ toast }: { toast: Toast }) {
           </div>
         </div>
         <div className="flex justify-end">
-          <button className={btnPrimary} onClick={save}>
-            保存设置
+          <button className={btnPrimary} onClick={save} disabled={saving}>
+            {saving ? '保存中…' : '保存设置'}
           </button>
         </div>
       </div>
@@ -143,8 +153,8 @@ export function SettingsTab({ toast }: { toast: Toast }) {
         </div>
         <p className="text-xs text-zinc-400">修改密码后所有登录会话将失效，需要重新登录。</p>
         <div className="flex justify-end">
-          <button className={btnPrimary} onClick={changePwd}>
-            修改密码
+          <button className={btnPrimary} onClick={changePwd} disabled={changing}>
+            {changing ? '修改中…' : '修改密码'}
           </button>
         </div>
       </div>

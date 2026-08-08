@@ -94,6 +94,14 @@ interface WsMsg {
 let ws: WebSocket | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
+// 重连退避：1s 起、每次翻倍、封顶 30s，连上后复位。
+// 固定间隔的代价在面板重启时才会显形——所有在线标签页同一刻断开，就会同周期
+// 一起回敲，把刚起来的服务端再压一次。指数退避拉开重试节奏，±25% 抖动把同批
+// 客户端错开，避免它们始终共振在同一个时间点上。
+const RECONNECT_MIN_MS = 1000
+const RECONNECT_MAX_MS = 30_000
+let reconnectDelay = RECONNECT_MIN_MS
+
 /** 取消挂起的重连定时器，避免「补连后定时器到点又重复 fetch+connect」 */
 function clearReconnect() {
   if (reconnectTimer != null) {
@@ -102,15 +110,17 @@ function clearReconnect() {
   }
 }
 
-/** 断开后 3 秒重连；后台标签页暂不重连，回到前台再连，避免无限空转 */
+/** 断开后退避重连；后台标签页暂不重连，回到前台再连，避免无限空转 */
 function scheduleReconnect() {
   if (reconnectTimer != null) return
   if (document.hidden) return
+  const wait = reconnectDelay * (0.75 + Math.random() * 0.5) // ±25% 抖动
+  reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS)
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null
     fetchServers()
     connect()
-  }, 3000)
+  }, wait)
 }
 
 function connect() {
@@ -120,6 +130,9 @@ function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   const sock = new WebSocket(`${proto}://${location.host}/api/ws`)
   ws = sock
+  sock.onopen = () => {
+    if (ws === sock) reconnectDelay = RECONNECT_MIN_MS // 连上即复位退避，下次断线仍从 1s 起
+  }
   sock.onmessage = (e) => {
     let msg: WsMsg
     try {

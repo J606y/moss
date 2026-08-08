@@ -17,6 +17,15 @@ const CAPS: Array<{ key: string; label: string; desc: string }> = [
 
 const capLabel = (k: string) => CAPS.find((c) => c.key === k)?.label ?? k
 
+/**
+ * 有效期上限：10 年。
+ *
+ * 输入框只过滤非数字、不限长度，手滑多按几个 0 就能算出几十亿年后的时间戳，
+ * 效果等同永不过期，界面上却什么都不说。真要永久就该显式留空，而不是靠一个
+ * 大到没有意义的数字绕过去。
+ */
+const MAX_DAYS = 3650
+
 export function AiTab({ toast }: { toast: Toast }) {
   const [keys, setKeys] = useState<ApiKey[]>([])
   const [servers, setServers] = useState<AdminServer[]>([])
@@ -255,12 +264,25 @@ function KeyFormModal({
   const [scope, setScope] = useState(edit?.servers.join(',') ?? '') // 逗号分隔；空串表示全部机器
   // 有效期在库里是绝对时间戳，表单里填的是「从现在起多少天」。
   // 编辑时换算回剩余天数，否则一打开就显示空白，保存等于把有效期抹成永久。
-  const [days, setDays] = useState(() => {
-    if (!edit || edit.expiresAt === 0) return ''
+  // 老数据的剩余天数可能超过现在的上限，同样按上限显示，并由下方提示说明——
+  // 截断可以，但不能悄悄发生。
+  const initial = (() => {
+    if (!edit || edit.expiresAt === 0) return { days: '', capped: false }
     const left = Math.ceil((edit.expiresAt - Date.now() / 1000) / 86400)
-    return left > 0 ? String(left) : ''
-  })
+    if (left <= 0) return { days: '', capped: false }
+    return { days: String(Math.min(left, MAX_DAYS)), capped: left > MAX_DAYS }
+  })()
+  const [days, setDays] = useState(initial.days)
+  const [capped, setCapped] = useState(initial.capped)
   const [busy, setBusy] = useState(false)
+
+  // days 只经此处与 initial 两个入口，两边都已卡在 MAX_DAYS 内
+  const onDaysChange = (raw: string) => {
+    const digits = raw.replace(/\D/g, '')
+    const over = digits !== '' && Number(digits) > MAX_DAYS
+    setDays(over ? String(MAX_DAYS) : digits)
+    setCapped(over)
+  }
 
   const toggleCap = (c: string) =>
     setCaps((prev) => (prev.includes(c) ? prev.filter((x) => x !== c) : [...prev, c]))
@@ -366,10 +388,15 @@ function KeyFormModal({
           <input
             className={input}
             value={days}
-            onChange={(e) => setDays(e.target.value.replace(/\D/g, ''))}
+            onChange={(e) => onDaysChange(e.target.value)}
             placeholder="留空表示永不过期"
             inputMode="numeric"
           />
+          <p className={`mt-1 text-xs ${capped ? 'text-amber-600 dark:text-amber-500' : 'text-zinc-400'}`}>
+            {capped
+              ? `超出上限，已改为 ${MAX_DAYS} 天（10 年）。需要更长请留空，设为永不过期。`
+              : `留空表示永不过期，最长 ${MAX_DAYS} 天（10 年）。`}
+          </p>
         </div>
 
         <div className="flex justify-end gap-2 pt-1">

@@ -241,7 +241,10 @@ export function PanelUpdateTab({ toast }: { toast: Toast }) {
           </div>
         </div>
 
-        <div className="mt-4 flex items-center justify-between gap-3">
+        {/* 与全站操作按钮组一致：整组靠右，次要动作在左、主动作在右
+            （同 ConfirmDelete / GcpTab）。此前用 justify-between 把「检查更新」
+            甩到左端，是全站唯一一处这么排的按钮组。 */}
+        <div className="mt-4 flex items-center justify-end gap-2">
           <button className={btnGhost} onClick={check} disabled={checking || updating}>
             <RefreshCw className={`h-4 w-4 ${checking ? 'animate-spin' : ''}`} />
             {checking ? '检查中…' : '检查更新'}

@@ -109,9 +109,11 @@ export default function ServerDetail() {
   // 延迟探测是周期上报、没有 WS 实时流；服务端最小粒度为 1 小时（parseHours 下限），
   // 实时模式下前端再把每条曲线裁到最近 5 分钟（见下方 liveTrim）。
   // 「实时」按站点设置的「实时上报间隔」轮询刷新，与负载页实时节奏一致。
+  // 只在「延迟监控」页签下拉取：停在负载页时这份数据没人看，实时模式却仍会
+  // 按上报间隔一直打服务端。首次切到该页签会立刻 load 一次，不必等一个轮询周期。
   const pollSec = server?.intervalSec ?? 2
   useEffect(() => {
-    if (!id) return
+    if (!id || tab !== 'ping') return
     let dead = false
     const load = () =>
       get<PingData>(`/api/servers/${id}/ping?hours=${Math.max(hours, 1)}`)
@@ -125,7 +127,7 @@ export default function ServerDetail() {
       dead = true
       if (timer) clearInterval(timer)
     }
-  }, [id, hours, pollSec])
+  }, [id, hours, pollSec, tab])
 
   // 回填服务端滚动缓冲，让实时图立即有数据
   useEffect(() => {

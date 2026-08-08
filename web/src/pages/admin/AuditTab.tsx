@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type React from 'react'
 import { ChevronLeft, ChevronRight, ScrollText, ShieldAlert } from 'lucide-react'
 import { get } from '../../api/client'
@@ -54,18 +54,31 @@ export function AuditTab({ toast }: { toast: Toast }) {
       })
   }, [])
 
+  // latest-wins：翻页按钮在 loading 时会禁用，但机器筛选与「仅看拦截」不会——
+  // A→B 快速切换时若 A 的响应后到，就会渲染成「筛选显示 B、表格是 A」。
+  // 每次请求领一个序号，回来时不是最新的就整条丢弃（含 loading 与错误提示）。
+  const seqRef = useRef(0)
+
   const load = useCallback(() => {
+    const seq = ++seqRef.current
     setLoading(true)
     const p = new URLSearchParams({ limit: String(PAGE), offset: String((page - 1) * PAGE) })
     if (serverId) p.set('server', serverId)
     if (onlyBlocked) p.set('blocked', '1')
     get<{ items: ExecAudit[]; total: number }>(`/api/admin/exec-audit?${p}`)
       .then((res) => {
+        if (seq !== seqRef.current) return
         setRows(res.items)
         setTotal(res.total)
       })
-      .catch((e) => toast(errMsg(e)))
-      .finally(() => setLoading(false))
+      .catch((e) => {
+        if (seq !== seqRef.current) return
+        toast(errMsg(e))
+      })
+      .finally(() => {
+        // 已有更新的请求在途时不复位 loading，交给它自己收尾
+        if (seq === seqRef.current) setLoading(false)
+      })
   }, [page, serverId, onlyBlocked, toast])
 
   useEffect(load, [load])
