@@ -139,6 +139,29 @@ start_container(){
   docker run "${args[@]}" "$IMAGE" "${cmd[@]}"
 }
 
+# recreate_container <port> <trust:0|1> <trusted-proxies> <bind>
+# 用新参数重建容器；新容器起不来就换回旧的，返回非 0。
+# 旧容器只停机改名、不删除：直接 rm 一旦 start 失败就是服务永久中断且无从恢复
+# （与 server/panel_update.go 的自更新脚本同一策略）。改名前必须先 stop，
+# 否则旧容器仍占着宿主端口，新容器根本起不来。
+recreate_container(){
+  docker rm -f "${CONTAINER}-old" >/dev/null 2>&1 || true # 清掉上一次回滚可能残留的备份
+  docker stop "$CONTAINER" >/dev/null 2>&1
+  docker rename "$CONTAINER" "${CONTAINER}-old" >/dev/null 2>&1 || return 1
+  if start_container "$1" "$2" "$3" "$4" >/dev/null; then
+    sleep 2
+    # docker run 返回 0 只代表创建成功；镜像/参数有问题时进程会立刻退出，
+    # 所以要确认它还活着才算真的起来了。
+    if c_running; then
+      docker rm -f "${CONTAINER}-old" >/dev/null 2>&1
+      return 0
+    fi
+  fi
+  docker rm -f "$CONTAINER" >/dev/null 2>&1 # 清掉没起来的半成品，把名字腾给旧容器
+  docker rename "${CONTAINER}-old" "$CONTAINER" >/dev/null 2>&1 && docker start "$CONTAINER" >/dev/null 2>&1
+  return 1
+}
+
 do_install(){
   need_docker || { pause; return; }
   mkdir -p "$WORKDIR"
@@ -146,7 +169,8 @@ do_install(){
   read -rp "对外访问端口 [默认 ${port}]: " p; [ -n "$p" ] && port="$p"
   case "$port" in ''|*[!0-9]*) err "端口必须是数字"; return;; esac
 
-  # 反代模式：在 Nginx 等反向代理后面运行时开启 —— 限流/日志按「真实访客 IP」(最左 XFF) 生效，
+  # 反代模式：在 Nginx 等反向代理后面运行时开启 —— 限流/日志按「真实访客 IP」生效
+  # （从 XFF 最右往左跳过可信代理取；最左段是客户端能随手伪造的，绝不能拿来当依据），
   # 且端口仅绑回环，防止外部直连绕过反代伪造头部。直接用 http://IP:端口 访问的选 N。
   local trust; trust="$(cur_trust)"
   local def="N"; [ "$trust" = 1 ] && def="Y"
@@ -178,19 +202,26 @@ do_install(){
     bind="127.0.0.1"
   fi
 
+  # 这里只确认意图、不动容器：删除推迟到镜像拉取成功之后。否则一次网络抖动
+  # 就会让用户从「运行中」直接掉到「未安装」——旧容器已删、新的又起不来。
+  local recreate=0
   if c_exists; then
     warn "已存在 Moss 容器"
     read -rp "重新创建容器？(数据保留) (y/N): " yn
-    case "$yn" in [Yy]*) docker rm -f "$CONTAINER" >/dev/null 2>&1;; *) return;; esac
+    case "$yn" in [Yy]*) recreate=1;; *) return;; esac
   fi
 
-  # MOSS_ADMIN_PASSWORD 仅在「数据卷为空（首次）」时生效；复用旧卷则沿用原密码
+  # MOSS_ADMIN_PASSWORD 仅在「数据卷为空（首次）」时生效；复用旧卷则沿用原密码。
+  # docker rm 不会删卷，所以这里先判断还是后判断都一样。
   local fresh=1; v_exists && fresh=0
   local pass=""
   [ "$fresh" = 1 ] && pass="$(gen_password)"
 
   info "拉取镜像 $IMAGE ..."
   docker pull "$IMAGE" || { err "拉取镜像失败（检查网络）"; pause; return; }
+
+  # 镜像已在本地，此刻再删旧容器，最坏也只是重启一次
+  [ "$recreate" = 1 ] && docker rm -f "$CONTAINER" >/dev/null 2>&1
 
   local extra=()
   [ "$fresh" = 1 ] && extra+=( -e "MOSS_ADMIN_PASSWORD=$pass" )
@@ -200,7 +231,24 @@ do_install(){
   # 反代/仅本机模式只绑回环，无需放行公网端口
   if [ "$trust" = 0 ] && [ "$bind" = "0.0.0.0" ]; then open_firewall "$port"; fi
 
-  sleep 2
+  # 数据卷存在不等于库里有密码：上次 docker run 失败时卷已被创建、库却是空的。
+  # 这种情况服务端会自己生成随机密码，且只打印到容器日志——不抓出来，屏幕上那句
+  # 「沿用原密码」就是错的，用户拿着旧密码登不进去，真密码埋在 docker logs 里。
+  local newpass="" logs=""
+  if [ "$fresh" = 0 ]; then
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      sleep 1
+      # 整段取回再匹配，不用 grep -q 收管道：pipefail 下 grep 提前退出会让
+      # docker logs 吃到 SIGPIPE，命中反而判成失败。
+      logs="$(docker logs "$CONTAINER" 2>&1)"
+      # 「启动，监听」打印在密码初始化之后，见到它就说明该出的都出来了，不必等满 10 秒
+      case "$logs" in *"启动，监听"*) break;; esac
+    done
+    newpass="$(printf '%s\n' "$logs" | sed -n 's/.*已生成初始管理密码: *//p' | tr -d '\r' | tail -n1)"
+  else
+    sleep 2
+  fi
   local ip; ip="$(detect_ip)"
   echo
   c_grn "=========================================================="
@@ -221,6 +269,11 @@ do_install(){
     printf '%s\n' "$pass" > "$CRED"; chmod 600 "$CRED" 2>/dev/null
     echo "  管理员密码: ${pass}"
     c_ylw "  ⚠ 请立即记下密码（已存于 ${CRED}）。一旦丢失，需清空数据才能重置。"
+  elif [ -n "$newpass" ]; then
+    # 日志里出现了新生成的密码 = 旧卷其实是空库，屏幕上必须给这个，否则用户登不进去
+    printf '%s\n' "$newpass" > "$CRED"; chmod 600 "$CRED" 2>/dev/null
+    echo "  管理员密码: ${newpass}"
+    c_ylw "  ⚠ 原数据卷中并无账号数据，已重新生成密码（已存于 ${CRED}）。"
   else
     echo "  管理员密码: 沿用原数据卷中的密码（本次未重置）"
     [ -f "$CRED" ] && echo "              上次安装记录: $(cat "$CRED")"
@@ -245,11 +298,11 @@ do_update(){
   local bind; bind="$(cur_bind)" # 沿用安装时选的监听地址
   info "拉取最新镜像..."
   docker pull "$IMAGE" || { err "拉取失败"; return; }
-  docker rm -f "$CONTAINER" >/dev/null 2>&1
-  if start_container "$port" "$trust" "$proxies" "$bind" >/dev/null; then
+  if recreate_container "$port" "$trust" "$proxies" "$bind"; then
     ok "已更新到最新版并重启（数据与密码保留，模式：$(mode_desc)）"
   else
-    err "更新失败"
+    err "新版本启动失败，已回滚到原版本（服务照常运行）"
+    echo "    可用菜单 [5] 查看日志排查，或用 MOSS_TAG=vX.Y.Z 指定版本重试"
   fi
 }
 
@@ -319,8 +372,7 @@ do_change_bind(){
   esac
   [ "$new" = "$bind" ] && { ok "监听地址已经是 ${new}，无需修改"; return; }
   info "正在以新监听地址重建容器（镜像与数据卷复用，数据与密码保留）..."
-  docker rm -f "$CONTAINER" >/dev/null 2>&1
-  if start_container "$port" "$trust" "$proxies" "$new" >/dev/null; then
+  if recreate_container "$port" "$trust" "$proxies" "$new"; then
     mkdir -p "$WORKDIR"
     printf 'PORT=%s\nTRUST_PROXY=%s\nTRUSTED_PROXIES=%q\nBIND=%s\n' "$port" "$trust" "$proxies" "$new" > "$CONF"
     ok "已切换为监听 ${new}:${port}"
@@ -332,7 +384,8 @@ do_change_bind(){
       warn "原先放行的防火墙/安全组 ${port} 端口规则不再需要，可自行收回"
     fi
   else
-    err "重建容器失败，请用菜单 [5] 查看日志排查"
+    err "重建容器失败，已回滚到原监听地址 ${bind}:${port}（服务照常运行）"
+    echo "    请用菜单 [5] 查看日志排查"
   fi
 }
 

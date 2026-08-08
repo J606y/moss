@@ -21,7 +21,8 @@ services:
       MOSS_RATELIMIT_AUTH_PER_MIN: "${MOSS_RATELIMIT_AUTH_PER_MIN:-10}" # 登录等敏感端点 每 IP 每分钟
     volumes:
       - moss-data:/app/data # 命名卷，继承镜像内 /app/data 的 nonroot(65532) 属主，免手动 chown
-    # 在反代之后启用真实来源 IP（限流/日志按最左 XFF 取真实访客 IP）；同时把上面 ports 改成 127.0.0.1：
+    # 在反代之后启用真实来源 IP（限流/日志按真实访客 IP：从 XFF 最右往左跳过可信代理取，
+    # 最左段客户端可伪造，不作数）；同时把上面 ports 改成 127.0.0.1：
     # command: ["--listen", ":8787", "--data", "/app/data", "--trust-proxy"]
 
 volumes:
