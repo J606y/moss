@@ -220,7 +220,10 @@ func (m *execManager) prepare(hub *Hub, serverID, caller string, task *protocol.
 	m.auditStart(job, serverID, caller, *task)
 
 	// 拦截同样要留痕——「谁试图执行什么危险命令」是审计里最有价值的记录之一。
-	if why := checkDestructive(task.Cmd); why != "" {
+	//
+	// 必须连 Dir 一起判：它一路直达 agent 的 cmd.Dir，只看 Cmd 就等于给
+	// `{"cmd":"rm -rf *","dir":"/"}` 留了后门——命令本身无害，落点才是致命的。
+	if why := checkCommand(task.Cmd, task.Dir); why != "" {
 		out := m.reportBlocked(job, serverID, caller, task.Cmd, why)
 		return nil, &out, errExecBlocked
 	}

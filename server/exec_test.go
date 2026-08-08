@@ -106,6 +106,122 @@ func TestCheckLockoutAllowsReadOnly(t *testing.T) {
 	}
 }
 
+// TestCheckCommandBlocksChained 链式绕过。
+//
+// 这一组全部是审查时实测能放行的输入：只读白名单当年没有结尾锚点，
+// 命令**以**一条查询开头就整串被判为只读。单条命令的用例覆盖不到这一类，
+// 所以这个洞在 CI 上曾经完全不可见。
+func TestCheckCommandBlocksChained(t *testing.T) {
+	blocked := []string{
+		`iptables -L; iptables -F`,
+		`iptables -L -n && iptables -P INPUT DROP`,
+		`nft list ruleset; nft flush ruleset`,
+		`ufw status | grep x; ufw disable`,
+		`sudo iptables -S; sudo iptables -P INPUT DROP`,
+		"iptables -L\niptables -A INPUT -j DROP", // 换行与分号等价
+		`cat /etc/ssh/sshd_config; echo "Port 2222" >> /etc/ssh/sshd_config`,
+		`echo $(rm -rf /)`, // 子命令要单独成段
+		"echo `rm -rf /`",  // 反引号同理
+		`true && shutdown -h now`,
+		`df -h; systemctl stop sshd`,
+	}
+	for _, cmd := range blocked {
+		if why := checkDestructive(cmd); why == "" {
+			t.Errorf("链式命令应被拦截却放行了: %q", cmd)
+		}
+	}
+}
+
+// TestCheckCommandBlocksQuoted 引号绕过。
+//
+// 规则里的 `/` 曾经写死成裸字符，给目标路径加一对引号即绕过。
+// shell 里 of="/dev/sda" 与 of=/dev/sda 语义完全相同，属零成本绕过。
+func TestCheckCommandBlocksQuoted(t *testing.T) {
+	blocked := []string{
+		`dd if=/dev/zero of="/dev/sda" bs=1M`,
+		`dd if=/dev/zero of='/dev/nvme0n1'`,
+		`cat /tmp/x > "/dev/sda"`,
+		`wipefs -a "/dev/sda"`,
+		`rm -rf --no-preserve-root ///`, // 斜杠后是斜杠，不属 (\s|$|\*)
+		`rm -rf "/"`,
+		`shred -n 1 "/dev/sda"`,
+	}
+	for _, cmd := range blocked {
+		if why := checkDestructive(cmd); why == "" {
+			t.Errorf("带引号/重复斜杠的命令应被拦截却放行了: %q", cmd)
+		}
+	}
+}
+
+// TestCheckCommandGuardsWorkingDir 工作目录参与判定。
+//
+// `rm -rf *` 本身完全无害，落在 `/` 才是致命的。Dir 一路直达 agent 的
+// cmd.Dir，不过闸就是后门；而「cd 的目标写错」正是模块头注释点名要拦的手滑。
+func TestCheckCommandGuardsWorkingDir(t *testing.T) {
+	blocked := []struct{ cmd, dir string }{
+		{`rm -rf *`, `/`},
+		{`rm -rf .`, `/`},
+		{`rm -rf ./`, `/`},
+		{`find . -delete`, `/`},
+		{`find . -type f -exec rm {} ;`, `/`},
+		{`chmod -R 777 *`, `/`},
+		{`chown -R nobody:nobody .`, `/`},
+		{`rm -rf *`, `/etc`},
+		{`rm -rf *`, `/usr/lib`},
+		{`cd / && rm -rf *`, ``},        // cd 改变落点
+		{`cd /etc; rm -rf *`, `/tmp`},   // cd 覆盖初始 dir
+		{`cd ..; rm -rf *`, `/etc/ssh`}, // 相对 cd
+	}
+	for _, c := range blocked {
+		if why := checkCommand(c.cmd, c.dir); why == "" {
+			t.Errorf("危险工作目录下的批量操作应被拦截却放行了: cmd=%q dir=%q", c.cmd, c.dir)
+		}
+	}
+}
+
+// TestCheckCommandAllowsSafeWorkingDir 防误伤：这一组比上一组更重要。
+// 拦错正常命令等于让整个 exec 功能不可用，而误伤比漏拦更容易发生。
+func TestCheckCommandAllowsSafeWorkingDir(t *testing.T) {
+	allowed := []struct{ cmd, dir string }{
+		{`rm -rf *`, `/tmp/build`},             // 正常的构建清理
+		{`rm -rf *`, `/var/log/myapp`},         // 正常的日志清理
+		{`cd /tmp/build && rm -rf *`, ``},      // 同上，经 cd
+		{`rm -rf ./node_modules`, `/`},         // 指名道姓，落点确定
+		{`rm -rf build`, `/etc`},               // 同上
+		{`chmod 644 nginx.conf`, `/etc/nginx`}, // 单文件、非递归
+		{`ls -la`, `/`},
+		{`df -h .`, `/`},
+		{`tar -czf /tmp/etc.tar.gz .`, `/etc`}, // 只读打包
+		{`git pull && npm run build`, `/opt/app`},
+		{`rm -rf *`, ``}, // 没给 dir 就无从判断落点，不猜
+	}
+	for _, c := range allowed {
+		if why := checkCommand(c.cmd, c.dir); why != "" {
+			t.Errorf("正常命令被误拦: cmd=%q dir=%q（原因：%s）", c.cmd, c.dir, why)
+		}
+	}
+}
+
+// TestCheckCommandAllowsChainedReadOnly 切段带来的误伤面必须守住。
+func TestCheckCommandAllowsChainedReadOnly(t *testing.T) {
+	allowed := []string{
+		`iptables -L && iptables -S`,
+		`ufw status; ufw status verbose`,
+		`grep Port /etc/ssh/sshd_config | wc -l`, // 切段前这条会被误拦
+		`cat /etc/ssh/sshd_config | grep -i port`,
+		`systemctl status sshd && journalctl -u sshd -n 20`,
+		`grep halt /var/log/syslog`,    // halt 是常见英文词，不该误伤
+		`systemctl status halt.target`, // 同上
+		`docker compose up -d && docker ps`,
+		`curl -fsSL https://example.com/x.sh | sh`,
+	}
+	for _, cmd := range allowed {
+		if why := checkDestructive(cmd); why != "" {
+			t.Errorf("只读/无关的链式命令被误拦: %q（原因：%s）", cmd, why)
+		}
+	}
+}
+
 // TestCheckDestructiveAllowsNormalCommands 防误伤。
 // 黑名单拦错正常命令，等于让整个功能不可用——这比漏拦更容易发生。
 func TestCheckDestructiveAllowsNormalCommands(t *testing.T) {

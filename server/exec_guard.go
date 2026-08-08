@@ -13,6 +13,21 @@ import (
 // 黑名单只是最后一道便宜的保险，不能被当成主要防线。
 //
 // 命中即硬拒绝，不提供绕过开关：需要执行这类命令的场景，人应该自己上机器。
+//
+// ---- 判定分三层，规则本身只管最内层 ----
+//
+// 曾经的写法是「一条正则匹配整条命令」，这让每条规则都要自己操心引号、重复斜杠、
+// 命令链，漏一个就是一个洞。实测漏过的就有 11 种，例如 `iptables -L; iptables -F`
+// （只读白名单没有结尾锚点，以查询开头就整串放行）、`dd of="/dev/sda"`（规则里的
+// `/` 写死成裸字符）、`rm -rf ///`（斜杠后不是空白或 `*`）。
+//
+// 现在改成：
+//  1. splitSegments —— 按 shell 连接符切段，引号内的分隔符不切；
+//  2. normalizeSegment —— 每段剥引号、折叠重复斜杠；
+//  3. 规则逐段匹配 —— 只读白名单天然变成「每段都必须只读」。
+//
+// 这样上面三类洞是被结构消掉的，不是靠给每条正则打补丁：下面的规则表除了
+// 关机那条（见其注释）都保持原样，却不再能用引号或 `;` 绕过。
 var destructiveRules = []struct {
 	re  *regexp.Regexp
 	why string
@@ -26,7 +41,11 @@ var destructiveRules = []struct {
 	{regexp.MustCompile(`(?i)\bdd\b[^|;&]*\bof=/dev/(sd|nvme|vd|hd|xvd|disk)`), "直接写入块设备"},
 	{regexp.MustCompile(`(?i)>\s*/dev/(sd|nvme|vd|hd|xvd|disk)`), "重定向覆写块设备"},
 	// 关停系统。关机走 GCP 守护那条明确路径，不从这里出去。
-	{regexp.MustCompile(`(?i)\b(shutdown|poweroff|halt)\b`), "关闭系统"},
+	//
+	// 锚在段首而非全串任意位置：`halt` 是个太常见的英文词，不锚会误伤
+	// `grep halt /var/log/syslog`、`systemctl status halt.target`。
+	// 切段之后锚段首才是对的——`foo && shutdown -h now` 的第二段仍会命中。
+	{regexp.MustCompile(`(?i)^(sudo\s+)?(shutdown|poweroff|halt)\b`), "关闭系统"},
 	{regexp.MustCompile(`(?i)\binit\s+0\b`), "关闭系统"},
 	// fork 炸弹
 	{regexp.MustCompile(`:\s*\(\s*\)\s*\{.*\|.*&\s*\}\s*;?\s*:`), "fork 炸弹"},
@@ -81,39 +100,203 @@ var sshServiceRe = regexp.MustCompile(
 // 关闭网络接口同样会让 agent 立刻失联。
 var netDownRe = regexp.MustCompile(`(?i)\b(ip\s+link\s+set\s+\S+\s+down|ifdown\s+\S+|ifconfig\s+\S+\s+down)\b`)
 
-// checkLockout 返回自断手脚类的拦截原因；空串表示放行。
-func checkLockout(cmd string) string {
-	c := strings.TrimSpace(cmd)
-	if firewallToolRe.MatchString(c) && !firewallReadOnlyRe.MatchString(c) {
+// ---- 第一层：切段 ----
+
+// splitSegments 按 shell 的连接符把命令切成独立的段。
+//
+// 引号内的分隔符不切：否则 `grep "a|b" f` 会被切成两段，凭空造出误判。
+// `(`、`)`、反引号也算分隔符，这样 `echo $(rm -rf /)` 里的子命令会单独成段。
+func splitSegments(cmd string) []string {
+	var segs []string
+	var cur strings.Builder
+	var quote byte // 0 表示不在引号内
+
+	flush := func() {
+		if s := strings.TrimSpace(cur.String()); s != "" {
+			segs = append(segs, s)
+		}
+		cur.Reset()
+	}
+
+	for i := 0; i < len(cmd); i++ {
+		c := cmd[i]
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			}
+			cur.WriteByte(c)
+			continue
+		}
+		switch c {
+		case '\'', '"':
+			quote = c
+			cur.WriteByte(c)
+		case '\\':
+			// 反斜杠续行：物理换行被消掉，逻辑上仍是同一段
+			if i+1 < len(cmd) && cmd[i+1] == '\n' {
+				i++
+				cur.WriteByte(' ')
+				continue
+			}
+			cur.WriteByte(c)
+		case ';', '\n', '\r', '|', '&', '(', ')', '`':
+			flush()
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	flush()
+	return segs
+}
+
+// ---- 第二层：归一化 ----
+
+// normalizeSegment 归一化一个命令段，让规则不必各自处理引号与重复斜杠。
+//
+// 剥引号：shell 里 `of="/dev/sda"` 与 `of=/dev/sda` 语义完全相同，
+// 规则不该因为一对引号就漏判。折叠重复斜杠：`///` 与 `/` 指向同一处。
+//
+// 归一化只服务于匹配，不参与执行——所以把 `https://x` 折成 `https:/x` 无害。
+func normalizeSegment(s string) string {
+	s = strings.NewReplacer("'", "", `"`, "").Replace(s)
+	for strings.Contains(s, "//") {
+		s = strings.ReplaceAll(s, "//", "/")
+	}
+	return strings.TrimSpace(s)
+}
+
+// ---- 第三层：工作目录 ----
+
+// 相对路径的批量操作。目标必须正好是「当前目录的全部内容」——
+// `rm -rf ./build` 这种指名道姓的不算，它的落点是确定的、跟 cwd 无关。
+var relativeWipeRe = regexp.MustCompile(
+	`(?i)\b(` +
+		`rm\s+(-{1,2}[\w-]+\s+)*[.*]+/?(\s|$)` +
+		`|(chmod|chown)\s+(-{1,2}[\w-]+\s+)*[\w:.-]+\s+[.*]+/?(\s|$)` +
+		`|find\s+\.(\s[^;]*)?\s(-delete|-exec)\b` +
+		`)`)
+
+// 在这些目录下对相对路径做批量删除，后果与删根同级。
+//
+// 刻意不含 /var、/tmp、/home、/opt、/root —— `cd /var/log && rm -rf *` 是
+// 正常的日志清理，把它拦掉会让功能不可用，而误伤比漏拦更容易发生。
+var dangerousCwdPrefixes = []string{"/etc", "/boot", "/dev", "/proc", "/sys", "/usr", "/lib", "/bin", "/sbin"}
+
+// dangerousCwd 判断工作目录是否属于「相对路径批量操作会造成系统级破坏」的位置。
+func dangerousCwd(dir string) string {
+	d := strings.TrimRight(normalizeSegment(dir), "/")
+	if dir == "" {
+		return ""
+	}
+	if d == "" { // 归一化后为空 = 根目录
+		return "在根目录下对相对路径做批量删除或改权限（等同于作用于整个系统）"
+	}
+	lower := strings.ToLower(d)
+	for _, p := range dangerousCwdPrefixes {
+		if lower == p || strings.HasPrefix(lower, p+"/") {
+			return "在系统目录 " + d + " 下对相对路径做批量删除或改权限"
+		}
+	}
+	return ""
+}
+
+// cdTarget 从一个段里认出字面量 cd 的目标；认不出返回 ok=false。
+// 只认字面量——`cd $DIR` 静态判断不出落点，不猜。
+func cdTarget(seg, cur string) (string, bool) {
+	f := strings.Fields(seg)
+	if len(f) < 2 || f[0] != "cd" {
+		return "", false
+	}
+	p := f[1]
+	if strings.HasPrefix(p, "/") {
+		return p, true
+	}
+	if cur == "" {
+		return "", false
+	}
+	return strings.TrimRight(cur, "/") + "/" + p, true
+}
+
+// checkRelativeDanger 逐段推进工作目录，检查「危险目录 + 相对路径批量操作」。
+//
+// 这一层专治 `cd / && rm -rf *`：两段单独看都不命中任何规则，
+// 但合起来等同删根，而「cd 的目标写错」正是最典型的手滑形态。
+// 按段序推进而不是取最终目录，是因为 `rm -rf * && cd /` 里的 rm 跑在原目录。
+func checkRelativeDanger(baseDir string, segs []string) string {
+	dir := baseDir
+	for _, raw := range segs {
+		seg := normalizeSegment(raw)
+		if why := dangerousCwd(dir); why != "" && relativeWipeRe.MatchString(seg) {
+			return why
+		}
+		if d, ok := cdTarget(seg, dir); ok {
+			dir = d
+		}
+	}
+	return ""
+}
+
+// ---- 入口 ----
+
+// checkLockoutSegment 对**已归一化的单段**做自断手脚类判定。
+func checkLockoutSegment(seg string) string {
+	if firewallToolRe.MatchString(seg) && !firewallReadOnlyRe.MatchString(seg) {
 		return "修改防火墙规则（一旦规则写错，agent 与 SSH 会一并失联，无法远程补救）"
 	}
-	if sshdConfigRe.MatchString(c) && !sshdConfigReadOnlyRe.MatchString(c) {
+	if sshdConfigRe.MatchString(seg) && !sshdConfigReadOnlyRe.MatchString(seg) {
 		return "修改 SSH 服务配置（端口或认证改错会导致再也登不上这台机器）"
 	}
-	if sshServiceRe.MatchString(c) {
+	if sshServiceRe.MatchString(seg) {
 		return "停用 SSH 服务（等同于切断远程入口）"
 	}
-	if netDownRe.MatchString(c) {
+	if netDownRe.MatchString(seg) {
 		return "关闭网络接口（agent 会立刻失联）"
+	}
+	return ""
+}
+
+// checkLockout 返回自断手脚类的拦截原因；空串表示放行。
+func checkLockout(cmd string) string {
+	for _, raw := range splitSegments(cmd) {
+		if why := checkLockoutSegment(normalizeSegment(raw)); why != "" {
+			return why
+		}
 	}
 	return ""
 }
 
 // checkDestructive 返回拦截原因；空串表示放行。
 func checkDestructive(cmd string) string {
-	c := strings.TrimSpace(cmd)
-	if c == "" {
+	return checkCommand(cmd, "")
+}
+
+// checkCommand 是命令拦截的唯一入口，dir 是该命令的工作目录（可为空）。
+//
+// dir 必须参与判定：它一路直达 agent 的 cmd.Dir，不过闸就等于给
+// `{"cmd":"rm -rf *","dir":"/"}` 开了后门——命令本身完全无害，落点才是致命的。
+func checkCommand(cmd, dir string) string {
+	segs := splitSegments(cmd)
+	if len(segs) == 0 {
 		return ""
 	}
-	for _, rule := range destructiveRules {
-		if rule.re.MatchString(c) {
-			return rule.why
+	for _, raw := range segs {
+		seg := normalizeSegment(raw)
+		if seg == "" {
+			continue
+		}
+		for _, rule := range destructiveRules {
+			if rule.re.MatchString(seg) {
+				return rule.why
+			}
+		}
+		if wipeRootRe.MatchString(seg) {
+			return "擦除根分区"
+		}
+		if why := checkLockoutSegment(seg); why != "" {
+			return why
 		}
 	}
-	if wipeRootRe.MatchString(c) {
-		return "擦除根分区"
-	}
-	return checkLockout(c)
+	return checkRelativeDanger(dir, segs)
 }
 
 // 受保护路径。写文件是命令黑名单绕不过去的另一条路：
