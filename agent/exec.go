@@ -23,8 +23,10 @@ const (
 
 	// execDrainGrace 是强杀之后仍等待输出管道关闭的宽限。
 	//
-	// 这个上限是必须的，不是保险。KillTree 在 Unix 侧只对原进程组发信号，
-	// 已经 setsid 的子孙不在该组内、杀不掉，它们会继续持有 stdout 管道的写端，
+	// 这个上限是必须的，不是保险。systemd 可用时 KillTree 走 cgroup、收得走
+	// 逃逸子孙（见 exec_unix.go），但容器里、非 root 无 polkit 授权时会回退到
+	// 进程组信号——那时已经 setsid 的子孙不在原进程组内、杀不掉，
+	// 它们会继续持有 stdout 管道的写端，
 	// 于是 pumpPipe 永远读不到 EOF、ch 永不关闭、run 永久挂起——
 	// 而 run 挂起意味着 defer r.done() 不执行、并发槽永不回落。
 	// 累计 execMaxConcurrent 次之后，这台机器再也无法执行任何命令，
@@ -133,7 +135,7 @@ func (r *execRunner) run(c sender, task protocol.ExecTask) {
 	// buildShellCmd 由平台文件实现：选定 shell、处理各自的命令行转义规则，
 	// 并预置进程组 / Job Object 所需属性，使超时后能连子孙进程一并终止。
 	// 只杀父进程会留下孤儿：`sh -c "sleep 999"` 里真正睡着的是 sleep 不是 sh。
-	cmd := buildShellCmd(task.Cmd)
+	cmd := buildShellCmd(task.ID, task.Cmd)
 	cmd.Dir = task.Dir
 
 	stdout, err := cmd.StdoutPipe()
@@ -152,7 +154,7 @@ func (r *execRunner) run(c sender, task protocol.ExecTask) {
 		return
 	}
 
-	killer, err := newProcessKiller(cmd)
+	killer, err := newProcessKiller(task.ID, cmd)
 	if err != nil {
 		// 拿不到可靠的终止手段就不执行：宁可失败，也不留下杀不掉的进程。
 		_ = cmd.Process.Kill()

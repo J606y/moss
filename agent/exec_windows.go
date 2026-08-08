@@ -18,7 +18,7 @@ import (
 // 命令行整体通过 SysProcAttr.CmdLine 传入，绕开 os/exec 的默认参数转义：
 // Go 按 CommandLineToArgvW 规则转义，而 cmd.exe 不遵循该规则，
 // 命令中的引号、& 、| 等字符会被悄悄改写成非预期的形态。
-func buildShellCmd(command string) *exec.Cmd {
+func buildShellCmd(_ string, command string) *exec.Cmd {
 	shell := os.Getenv("COMSPEC")
 	if shell == "" {
 		shell = "cmd.exe"
@@ -40,7 +40,7 @@ type winKiller struct {
 
 // newProcessKiller 把子进程纳入一个 Job Object。
 // Job Object 绑定的是内核对象而非 PID，因此不存在 Unix 侧的 PID 复用误杀问题。
-func newProcessKiller(cmd *exec.Cmd) (processKiller, error) {
+func newProcessKiller(_ string, cmd *exec.Cmd) (processKiller, error) {
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return nil, err
