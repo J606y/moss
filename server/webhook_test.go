@@ -2,9 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -174,5 +177,44 @@ func TestWebhookReloadPicksUpConfig(t *testing.T) {
 	n.fire(notifyConfig{}, alertEvent{Type: evtServerOnline, Text: "上线"})
 	if ev := sink.wait(t); ev.Type != evtServerOnline {
 		t.Errorf("Reload 后应使用新配置，实际收到 %+v", ev)
+	}
+}
+
+// TestRedactURLErrHidesCredentials 传输错误不能把凭证写进日志。
+//
+// net/http 的传输错误是 *url.Error，Error() 里带着完整 URL——而 Telegram 的
+// bot token 在 path 里、钉钉/企微/飞书的 token 在 query 里。境内机器连
+// api.telegram.org 超时是常态，所以这是常见路径而不是边缘路径；
+// handleTestNotify 还会把同一个 err 原文写进 HTTP 响应体回显给浏览器。
+func TestRedactURLErrHidesCredentials(t *testing.T) {
+	cases := []struct{ raw, secret string }{
+		{"https://api.telegram.org/bot123456:AAH-SECRET-TOKEN/sendMessage", "AAH-SECRET-TOKEN"},
+		{"https://oapi.dingtalk.com/robot/send?access_token=abcdef123456", "abcdef123456"},
+		{"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=deadbeef", "deadbeef"},
+	}
+	for _, c := range cases {
+		err := &url.Error{Op: "Post", URL: c.raw, Err: errors.New("dial tcp: i/o timeout")}
+		got := redactURLErr(err)
+		if strings.Contains(got, c.secret) {
+			t.Errorf("凭证泄漏进了错误文本:\n  输入 %s\n  输出 %s", c.raw, got)
+		}
+		// 主机名要留着，否则排查时看不出是哪个通道挂了
+		if !strings.Contains(got, "api.telegram.org") &&
+			!strings.Contains(got, "dingtalk.com") &&
+			!strings.Contains(got, "weixin.qq.com") {
+			t.Errorf("应保留主机名以便排查，实际 %s", got)
+		}
+		if !strings.Contains(got, "i/o timeout") {
+			t.Errorf("应保留底层错误原因，实际 %s", got)
+		}
+	}
+
+	// 非 url.Error 原样返回，不能把有用信息也抹掉
+	plain := errors.New("connection refused")
+	if got := redactURLErr(plain); got != "connection refused" {
+		t.Errorf("普通错误应原样返回，实际 %s", got)
+	}
+	if got := redactURLErr(nil); got != "" {
+		t.Errorf("nil 应返回空串，实际 %q", got)
 	}
 }

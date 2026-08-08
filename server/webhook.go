@@ -13,8 +13,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -29,7 +32,41 @@ const (
 	evtNetRecovered   = "server.net_recovered"
 	evtServerExpiring = "server.expiring"
 	evtCommandBlocked = "exec.blocked"
+	// GCP 守护。这几条此前直接调 send 走 Telegram、绕过了 fire，
+	// 于是只配了 webhook 的用户完全收不到——而「Spot 被抢占后开机失败」
+	// 恰恰是这条链路最该覆盖的场景。
+	evtGCPStarting  = "gcp.autostart"
+	evtGCPFailed    = "gcp.autostart_failed"
+	evtGCPGaveUp    = "gcp.autostart_gaveup"
+	evtGCPRunningNC = "gcp.running_not_connected"
 )
+
+// redactURLErr 把传输错误里的 URL 抹掉凭证再返回。
+//
+// net/http 的传输错误是 *url.Error，它的 Error() 里带着**完整 URL**。
+// 而 Telegram 的 bot token 就在 path 里、钉钉/企微/飞书的 token 就在 query 里，
+// 于是一次超时就把凭证写进了日志。境内机器连 api.telegram.org 超时是常态，
+// 这是常见路径而不是边缘路径。handleTestNotify 还会把同一个 err 原文写进
+// HTTP 响应体，等于直接回显给浏览器。
+func redactURLErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		return err.Error()
+	}
+	safe := "(地址已隐去)"
+	if u, perr := url.Parse(ue.URL); perr == nil && u.Host != "" {
+		// 只留 scheme://host，path 与 query 一概不要——凭证可能在两者中任意一处
+		safe = u.Scheme + "://" + u.Host + "/…"
+	}
+	inner := "未知错误"
+	if ue.Err != nil {
+		inner = ue.Err.Error()
+	}
+	return fmt.Sprintf("%s %s: %s", ue.Op, safe, inner)
+}
 
 // alertEvent 是推送给外部的告警载荷，同时也是 Telegram 文案的载体。
 //
@@ -94,7 +131,7 @@ func (n *Notifier) sendWebhook(cfg webhookConfig, ev alertEvent) {
 		}
 		resp, err := webhookHTTP.Do(req)
 		if err != nil {
-			log.Printf("webhook 推送失败: %v", err)
+			log.Printf("webhook 推送失败: %s", redactURLErr(err))
 			return
 		}
 		defer resp.Body.Close()

@@ -104,8 +104,13 @@ func (n *Notifier) checkGCPStart() {
 			st.gaveUp = true
 			n.mu.Unlock()
 			if fire {
-				n.send(tgCfg, fmt.Sprintf("🛑 GCP 自动开机已停止\n%s 已尝试 %d 次仍未上线，等待人工处理（节点上线后自动复位）",
-					t.name, cfg.MaxTries))
+				n.fire(tgCfg, alertEvent{
+					Type:       evtGCPGaveUp,
+					ServerID:   t.id,
+					ServerName: t.name,
+					Text: fmt.Sprintf("🛑 GCP 自动开机已停止\n%s 已尝试 %d 次仍未上线，等待人工处理（节点上线后自动复位）",
+						t.name, cfg.MaxTries),
+				})
 			}
 			continue
 		}
@@ -153,7 +158,12 @@ func (n *Notifier) gcpStartAttempt(id, name, project, zone, instance string, tri
 		}
 		n.setGCPErr(id, "查询实例状态失败: "+err.Error())
 		log.Printf("GCP 自动开机(%s): 查询状态失败: %v", name, err)
-		n.send(tgCfg, fmt.Sprintf("⚠️ GCP 自动开机失败\n%s 第 %d/%d 次：查询实例状态失败：%v", name, tries, cfg.MaxTries, err))
+		n.fire(tgCfg, alertEvent{
+			Type:       evtGCPFailed,
+			ServerID:   id,
+			ServerName: name,
+			Text:       fmt.Sprintf("⚠️ GCP 自动开机失败\n%s 第 %d/%d 次：查询实例状态失败：%v", name, tries, cfg.MaxTries, err),
+		})
 		return
 	}
 	switch status {
@@ -161,12 +171,22 @@ func (n *Notifier) gcpStartAttempt(id, name, project, zone, instance string, tri
 		if err := cli.StartInstance(ctx, project, zone, instance); err != nil {
 			n.setGCPErr(id, "instances.start 失败: "+err.Error())
 			log.Printf("GCP 自动开机(%s): start 失败: %v", name, err)
-			n.send(tgCfg, fmt.Sprintf("⚠️ GCP 自动开机失败\n%s 第 %d/%d 次：%v", name, tries, cfg.MaxTries, err))
+			n.fire(tgCfg, alertEvent{
+				Type:       evtGCPFailed,
+				ServerID:   id,
+				ServerName: name,
+				Text:       fmt.Sprintf("⚠️ GCP 自动开机失败\n%s 第 %d/%d 次：%v", name, tries, cfg.MaxTries, err),
+			})
 			return
 		}
 		n.setGCPErr(id, "")
 		log.Printf("GCP 自动开机(%s): 已调用 instances.start（第 %d/%d 次）", name, tries, cfg.MaxTries)
-		n.send(tgCfg, fmt.Sprintf("🔄 GCP 自动开机\n%s 已调用 instances.start（第 %d/%d 次），等待节点上线", name, tries, cfg.MaxTries))
+		n.fire(tgCfg, alertEvent{
+			Type:       evtGCPStarting,
+			ServerID:   id,
+			ServerName: name,
+			Text:       fmt.Sprintf("🔄 GCP 自动开机\n%s 已调用 instances.start（第 %d/%d 次），等待节点上线", name, tries, cfg.MaxTries),
+		})
 	case "RUNNING":
 		n.setGCPErr(id, "实例运行中但节点离线，疑似 agent/网络故障")
 		n.mu.Lock()
@@ -177,7 +197,12 @@ func (n *Notifier) gcpStartAttempt(id, name, project, zone, instance string, tri
 		}
 		n.mu.Unlock()
 		if fire {
-			n.send(tgCfg, fmt.Sprintf("⚠️ GCP 守护提醒\n%s 实例状态为 RUNNING 但节点离线，可能是 agent 或网络故障，不执行开机", name))
+			n.fire(tgCfg, alertEvent{
+				Type:       evtGCPRunningNC,
+				ServerID:   id,
+				ServerName: name,
+				Text:       fmt.Sprintf("⚠️ GCP 守护提醒\n%s 实例状态为 RUNNING 但节点离线，可能是 agent 或网络故障，不执行开机", name),
+			})
 		}
 	case "SUSPENDED":
 		n.setGCPErr(id, "实例已挂起（SUSPENDED），暂不支持自动恢复")

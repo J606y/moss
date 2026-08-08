@@ -126,12 +126,42 @@ func (n *Notifier) Reload() {
 	gcpCfg := loadGCPConfig(n.db)
 	wh := loadWebhookConfig(n.db)
 	n.mu.Lock()
+	old := n.cfg
 	n.cfg = cfg
 	n.gcpCfg = gcpCfg
 	n.webhook = wh
 	n.gcpCli = nil
 	n.gcpSARaw = ""
+
+	// 开关被关掉、或阈值被改动时，清掉受影响指标的告警态。
+	//
+	// 不清的话会留下一个 stale 的 highAlerted：比如网速告警已触发 → 用户关掉
+	// 网速告警 → 过一阵再打开，此时 highAlerted["net"] 仍是 true，
+	// **新的超阈值不会再告警**；而等到网速跌破回差线并满 RecoverSec，
+	// 又会凭空发出一条「✅ 网速恢复」——用户从未收到过对应的告警。
+	// 改阈值同理：留下来的告警态是按旧阈值算出来的，对新阈值没有意义。
+	if !cfg.LoadOn || cfg.CPUThreshold != old.CPUThreshold {
+		n.clearMetricState("CPU")
+	}
+	if !cfg.LoadOn || cfg.MemThreshold != old.MemThreshold {
+		n.clearMetricState("内存")
+	}
+	if !cfg.LoadOn || cfg.DiskThreshold != old.DiskThreshold {
+		n.clearMetricState("硬盘")
+	}
+	if !cfg.NetOn || cfg.NetThreshold != old.NetThreshold {
+		n.clearMetricState("net")
+	}
 	n.mu.Unlock()
+}
+
+// clearMetricState 清掉某个指标在所有机器上的告警态。调用方必须已持锁。
+func (n *Notifier) clearMetricState(metric string) {
+	for _, st := range n.states {
+		delete(st.highSince, metric)
+		delete(st.highAlerted, metric)
+		delete(st.lowSince, metric)
+	}
 }
 
 func (n *Notifier) state(id string) *alertState {
@@ -500,7 +530,7 @@ func (n *Notifier) send(cfg notifyConfig, text string) {
 	}
 	go func() {
 		if err := sendTelegram(cfg.TgToken, cfg.TgChat, text); err != nil {
-			log.Printf("Telegram 推送失败: %v", err)
+			log.Printf("Telegram 推送失败: %s", redactURLErr(err))
 		}
 	}()
 }
@@ -569,7 +599,7 @@ func (s *App) handleTestNotify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := sendTelegram(cfg.TgToken, cfg.TgChat, "✅ Moss 测试消息\n通知配置正常。"); err != nil {
-		writeErr(w, 502, "发送失败: "+err.Error())
+		writeErr(w, 502, "发送失败: "+redactURLErr(err))
 		return
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})
