@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"net/http"
@@ -293,5 +295,131 @@ func TestUpgradeSupportedReportsPlatform(t *testing.T) {
 		!strings.Contains(err.Error(), "systemctl") &&
 		!strings.Contains(err.Error(), "root") {
 		t.Errorf("不支持时的错误信息应说明原因，实际: %v", err)
+	}
+}
+
+// signedServer 起一个提供 SHA256SUMS 与 SHA256SUMS.sig 的测试服务器。
+func signedServer(t *testing.T, body []byte, sumName string, priv ed25519.PrivateKey, tamper bool) *httptest.Server {
+	t.Helper()
+	sum := sha256.Sum256(body)
+	sums := []byte(fmt.Sprintf("%s  %s\n", hex.EncodeToString(sum[:]), sumName))
+	sig := ed25519.Sign(priv, sums)
+	if tamper {
+		// 敌意镜像：二进制和清单一起换掉。校验和自洽，只有签名对不上。
+		sums = []byte(fmt.Sprintf("%s  %s\n", strings.Repeat("0", 64), sumName))
+	}
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/SHA256SUMS":
+			w.Write(sums)
+		case "/SHA256SUMS.sig":
+			w.Write([]byte(base64.StdEncoding.EncodeToString(sig)))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	useTestClient(t, srv)
+	return srv
+}
+
+func usePubKey(t *testing.T, key string) {
+	t.Helper()
+	prev := releasePubKey
+	releasePubKey = key
+	t.Cleanup(func() { releasePubKey = prev })
+}
+
+// TestVerifySumRequiresValidSignature 内置了公钥之后，签名校验就是硬性的。
+//
+// 强制 https 挡住了被动中间人，但挡不住一个敌意的镜像站——而境内机器用镜像
+// 恰恰是常态。SHA256SUMS 与二进制同源，敌意镜像可以把两者一起换掉，
+// 校验和照样自洽。签名是唯一能把信任从传输层挪到发布者的手段。
+func TestVerifySumRequiresValidSignature(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("agent binary")
+	f := filepath.Join(t.TempDir(), "bin")
+	if err := os.WriteFile(f, body, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// 签名正确：放行
+	srv := signedServer(t, body, "moss-agent-linux-amd64", priv, false)
+	usePubKey(t, base64.StdEncoding.EncodeToString(pub))
+	if err := verifySum(f, srv.URL+"/SHA256SUMS", "moss-agent-linux-amd64"); err != nil {
+		t.Fatalf("签名正确时应放行: %v", err)
+	}
+
+	// 敌意镜像把二进制与清单一起换掉：校验和自洽，签名对不上 → 必须拒绝
+	srv2 := signedServer(t, body, "moss-agent-linux-amd64", priv, true)
+	if err := verifySum(f, srv2.URL+"/SHA256SUMS", "moss-agent-linux-amd64"); err == nil {
+		t.Fatal("清单被篡改时必须拒绝安装——这正是签名要防的场景")
+	}
+
+	// 换一把公钥（等于用别人的私钥签的）→ 必须拒绝
+	otherPub, _, _ := ed25519.GenerateKey(nil)
+	usePubKey(t, base64.StdEncoding.EncodeToString(otherPub))
+	if err := verifySum(f, srv.URL+"/SHA256SUMS", "moss-agent-linux-amd64"); err == nil {
+		t.Fatal("签名与内置公钥不匹配时必须拒绝安装")
+	}
+}
+
+// TestVerifySumRejectsMissingSignature 内置了公钥却拿不到 .sig，必须拒绝。
+//
+// 这条守的是「降级攻击」：一个敌意镜像只要不提供 .sig，就能把校验退回到
+// 只有校验和的状态。所以取不到签名等同于校验失败，而不是「那就跳过吧」。
+func TestVerifySumRejectsMissingSignature(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(nil)
+	body := []byte("agent binary")
+	f := filepath.Join(t.TempDir(), "bin")
+	if err := os.WriteFile(f, body, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// upgradeServer 只提供 SHA256SUMS，没有 .sig
+	srv := upgradeServer(t, body, "moss-agent-linux-amd64")
+	usePubKey(t, base64.StdEncoding.EncodeToString(pub))
+
+	if err := verifySum(f, srv.URL+"/SHA256SUMS", "moss-agent-linux-amd64"); err == nil {
+		t.Fatal("内置公钥后拿不到签名必须拒绝，否则敌意镜像不提供 .sig 就能把校验降级掉")
+	}
+}
+
+// TestVerifySumSkipsSignatureWithoutPubKey 没内置公钥时退回校验和校验。
+//
+// 这是发布流水线的分阶段落地，不是给用户的开关：签名要先有密钥对、私钥进
+// Secrets、发一版带 .sig 的 release，这几步没做完之前强制校验会让所有 agent
+// 立刻升不动。空值＝build 时还没有公钥可用。
+func TestVerifySumSkipsSignatureWithoutPubKey(t *testing.T) {
+	body := []byte("agent binary")
+	f := filepath.Join(t.TempDir(), "bin")
+	if err := os.WriteFile(f, body, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srv := upgradeServer(t, body, "moss-agent-linux-amd64")
+	usePubKey(t, "")
+
+	if err := verifySum(f, srv.URL+"/SHA256SUMS", "moss-agent-linux-amd64"); err != nil {
+		t.Fatalf("未内置公钥时应退回校验和校验: %v", err)
+	}
+}
+
+// TestVerifySumRejectsBrokenPubKey 内置公钥本身坏掉时不能降级放行。
+// 构建出问题不该静默变成「校验被关掉」。
+func TestVerifySumRejectsBrokenPubKey(t *testing.T) {
+	body := []byte("agent binary")
+	f := filepath.Join(t.TempDir(), "bin")
+	if err := os.WriteFile(f, body, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srv := upgradeServer(t, body, "moss-agent-linux-amd64")
+
+	for _, bad := range []string{"not-base64!!", base64.StdEncoding.EncodeToString([]byte("too-short"))} {
+		usePubKey(t, bad)
+		if err := verifySum(f, srv.URL+"/SHA256SUMS", "moss-agent-linux-amd64"); err == nil {
+			t.Errorf("内置公钥非法（%q）时必须拒绝安装，而不是退回无签名模式", bad)
+		}
 	}
 }

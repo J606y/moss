@@ -20,7 +20,9 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -235,6 +237,24 @@ func requireHTTPS(rawURL string) error {
 	return nil
 }
 
+// releasePubKey 是校验 SHA256SUMS 签名用的 ed25519 公钥（base64，32 字节）。
+//
+// 发版时由 -ldflags "-X main.releasePubKey=..." 注入，见 .github/workflows/release.yml。
+//
+// **为什么需要签名，光有校验和不够**
+// SHA256SUMS 与二进制来自同一个 base（MOSS_RELEASE_BASE 可整体覆盖为镜像），
+// 所以校验和只能证明「传输没坏」，证不了「二进制是官方的」——能替换二进制的人
+// 同样能替换清单。强制 https 挡住了被动中间人，但挡不住一个敌意的镜像站，
+// 而境内机器用镜像恰恰是常态。签名是唯一能把信任从传输层挪到发布者的手段。
+//
+// **为什么空值时放行而不是拒绝**
+// 这不是给用户的逃生开关，是发布流水线的分阶段落地：签名要先有密钥对、
+// 私钥进 GitHub Secrets、发一版带 .sig 的 release，这几步没做完之前，
+// 强制校验会让所有 agent 立刻升不动。空值＝这个二进制build 时还没有公钥可用，
+// 退回「https + 校验和」；一旦发版流水线注入了公钥，校验即成为硬性要求，
+// 没有任何运行时开关能把它关掉。
+var releasePubKey = ""
+
 // upgradeHTTP 是下载 release 资产用的客户端。
 //
 // 做成包级变量而非每次新建，一是复用连接，二是让测试能换成信任自签证书的实例：
@@ -300,6 +320,10 @@ func verifySum(file, sumsURL, name string) error {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return fmt.Errorf("读取校验和失败: %w", err)
+	}
+	// 先验签再看内容：没验过的清单里的每一行都是不可信的。
+	if err := verifySumsSignature(body, sumsURL); err != nil {
+		return err
 	}
 	want := ""
 	for _, line := range strings.Split(string(body), "\n") {
@@ -442,4 +466,50 @@ func logGuard(format string, args ...any) {
 	}
 	defer f.Close()
 	f.WriteString(line)
+}
+
+// verifySumsSignature 用内置公钥校验 SHA256SUMS 的 ed25519 签名。
+//
+// 签名文件是 <SHA256SUMS 的地址> + ".sig"，内容为 base64 的 64 字节签名。
+//
+// releasePubKey 为空表示这个二进制在 build 时还没有公钥可用（签名尚未在发版
+// 流水线里落地），此时退回「https + 校验和」并记一条日志。**一旦注入了公钥，
+// 校验就是硬性的**：没有任何环境变量或参数能把它关掉——那种开关会被人为了
+// 「先升上去」打开然后永远忘掉，而这条链路是以 root 替换二进制并重启。
+func verifySumsSignature(sums []byte, sumsURL string) error {
+	if releasePubKey == "" {
+		log.Printf("本 agent 未内置发布公钥，跳过签名校验（仅有 https + 校验和保护）")
+		return nil
+	}
+	pub, err := base64.StdEncoding.DecodeString(releasePubKey)
+	if err != nil || len(pub) != ed25519.PublicKeySize {
+		// 公钥是编译期注入的常量，坏了说明这个二进制本身构建有问题——
+		// 此时绝不能降级放行，否则「构建坏掉」会静默变成「校验被关掉」。
+		return fmt.Errorf("内置发布公钥非法（长度 %d），拒绝安装", len(pub))
+	}
+
+	sigURL := sumsURL + ".sig"
+	if err := requireHTTPS(sigURL); err != nil {
+		return err
+	}
+	resp, err := upgradeHTTP.Get(sigURL)
+	if err != nil {
+		return fmt.Errorf("获取签名失败: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("获取签名失败: HTTP %d（该 release 可能未签名，拒绝安装）", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	if err != nil {
+		return fmt.Errorf("读取签名失败: %w", err)
+	}
+	sig, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw)))
+	if err != nil {
+		return fmt.Errorf("签名格式非法，拒绝安装: %w", err)
+	}
+	if !ed25519.Verify(ed25519.PublicKey(pub), sums, sig) {
+		return errors.New("校验和清单的签名不匹配，拒绝安装（下载源可能被篡改）")
+	}
+	return nil
 }

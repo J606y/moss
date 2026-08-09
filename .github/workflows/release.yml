@@ -40,9 +40,15 @@ jobs:
           CGO_ENABLED: "0"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          # 发布公钥。设了它，agent 就会强制校验 SHA256SUMS 的 ed25519 签名；
+          # 没设就退回「https + 校验和」。两者必须同批到位——公钥注进了二进制
+          # 却没有对应的 .sig，agent 会拒绝一切升级。
+          RELEASE_PUBKEY: ${{ vars.MOSS_RELEASE_PUBKEY }}
         run: |
           VER="${GITHUB_REF_NAME#v}"
-          go build -trimpath -ldflags "-s -w -X main.agentVersion=${VER}" -o "dist-out/moss-agent-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" ./agent
+          go build -trimpath \
+            -ldflags "-s -w -X main.agentVersion=${VER} -X main.releasePubKey=${RELEASE_PUBKEY}" \
+            -o "dist-out/moss-agent-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" ./agent
       - name: Build server (embed_web)
         env:
           CGO_ENABLED: "0"
@@ -73,6 +79,28 @@ jobs:
           sha256sum moss-* > SHA256SUMS
           echo "----- SHA256SUMS -----"
           cat SHA256SUMS
+
+      # 给校验和清单签名。
+      #
+      # 校验和只能证明「传输没坏」，证不了「二进制是官方的」——SHA256SUMS 与
+      # 二进制来自同一个地址，能替换二进制的镜像同样能替换清单。而境内机器
+      # 用镜像是常态（MOSS_RELEASE_BASE 就是为此存在的）。签名把信任从传输层
+      # 挪到发布者，是这条链路上唯一能防住敌意镜像的手段。
+      #
+      # 未配置密钥时跳过：此时 agent 侧也没有公钥可注入，两边一致地退回
+      # 「https + 校验和」。配置方法见 docs/release-signing.md。
+      - name: Sign checksums
+        env:
+          SIGNING_KEY: ${{ secrets.MOSS_RELEASE_PRIVKEY }}
+        run: |
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "::warning::未配置 MOSS_RELEASE_PRIVKEY，本次发布不带签名（agent 将退回校验和校验）"
+            exit 0
+          fi
+          printf '%s' "$SIGNING_KEY" > /tmp/signing.key
+          go run ./tools/sign -key /tmp/signing.key -in artifacts/SHA256SUMS -out artifacts/SHA256SUMS.sig
+          shred -u /tmp/signing.key
+          echo "已生成 SHA256SUMS.sig"
       - name: Extract changelog for this tag
         run: |
           awk -v tag="$GITHUB_REF_NAME" '
