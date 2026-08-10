@@ -69,6 +69,12 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
+      # 签名步骤要用 go run ./tools/sign。这个 job 与 build 是分开的，
+      # 不装 Go 的话签名会在发布的最后一步失败。
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache: true
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
