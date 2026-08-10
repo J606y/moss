@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -458,12 +459,30 @@ func TestRememberIsAtomicWithUnregister(t *testing.T) {
 	}
 }
 
+// testDB 造一个临时库。
+//
+// 刻意不用 t.TempDir()：SQLite 开着 WAL，除主库外还有 -wal 与 -shm 两个伴生文件，
+// 而 t.TempDir() 的清理是「列目录 → 逐个删 → rmdir」，任何一个文件在这几步之间
+// 出现或残留，rmdir 就报 "directory not empty" 并把**一个断言全部通过的用例判成失败**。
+// macOS 的 CI runner 上实测复现过。
+//
+// 这属于测试脚手架的清理时序，不是产品问题：真实运行时库是长期存活的，
+// 没有「关库之后还有人写」这个场景。所以这里自己管目录、清理失败只当没发生
+// ——临时目录由系统回收，而假红会淹掉真正的失败信号。
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := openDB(filepath.Join(t.TempDir(), "test.db"))
+	dir, err := os.MkdirTemp("", "moss-test-*")
 	if err != nil {
+		t.Fatalf("创建临时目录失败: %v", err)
+	}
+	db, err := openDB(filepath.Join(dir, "test.db"))
+	if err != nil {
+		os.RemoveAll(dir)
 		t.Fatalf("打开测试数据库失败: %v", err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() {
+		db.Close()
+		os.RemoveAll(dir) // 失败不报错，理由见上
+	})
 	return db
 }

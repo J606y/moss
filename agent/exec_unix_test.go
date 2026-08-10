@@ -17,18 +17,20 @@ import (
 // 用「过滤掉」而不是「相信上游」，是因为 jobID 的字母表将来可能变，
 // 而这里出问题的表现是「所有命令都跑不了」，代价太大。
 func TestScopeUnitSanitizes(t *testing.T) {
+	const prefix = "moss-exec-" // 与 scopeUnit 里的前缀保持一致，横线本身是合法单元名字符
 	cases := []struct{ in, want string }{
-		{"job_AbC123", "moss-execjobAbC123"},
-		{"", "moss-exec"},
-		{"a/b c;d`e$f", "moss-execabcdef"},
-		{"中文任务", "moss-exec"},
+		{"job_AbC123", prefix + "jobAbC123"},
+		{"", prefix},
+		{"a/b c;d`e$f", prefix + "abcdef"},
+		{"中文任务", prefix},
 	}
 	for _, c := range cases {
 		got := scopeUnit(c.in)
 		if got != c.want {
 			t.Errorf("scopeUnit(%q) = %q，期望 %q", c.in, got, c.want)
 		}
-		for _, r := range strings.TrimPrefix(got, "moss-exec") {
+		// 前缀之后只允许字母数字：ID 里的任何字符都不该原样带进单元名
+		for _, r := range strings.TrimPrefix(got, prefix) {
 			ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
 			if !ok {
 				t.Errorf("scopeUnit(%q) 产出了非法字符 %q", c.in, r)
