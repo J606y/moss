@@ -154,9 +154,11 @@ func TestExecEscapedChildReleasesSlot(t *testing.T) {
 		}
 
 		// 核心断言：并发槽必须回落。不回落的话第 5 轮会被「并发执行数已达上限」拒绝。
-		if got := runningCount(r); got != 0 {
-			t.Fatalf("第 %d 轮结束后并发槽未释放，running=%d", i, got)
-		}
+		//
+		// 必须等而不能立刻查：终结消息是在 run() **内部**发出的，
+		// 而 defer r.done() 要等 run 返回才执行——收到 Done 的那一刻，
+		// 槽通常还没还回来。直接断言会变成一条看心情的用例。
+		waitSlotReleased(t, r, 5*time.Second, i)
 	}
 }
 
@@ -165,6 +167,24 @@ func runningCount(r *execRunner) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.running
+}
+
+// waitSlotReleased 等并发槽回落到 0，超时即失败。
+//
+// 「等一小会儿」与「永远等不到」的区别正是这个 bug 的全部：卡住的话槽永不回落，
+// 几秒的宽限足以区分两者，而瞬时断言只会在收到终结消息与 defer 执行之间的
+// 那几微秒里随机翻车。
+func waitSlotReleased(t *testing.T, r *execRunner, within time.Duration, round int) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if runningCount(r) == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("第 %d 轮结束后并发槽在 %v 内未释放，running=%d —— 逃逸子进程把执行槽永久占住了",
+		round, within, runningCount(r))
 }
 
 func fileSize(t *testing.T, path string) int64 {
