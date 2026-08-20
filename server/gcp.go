@@ -304,33 +304,55 @@ func gcpDue(st *gcpState, cfg gcpConfig, now time.Time) (due, giveUp bool) {
 
 /* ---------- 管理接口 ---------- */
 
-type gcpSettingsView struct {
-	Configured  bool   `json:"configured"`
-	ClientEmail string `json:"clientEmail"`
+// gcpCredentialView 凭证的对外视图。**没有 sa_json 字段，也不该有**：
+// 私钥一旦回显就等于把开关机器的权限交给了任何能打开后台页面的人。
+type gcpCredentialView struct {
+	ID          string `json:"id"`
 	ProjectID   string `json:"projectId"`
-	AutoOn      bool   `json:"autoOn"`
-	Delay       int    `json:"delay"`
-	Cooldown    int    `json:"cooldown"`
-	MaxTries    int    `json:"maxTries"`
+	ClientEmail string `json:"clientEmail"`
+	ServerCount int    `json:"serverCount"` // 绑定本凭证且已开启自动开机的节点数
+	CreatedAt   int64  `json:"createdAt"`
+	// Decryptable 为 false 表示密文还在但解不开（主密钥变更/secret.key 丢失）。
+	// 单凭证时代这种情况只能显示成「未配置」，会诱导用户重填一遍，
+	// 而重填就用新密钥盖掉了原本还救得回来的密文。
+	Decryptable bool `json:"decryptable"`
 }
 
-// handleGetGCP 返回配置概要，私钥不回显（SA 凭证能开关机器，仅展示 email/project）。
+type gcpSettingsView struct {
+	Credentials []gcpCredentialView `json:"credentials"`
+	// UnboundCount 已开启自动开机却没绑任何凭证的节点数，>0 时前端出警示。
+	UnboundCount int  `json:"unboundCount"`
+	AutoOn       bool `json:"autoOn"`
+	Delay        int  `json:"delay"`
+	Cooldown     int  `json:"cooldown"`
+	MaxTries     int  `json:"maxTries"`
+}
+
+// handleGetGCP 返回全局参数与凭证列表，私钥不回显。
 func (s *App) handleGetGCP(w http.ResponseWriter, r *http.Request) {
 	cfg := loadGCPConfig(s.db)
-	v := gcpSettingsView{AutoOn: cfg.AutoOn, Delay: cfg.Delay, Cooldown: cfg.Cooldown, MaxTries: cfg.MaxTries}
-	raw, err := decryptSecretValue(getSetting(s.db, keyGCPSAJSON, ""))
+	v := gcpSettingsView{
+		Credentials: []gcpCredentialView{},
+		AutoOn:      cfg.AutoOn, Delay: cfg.Delay, Cooldown: cfg.Cooldown, MaxTries: cfg.MaxTries,
+	}
+	creds, err := listGCPCredentials(s.db)
 	if err != nil {
-		// 凭证仍在库里，只是解不开。这条日志是运维区分「密钥变了」和「没配过」的唯一线索：
-		// 视图本身只能显示未配置，照着未配置去重填会用新密钥盖掉还救得回来的密文。
-		log.Printf("读取 GCP 凭证失败: %v", err)
+		log.Printf("列出 GCP 凭证失败: %v", err)
+		writeErr(w, 500, "内部错误")
+		return
 	}
-	if strings.TrimSpace(raw) != "" {
-		v.Configured = true
-		if sa, _, err := parseGCPSA(raw); err == nil {
-			v.ClientEmail = sa.ClientEmail
-			v.ProjectID = sa.ProjectID
+	for _, c := range creds {
+		raw, err := decryptSecretValue(c.SaJSON)
+		if err != nil {
+			log.Printf("GCP 凭证 %s（%s）解密失败: %v", c.ID, c.ClientEmail, err)
 		}
+		v.Credentials = append(v.Credentials, gcpCredentialView{
+			ID: c.ID, ProjectID: c.ProjectID, ClientEmail: c.ClientEmail,
+			ServerCount: c.ServerCount, CreatedAt: c.CreatedAt,
+			Decryptable: err == nil && strings.TrimSpace(raw) != "",
+		})
 	}
+	s.db.QueryRow(`SELECT COUNT(*) FROM servers WHERE gcp_enabled = 1 AND gcp_cred_id = ''`).Scan(&v.UnboundCount)
 	writeJSON(w, 200, v)
 }
 
@@ -347,22 +369,13 @@ func (s *App) handlePutGCP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "请求格式错误")
 		return
 	}
-	if f.ClearSa {
-		setSetting(s.db, keyGCPSAJSON, "")
-	} else if sa := strings.TrimSpace(f.SaJSON); sa != "" {
-		if _, _, err := parseGCPSA(sa); err != nil {
-			writeErr(w, 400, "凭证无效: "+err.Error())
-			return
-		}
-		enc, err := encryptSecret(sa) // 私钥加密落库
-		if err != nil {
-			// 加密不成就不落库：明文入库看不出异常，只会让私钥悄悄裸奔在数据库里。
-			log.Printf("加密 GCP 凭证失败: %v", err)
-			writeErr(w, 500, "凭证加密失败，未保存，请检查服务器状态后重试")
-			return
-		}
-		setSetting(s.db, keyGCPSAJSON, enc)
-	} // 留空且未清除 = 保留旧凭证
+	// 凭证已改为多份，由 /api/admin/gcp/credentials 管理。这里必须显式报错：
+	// 悄悄忽略一次私钥写入，调用方（缓存的旧页面、别人的脚本）会拿着 200 以为存好了，
+	// 而实际上凭证从未落库——静默吞掉写密钥是最坏的一种「兼容」。
+	if strings.TrimSpace(f.SaJSON) != "" || f.ClearSa {
+		writeErr(w, 400, "凭证管理已迁移至 /api/admin/gcp/credentials（面板支持多份凭证），请刷新页面后重试")
+		return
+	}
 	on := "0"
 	if f.AutoOn {
 		on = "1"
@@ -375,17 +388,176 @@ func (s *App) handlePutGCP(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
-// handleTestGCP 用当前保存的凭证真实换一次 access token，验证凭证可用。
-func (s *App) handleTestGCP(w http.ResponseWriter, r *http.Request) {
-	raw, err := decryptSecretValue(getSetting(s.db, keyGCPSAJSON, ""))
+// handleAddGCPCredential 新增一份 Service Account 凭证。
+func (s *App) handleAddGCPCredential(w http.ResponseWriter, r *http.Request) {
+	var f struct {
+		SaJSON string `json:"saJson"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&f); err != nil {
+		writeErr(w, 400, "请求格式错误")
+		return
+	}
+	raw := strings.TrimSpace(f.SaJSON)
+	if raw == "" {
+		writeErr(w, 400, "请粘贴 Service Account JSON 密钥")
+		return
+	}
+	sa, _, err := parseGCPSA(raw)
+	if err != nil {
+		writeErr(w, 400, "凭证无效: "+err.Error())
+		return
+	}
+	// 先按邮箱查重，别等唯一索引把 "UNIQUE constraint failed" 甩到用户脸上。
+	var dup string
+	if err := s.db.QueryRow(
+		`SELECT id FROM gcp_credentials WHERE client_email = ?`, sa.ClientEmail).Scan(&dup); err == nil {
+		writeErr(w, 409, fmt.Sprintf("该 Service Account（%s）已在凭证列表中；如需更换密钥，请先删除旧凭证再添加", sa.ClientEmail))
+		return
+	}
+	enc, err := encryptSecret(raw)
+	if err != nil {
+		// 加密不成就不落库：明文入库看不出异常，只会让私钥悄悄裸奔在数据库里。
+		log.Printf("加密 GCP 凭证失败: %v", err)
+		writeErr(w, 500, "凭证加密失败，未保存，请检查服务器状态后重试")
+		return
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		log.Printf("handleAddGCPCredential begin: %v", err)
+		writeErr(w, 500, "内部错误")
+		return
+	}
+	defer tx.Rollback()
+
+	// 从「只有一份」变成「不止一份」的这一刻，是唯一能安全推断未绑定节点归属的时机。
+	//
+	// 未绑定节点平时靠 resolveGCPCredID 的「全场只有一份就用那份」活着。一旦加进第二份，
+	// 这条推断立刻失效，它们会集体停止守护——而凭证解析失败走的是 gcpStartAttempt 里
+	// cli==nil 那条不发 Telegram 的分支，用户唯一的线索是后台按钮上的一行 tooltip。
+	// 所以在这里把它们显式钉到原来那份凭证上，前提消失之前先把账认掉。
+	var n int
+	var only string
+	if err := tx.QueryRow(`SELECT COUNT(*), COALESCE(MIN(id), '') FROM gcp_credentials`).Scan(&n, &only); err != nil {
+		log.Printf("handleAddGCPCredential count: %v", err)
+		writeErr(w, 500, "内部错误")
+		return
+	}
+	if n == 1 {
+		if _, err := tx.Exec(`UPDATE servers SET gcp_cred_id = ? WHERE gcp_cred_id = ''`, only); err != nil {
+			log.Printf("handleAddGCPCredential 回填绑定: %v", err)
+			writeErr(w, 500, "内部错误")
+			return
+		}
+	}
+	id := randString(8)
+	if _, err := tx.Exec(
+		`INSERT INTO gcp_credentials(id, project_id, client_email, sa_json, created_at) VALUES(?, ?, ?, ?, ?)`,
+		id, sa.ProjectID, sa.ClientEmail, enc, time.Now().Unix()); err != nil {
+		// 查重与插入之间被另一个请求抢先时唯一索引兜底，仍给人话。
+		if strings.Contains(err.Error(), "UNIQUE") {
+			writeErr(w, 409, fmt.Sprintf("该 Service Account（%s）已在凭证列表中", sa.ClientEmail))
+			return
+		}
+		log.Printf("handleAddGCPCredential insert: %v", err)
+		writeErr(w, 500, "内部错误")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("handleAddGCPCredential commit: %v", err)
+		writeErr(w, 500, "内部错误")
+		return
+	}
+	s.notifier.Reload()
+	writeJSON(w, 200, map[string]any{"ok": true, "id": id, "clientEmail": sa.ClientEmail, "projectId": sa.ProjectID})
+}
+
+// handleDeleteGCPCredential 删除一份凭证。
+//
+// 占用判定只看「已开启自动开机」的节点，不看全部绑定节点。这不是宽松，是留出口：
+// 没有「更换密钥」按钮 + client_email 唯一索引，如果按全部绑定节点判定，
+// 那么「只剩一份凭证且密钥被 GCP 吊销」时，新的加不进（邮箱重复）、旧的删不掉（有节点绑着），
+// 用户被彻底锁死。按已启用判定后，关掉那几台的开关就能删旧加新再重选。
+func (s *App) handleDeleteGCPCredential(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	cred, err := loadGCPCredential(s.db, id)
+	if err != nil {
+		writeErr(w, 404, "凭证不存在")
+		return
+	}
+	rows, err := s.db.Query(
+		`SELECT name FROM servers WHERE gcp_cred_id = ? AND gcp_enabled = 1 ORDER BY sort, created_at`, id)
+	if err != nil {
+		log.Printf("handleDeleteGCPCredential query: %v", err)
+		writeErr(w, 500, "内部错误")
+		return
+	}
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err == nil {
+			names = append(names, name)
+		}
+	}
+	rows.Close()
+	if len(names) > 0 {
+		shown := names
+		suffix := ""
+		if len(shown) > 5 {
+			shown, suffix = shown[:5], fmt.Sprintf(" 等 %d 台", len(names))
+		}
+		writeErr(w, 409, fmt.Sprintf("%s 正在被 %d 台节点使用（%s%s），请先把它们改绑到其他凭证，或关闭这些节点的 GCP 自动开机",
+			cred.ClientEmail, len(names), strings.Join(shown, "、"), suffix))
+		return
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		log.Printf("handleDeleteGCPCredential begin: %v", err)
+		writeErr(w, 500, "内部错误")
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM gcp_credentials WHERE id = ?`, id); err != nil {
+		log.Printf("handleDeleteGCPCredential delete: %v", err)
+		writeErr(w, 500, "内部错误")
+		return
+	}
+	// 关着开关但绑着它的节点在这里解绑，不留悬空引用——
+	// 悬空 id 在 resolveGCPCredID 那边是硬错误，留着只会让用户下次打开开关时莫名其妙。
+	if _, err := tx.Exec(`UPDATE servers SET gcp_cred_id = '' WHERE gcp_cred_id = ?`, id); err != nil {
+		log.Printf("handleDeleteGCPCredential 解绑: %v", err)
+		writeErr(w, 500, "内部错误")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("handleDeleteGCPCredential commit: %v", err)
+		writeErr(w, 500, "内部错误")
+		return
+	}
+	s.notifier.Reload()
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+// handleTestGCPCredential 用指定凭证真实换一次 access token，验证其可用。
+//
+// 直接建客户端而不走 notifier 的缓存：「测试」这个动作必须是一次真实往返，
+// 拿缓存里的旧 token 说「连接成功」，正是用户点这个按钮时最不想要的答案。
+func (s *App) handleTestGCPCredential(w http.ResponseWriter, r *http.Request) {
+	cred, err := loadGCPCredential(s.db, r.PathValue("id"))
+	if err != nil {
+		writeErr(w, 404, "凭证不存在")
+		return
+	}
+	raw, err := decryptSecretValue(cred.SaJSON)
 	if err != nil {
 		// 「测试」正是运维用来定位问题的入口，这里必须说出真实原因，
 		// 而不是把解不开伪装成没填、让人去重填一遍。
-		writeErr(w, 500, "已保存的凭证无法解密，主密钥可能已变更；请恢复原 MOSS_SECRET_KEY 或 secret.key，或重新粘贴凭证")
+		writeErr(w, 500, "该凭证无法解密，主密钥可能已变更；请恢复原 MOSS_SECRET_KEY 或 secret.key，或删除后重新添加")
 		return
 	}
 	if strings.TrimSpace(raw) == "" {
-		writeErr(w, 400, "请先粘贴并保存 Service Account 凭证")
+		writeErr(w, 400, "凭证内容为空，请删除后重新添加")
 		return
 	}
 	cli, err := newGCPClient(raw)
@@ -404,22 +576,19 @@ func (s *App) handleTestGCP(w http.ResponseWriter, r *http.Request) {
 
 // handleGCPManualStart 手动立即开机：忽略冷却、不消耗自动尝试次数。
 func (s *App) handleGCPManualStart(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	var (
-		name, project, zone, instance string
-		enabled                       bool
-	)
+	t := gcpTarget{id: r.PathValue("id")}
+	var enabled bool
 	if err := s.db.QueryRow(
-		`SELECT name, gcp_enabled, gcp_project, gcp_zone, gcp_instance FROM servers WHERE id = ?`, id).
-		Scan(&name, &enabled, &project, &zone, &instance); err != nil {
+		`SELECT name, gcp_enabled, gcp_cred_id, gcp_project, gcp_zone, gcp_instance FROM servers WHERE id = ?`, t.id).
+		Scan(&t.name, &enabled, &t.credID, &t.project, &t.zone, &t.instance); err != nil {
 		writeErr(w, 404, "服务器不存在")
 		return
 	}
-	if !enabled || zone == "" || instance == "" {
+	if !enabled || t.zone == "" || t.instance == "" {
 		writeErr(w, 400, "该服务器未启用 GCP 自动开机或未填写 zone/实例名")
 		return
 	}
-	status, started, err := s.notifier.ManualStartGCP(id, project, zone, instance)
+	status, started, err := s.notifier.ManualStartGCP(t)
 	if errors.Is(err, errGCPBusy) {
 		writeErr(w, 409, err.Error())
 		return

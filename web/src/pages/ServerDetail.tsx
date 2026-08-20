@@ -60,9 +60,12 @@ function GaugeCard({
   const p = clampPct(pct)
   return (
     <div className={`${card} p-4`}>
-      <div className="flex items-baseline justify-between">
+      {/* 具体用量在窄屏同样要显示：只给一个百分比，等于让人在手机上没法判断
+          「还剩多少空间」——而这正是点进详情页要看的东西。窄屏时卡片是单列全宽，
+          横向空间反而比桌面的四列网格更充裕，放得下。 */}
+      <div className="flex items-baseline justify-between gap-2">
         <span className="text-xs text-zinc-500">{title}</span>
-        <span className="hidden text-xs tabular-nums text-zinc-400 sm:inline">{detail}</span>
+        <span className="truncate text-xs tabular-nums text-zinc-400">{detail}</span>
       </div>
       <div className="mt-1 text-lg font-semibold tabular-nums">{fmtPercent(p)}</div>
       <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-zinc-500/15 dark:bg-white/10">
@@ -270,8 +273,9 @@ export default function ServerDetail() {
 
   return (
     <div className="space-y-4">
-      {/* 标题栏：桌面单行（地区行内、时长靠右）；窄屏时「地区 · 在线时长」紧跟在线徽章之后，
-          不带 ml-auto，换行时从左侧自然续排，避免被甩到行尾两端散架 */}
+      {/* 标题栏：桌面单行（地区行内、时长靠右）；窄屏「地区 · 在线时长」靠右，
+          与桌面端时长的位置一致——顶格排在标题左下方时，它比标题本身还靠外，
+          像是从标题里掉出来的一截 */}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <Link
           to="/"
@@ -283,7 +287,7 @@ export default function ServerDetail() {
         <h1 className="text-xl font-bold">{server.name}</h1>
         <StatusPill online={server.online} />
         {(server.region || server.note || server.online) && (
-          <span className="text-sm tabular-nums text-zinc-500 sm:hidden">
+          <span className="ml-auto text-sm tabular-nums text-zinc-500 sm:hidden">
             {[
               [server.region, server.note].filter(Boolean).join(' · '),
               server.online ? `在线 ${fmtUptime(server.uptimeSec)}` : '',

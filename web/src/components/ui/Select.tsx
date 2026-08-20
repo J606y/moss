@@ -18,8 +18,7 @@ const GAP = 4
  * 这两种情况在本项目里都真实出现过。挂到 body 之后，使用者不必再关心
  * 自己被放在什么容器里——这与 Modal 的处理是同一个理由。
  *
- * 代价是位置要自己算：打开时按触发按钮的位置定位，页面一滚就关掉面板。
- * 跟随滚动实时重算也能做，但滚动时下拉还悬在那里本身就不像话，关掉更干脆。
+ * 代价是位置要自己算：打开时按触发按钮定位，之后跟着它走。
  */
 export function Select<T extends string>({
   value,
@@ -39,7 +38,12 @@ export function Select<T extends string>({
     const el = ref.current
     if (!el) return
     const r = el.getBoundingClientRect()
-    setRect({ top: r.bottom + GAP, left: r.left, width: r.width })
+    // 同值不重设：面板自身内部滚动也会触发重定位，位置没变就别白渲染一次。
+    setRect((prev) =>
+      prev && prev.top === r.bottom + GAP && prev.left === r.left && prev.width === r.width
+        ? prev
+        : { top: r.bottom + GAP, left: r.left, width: r.width },
+    )
   }, [])
 
   // 位置必须在浏览器绘制前算好，否则面板会先闪现在左上角再跳到位。
@@ -55,17 +59,37 @@ export function Select<T extends string>({
       if (ref.current?.contains(t) || panelRef.current?.contains(t)) return
       setOpen(false)
     }
-    const close = () => setOpen(false)
+    // 滚动时跟着触发按钮走，而不是关掉下拉。
+    //
+    // 原来是一滚就关：鼠标停在下拉上随手滚一格，选项就没了——而"滚动着找选项"
+    // 恰恰是面对一列机器名时最自然的动作，选不中任何东西。
+    // 只有触发按钮整个滚出视口才关闭：那时面板悬在半空，已经指不到任何东西了。
+    let frame = 0
+    const follow = () => {
+      if (frame) return // 每帧至多重算一次，滚动时不至于抖
+      frame = requestAnimationFrame(() => {
+        frame = 0
+        const el = ref.current
+        if (!el) return
+        const r = el.getBoundingClientRect()
+        if (r.bottom < 0 || r.top > window.innerHeight) {
+          setOpen(false)
+          return
+        }
+        place()
+      })
+    }
     document.addEventListener('mousedown', onDoc)
     // capture: true —— 内层可滚动容器的滚动不冒泡到 window，不捕获就漏掉
-    window.addEventListener('scroll', close, true)
-    window.addEventListener('resize', close)
+    window.addEventListener('scroll', follow, true)
+    window.addEventListener('resize', follow)
     return () => {
       document.removeEventListener('mousedown', onDoc)
-      window.removeEventListener('scroll', close, true)
-      window.removeEventListener('resize', close)
+      window.removeEventListener('scroll', follow, true)
+      window.removeEventListener('resize', follow)
+      if (frame) cancelAnimationFrame(frame)
     }
-  }, [open])
+  }, [open, place])
 
   const current = options.find((o) => o.value === value)
 

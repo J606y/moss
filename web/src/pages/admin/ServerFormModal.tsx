@@ -1,6 +1,7 @@
 import { useState } from 'react'
-import { Modal, Toggle } from '../../components/ui'
+import { Modal, Select, Toggle } from '../../components/ui'
 import { btnGhost, btnPrimary, formLabel, input } from '../../ui'
+import type { GcpCredential } from '../../types'
 
 export interface ServerFormData {
   name: string
@@ -10,6 +11,7 @@ export interface ServerFormData {
   expireAt: string
   note: string
   gcpEnabled: boolean
+  gcpCredId: string
   gcpProject: string
   gcpZone: string
   gcpInstance: string
@@ -17,17 +19,20 @@ export interface ServerFormData {
 
 export const emptyServerForm: ServerFormData = {
   name: '', group: '', region: '', flag: '', expireAt: '', note: '',
-  gcpEnabled: false, gcpProject: '', gcpZone: '', gcpInstance: '',
+  gcpEnabled: false, gcpCredId: '', gcpProject: '', gcpZone: '', gcpInstance: '',
 }
 
 export function ServerFormModal({
   title,
   init,
+  creds,
   onClose,
   onSubmit,
 }: {
   title: string
   init: ServerFormData
+  /** GCP 凭证列表；null = 仍在加载，用于避免一进来就闪一下「尚未添加凭证」 */
+  creds: GcpCredential[] | null
   onClose: () => void
   onSubmit: (f: ServerFormData) => Promise<void>
 }) {
@@ -35,6 +40,15 @@ export function ServerFormModal({
   const [busy, setBusy] = useState(false)
   const set = (k: keyof ServerFormData) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setF((prev) => ({ ...prev, [k]: e.target.value }))
+
+  const credOptions = [
+    { value: '', label: '请选择凭证' },
+    ...(creds ?? []).map((c) => ({ value: c.id, label: c.projectId })),
+    // 绑定的凭证已被删除时补一个占位项：否则 Select 会把裸 id 当标签显示出来。
+    ...(f.gcpCredId && creds && !creds.some((c) => c.id === f.gcpCredId)
+      ? [{ value: f.gcpCredId, label: '（凭证已删除，请重新选择）' }]
+      : []),
+  ]
 
   return (
     <Modal title={title} onClose={onClose}>
@@ -72,10 +86,30 @@ export function ServerFormModal({
           <Toggle
             checked={f.gcpEnabled}
             label="GCP 自动开机（Spot 实例被抢占后自动拉起）"
-            onChange={(v) => setF((prev) => ({ ...prev, gcpEnabled: v }))}
+            onChange={(v) =>
+              setF((prev) => ({
+                ...prev,
+                gcpEnabled: v,
+                // 只有一份凭证就没什么可选的，打开开关时直接替用户选上
+                gcpCredId: v && !prev.gcpCredId && creds?.length === 1 ? creds[0].id : prev.gcpCredId,
+              }))
+            }
           />
           {f.gcpEnabled && (
             <>
+              <div>
+                <label className={formLabel}>凭证 *</label>
+                <Select
+                  value={f.gcpCredId}
+                  options={credOptions}
+                  onChange={(v) => setF((prev) => ({ ...prev, gcpCredId: v }))}
+                />
+                {creds?.length === 0 && (
+                  <p className="mt-1 text-xs text-amber-500/90">
+                    尚未添加任何凭证，请先到「GCP 守护」页添加。
+                  </p>
+                )}
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className={formLabel}>Zone *</label>
@@ -88,10 +122,11 @@ export function ServerFormModal({
               </div>
               <div>
                 <label className={formLabel}>项目 ID（可选）</label>
-                <input className={input} placeholder="留空使用凭证中的 project_id" value={f.gcpProject} onChange={set('gcpProject')} />
+                <input className={input} placeholder="留空使用所选凭证的 project_id" value={f.gcpProject} onChange={set('gcpProject')} />
               </div>
               <p className="text-xs text-zinc-400">
-                需先在「GCP 守护」页配置 Service Account 凭证并开启总开关；人为关机前请先关闭此开关，否则会被自动拉起。
+                凭证决定用哪个 GCP 账号开机；同一账号下实例在别的项目时，才需要填项目 ID。
+                需在「GCP 守护」页开启总开关；人为关机前请先关闭此开关，否则会被自动拉起。
               </p>
             </>
           )}
@@ -103,7 +138,11 @@ export function ServerFormModal({
           </button>
           <button
             className={btnPrimary}
-            disabled={busy || !f.name.trim() || (f.gcpEnabled && (!f.gcpZone.trim() || !f.gcpInstance.trim()))}
+            disabled={
+              busy ||
+              !f.name.trim() ||
+              (f.gcpEnabled && (!f.gcpCredId || !f.gcpZone.trim() || !f.gcpInstance.trim()))
+            }
             onClick={async () => {
               setBusy(true)
               try {

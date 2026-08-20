@@ -32,13 +32,19 @@ export function TasksTab({ toast }: { toast: Toast }) {
   }, [toast, setTasks])
   useEffect(load, [load])
 
-  const serverNames = (ids: string) =>
-    ids
-      ? ids
-          .split(',')
-          .map((id) => servers.find((s) => s.id === id)?.name ?? id)
-          .join('、')
-      : '全部服务器'
+  /**
+   * 「应用于」列的展示。
+   *
+   * 不把机器名全列出来：八台机器就是四行文字，那一行的高度是相邻行的四倍，
+   * 整张表参差不齐，而挨个读完这串名字本来也不是在这里要做的事。
+   * 超过两台只报数量，完整名单挂在 title 上；要改选哪几台去编辑弹窗。
+   */
+  const serverScope = (ids: string) => {
+    if (!ids) return { text: '全部服务器', title: '全部服务器' }
+    const names = ids.split(',').map((id) => servers.find((s) => s.id === id)?.name ?? id)
+    const full = names.join('、')
+    return { text: names.length > 2 ? `${names.length} 台服务器` : full, title: full }
+  }
 
   // 拖拽重排：把 fromId 移动到 toId 的位置，乐观更新后持久化 sort
   const { dragId, setDragId, reorder } = useReorder<PingTask, number>({
@@ -124,7 +130,9 @@ export function TasksTab({ toast }: { toast: Toast }) {
                 </td>
                 <td className={`${td} tabular-nums text-zinc-500`}>{t.target}</td>
                 <td className={`${td} tabular-nums text-zinc-500`}>{t.interval}s</td>
-                <td className={`${td} max-w-[220px] !whitespace-normal text-zinc-500`}>{serverNames(t.serverId)}</td>
+                <td className={`${td} max-w-[220px] truncate text-zinc-500`} title={serverScope(t.serverId).title}>
+                  {serverScope(t.serverId).text}
+                </td>
                 <td className={td}>
                   <Switch on={t.enabled} onChange={(v) => toggle(t, v)} />
                 </td>
@@ -171,7 +179,8 @@ export function TasksTab({ toast }: { toast: Toast }) {
               </div>
               <div className="flex items-start justify-between gap-3">
                 <dt className="shrink-0 text-zinc-400">应用于</dt>
-                <dd className="text-right text-zinc-600 dark:text-zinc-300">{serverNames(t.serverId)}</dd>
+                {/* 手机上没有 hover，看不了 title；要确认是哪几台就去编辑弹窗 */}
+                <dd className="text-right text-zinc-600 dark:text-zinc-300">{serverScope(t.serverId).text}</dd>
               </div>
             </dl>
             <div className="flex justify-end gap-0.5 border-t border-zinc-500/10 pt-2 dark:border-white/5">

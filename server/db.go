@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS servers (
 	gcp_enabled INTEGER NOT NULL DEFAULT 0,
 	gcp_project TEXT NOT NULL DEFAULT '',
 	gcp_zone TEXT NOT NULL DEFAULT '',
-	gcp_instance TEXT NOT NULL DEFAULT ''
+	gcp_instance TEXT NOT NULL DEFAULT '',
+	gcp_cred_id TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS history (
 	server_id TEXT NOT NULL,
@@ -107,6 +108,20 @@ CREATE TABLE IF NOT EXISTS api_keys (
 	revoked INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
+-- GCP Spot 自动开机的 Service Account 凭证，可并存多份（多账号），每台节点绑一份。
+-- project_id / client_email 是从 sa_json 里解析出来后冗余存下的：列表页要显示它们，
+-- 而解密可能失败（主密钥变更），那时仍需把这条凭证如实列出来而不是伪装成「未配置」。
+-- sa_json 存密文（encryptSecret），任何接口都不回显。
+CREATE TABLE IF NOT EXISTS gcp_credentials (
+	id TEXT PRIMARY KEY,
+	project_id TEXT NOT NULL,
+	client_email TEXT NOT NULL,
+	sa_json TEXT NOT NULL,
+	created_at INTEGER NOT NULL
+);
+-- 同一个 SA 只该存一份：client_email 形如 name@project.iam.gserviceaccount.com，
+-- 项目已嵌在里面，全局唯一，不存在跨项目重名。重复添加只会是误操作。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gcp_cred_email ON gcp_credentials(client_email);
 `
 
 // pruneExecAudit 清理执行审计：按保留天数与条数上限，两条规则取先触发者。
@@ -185,12 +200,14 @@ func openDB(path string) (*sql.DB, error) {
 	if err := ensureColumn(db, "servers", "expire_notified", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
-	// GCP Spot 自动开机：project 留空时用 SA JSON 里的 project_id
+	// GCP Spot 自动开机：project 留空时用所绑凭证 SA JSON 里的 project_id。
+	// gcp_cred_id 指向 gcp_credentials.id，老库由 migrateGCPCredentials 一次性回填。
 	for col, def := range map[string]string{
 		"gcp_enabled":  "INTEGER NOT NULL DEFAULT 0",
 		"gcp_project":  "TEXT NOT NULL DEFAULT ''",
 		"gcp_zone":     "TEXT NOT NULL DEFAULT ''",
 		"gcp_instance": "TEXT NOT NULL DEFAULT ''",
+		"gcp_cred_id":  "TEXT NOT NULL DEFAULT ''",
 	} {
 		if err := ensureColumn(db, "servers", col, def); err != nil {
 			return nil, err

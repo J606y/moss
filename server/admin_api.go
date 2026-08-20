@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -43,6 +44,7 @@ type adminServer struct {
 
 	// GCP Spot 自动开机配置与运行态（运行态为内存值，面板重启归零）
 	GcpEnabled  bool   `json:"gcpEnabled"`
+	GcpCredID   string `json:"gcpCredId"` // 用哪份 Service Account 凭证
 	GcpProject  string `json:"gcpProject"`
 	GcpZone     string `json:"gcpZone"`
 	GcpInstance string `json:"gcpInstance"`
@@ -59,7 +61,8 @@ type serverForm struct {
 	Note        string `json:"note"`
 	ExpireAt    string `json:"expireAt"`
 	GcpEnabled  bool   `json:"gcpEnabled"`
-	GcpProject  string `json:"gcpProject"` // 留空 = 用 SA JSON 的 project_id
+	GcpCredID   string `json:"gcpCredId"`  // 空 = 由后端补齐（仅存一份凭证时）
+	GcpProject  string `json:"gcpProject"` // 留空 = 用所绑凭证 SA JSON 的 project_id
 	GcpZone     string `json:"gcpZone"`
 	GcpInstance string `json:"gcpInstance"`
 }
@@ -67,7 +70,7 @@ type serverForm struct {
 func (s *App) handleAdminServers(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(
 		`SELECT id, name, grp, region, flag, auto_flag, note, expire_at, token, ip, ipv6, last_seen, created_at,
-		        gcp_enabled, gcp_project, gcp_zone, gcp_instance, agent_version, os
+		        gcp_enabled, gcp_cred_id, gcp_project, gcp_zone, gcp_instance, agent_version, os
 		 FROM servers ORDER BY sort, created_at`)
 	if err != nil {
 		log.Printf("handleAdminServers query: %v", err)
@@ -83,7 +86,7 @@ func (s *App) handleAdminServers(w http.ResponseWriter, r *http.Request) {
 		var agentOS string
 		if err := rows.Scan(&a.ID, &a.Name, &a.Group, &a.Region, &a.Flag, &a.AutoFlag, &a.Note,
 			&a.ExpireAt, &a.Token, &a.IP, &a.IPv6, &a.LastSeen, &a.CreatedAt,
-			&a.GcpEnabled, &a.GcpProject, &a.GcpZone, &a.GcpInstance, &a.AgentVersion, &agentOS); err != nil {
+			&a.GcpEnabled, &a.GcpCredID, &a.GcpProject, &a.GcpZone, &a.GcpInstance, &a.AgentVersion, &agentOS); err != nil {
 			log.Printf("handleAdminServers scan: %v", err)
 			writeErr(w, 500, "内部错误")
 			return
@@ -98,13 +101,37 @@ func (s *App) handleAdminServers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 
-// normalizeGCP 整理并校验表单里的 GCP 字段（启用时 zone/实例名必填），返回错误提示，空串为通过。
-func normalizeGCP(f *serverForm) string {
+// normalizeGCP 整理并校验表单里的 GCP 字段（启用时 zone/实例名与凭证必填），
+// 返回错误提示，空串为通过。
+//
+// 凭证在这里定死而不是留到运行时再解析：写入侧堵住「启用了却没绑凭证」这个状态，
+// 是让节点不会在用户添加第二份凭证的那一刻集体失守的前提之一
+// （另一半在 handleAddGCPCredential 里）。
+func normalizeGCP(db *sql.DB, f *serverForm) string {
+	f.GcpCredID = strings.TrimSpace(f.GcpCredID)
 	f.GcpProject = strings.TrimSpace(f.GcpProject)
 	f.GcpZone = strings.TrimSpace(f.GcpZone)
 	f.GcpInstance = strings.TrimSpace(f.GcpInstance)
-	if f.GcpEnabled && (f.GcpZone == "" || f.GcpInstance == "") {
+	if !f.GcpEnabled {
+		return ""
+	}
+	if f.GcpZone == "" || f.GcpInstance == "" {
 		return "GCP 自动开机需填写 zone 与实例名"
+	}
+	if f.GcpCredID == "" {
+		// 只有一份凭证时不为难用户，直接替他选上。
+		if only := gcpOnlyCredentialID(db); only != "" {
+			f.GcpCredID = only
+			return ""
+		}
+		if n, err := countGCPCredentials(db); err == nil && n == 0 {
+			return "尚未添加 GCP 凭证，请先到「GCP 守护」页添加"
+		}
+		return "请选择这台节点使用哪一份 GCP 凭证"
+	}
+	var got string
+	if err := db.QueryRow(`SELECT id FROM gcp_credentials WHERE id = ?`, f.GcpCredID).Scan(&got); err != nil {
+		return "所选 GCP 凭证不存在，请刷新页面后重新选择"
 	}
 	return ""
 }
@@ -118,7 +145,7 @@ func (s *App) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	if f.Group == "" {
 		f.Group = "默认"
 	}
-	if msg := normalizeGCP(&f); msg != "" {
+	if msg := normalizeGCP(s.db, &f); msg != "" {
 		writeErr(w, 400, msg)
 		return
 	}
@@ -129,10 +156,10 @@ func (s *App) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	s.db.QueryRow(`SELECT COALESCE(MAX(sort), 0) FROM servers`).Scan(&maxSort)
 	if _, err := s.db.Exec(
 		`INSERT INTO servers(id, token, name, grp, region, flag, note, expire_at, sort, created_at,
-		                     gcp_enabled, gcp_project, gcp_zone, gcp_instance)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		                     gcp_enabled, gcp_cred_id, gcp_project, gcp_zone, gcp_instance)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, token, f.Name, f.Group, f.Region, f.Flag, f.Note, f.ExpireAt, maxSort+1, time.Now().Unix(),
-		f.GcpEnabled, f.GcpProject, f.GcpZone, f.GcpInstance,
+		f.GcpEnabled, f.GcpCredID, f.GcpProject, f.GcpZone, f.GcpInstance,
 	); err != nil {
 		log.Printf("handleAddServer insert (id=%s): %v", id, err)
 		writeErr(w, 500, "内部错误")
@@ -152,15 +179,21 @@ func (s *App) handleUpdateServer(w http.ResponseWriter, r *http.Request) {
 	if f.Group == "" {
 		f.Group = "默认"
 	}
-	if msg := normalizeGCP(&f); msg != "" {
+	if msg := normalizeGCP(s.db, &f); msg != "" {
 		writeErr(w, 400, msg)
 		return
 	}
+	// 先取旧的 GCP 配置：改动过就要丢弃运行态。用户改凭证/实例名多半正是在修故障，
+	// 旧的失败计数与「已达上限、不再尝试」不该跟着新配置继续生效。
+	var old serverForm
+	s.db.QueryRow(
+		`SELECT gcp_enabled, gcp_cred_id, gcp_project, gcp_zone, gcp_instance FROM servers WHERE id=?`, id).
+		Scan(&old.GcpEnabled, &old.GcpCredID, &old.GcpProject, &old.GcpZone, &old.GcpInstance)
 	res, err := s.db.Exec(
 		`UPDATE servers SET name=?, grp=?, region=?, flag=?, note=?, expire_at=?,
-		        gcp_enabled=?, gcp_project=?, gcp_zone=?, gcp_instance=? WHERE id=?`,
+		        gcp_enabled=?, gcp_cred_id=?, gcp_project=?, gcp_zone=?, gcp_instance=? WHERE id=?`,
 		f.Name, f.Group, f.Region, f.Flag, f.Note, f.ExpireAt,
-		f.GcpEnabled, f.GcpProject, f.GcpZone, f.GcpInstance, id)
+		f.GcpEnabled, f.GcpCredID, f.GcpProject, f.GcpZone, f.GcpInstance, id)
 	if err != nil {
 		log.Printf("handleUpdateServer (id=%s): %v", id, err)
 		writeErr(w, 500, "内部错误")
@@ -169,6 +202,10 @@ func (s *App) handleUpdateServer(w http.ResponseWriter, r *http.Request) {
 	if n, _ := res.RowsAffected(); n == 0 {
 		writeErr(w, 404, "服务器不存在")
 		return
+	}
+	if old.GcpEnabled != f.GcpEnabled || old.GcpCredID != f.GcpCredID || old.GcpProject != f.GcpProject ||
+		old.GcpZone != f.GcpZone || old.GcpInstance != f.GcpInstance {
+		s.notifier.ResetGCPState(id)
 	}
 	s.hub.BroadcastMeta()
 	writeJSON(w, 200, map[string]bool{"ok": true})
@@ -183,6 +220,7 @@ func (s *App) handleDeleteServer(w http.ResponseWriter, r *http.Request) {
 	}
 	s.db.Exec(`DELETE FROM history WHERE server_id=?`, id)
 	s.db.Exec(`DELETE FROM ping_results WHERE server_id=?`, id)
+	s.notifier.ResetGCPState(id) // 不清理的话，每删一台机器就在 map 里留下一条永不回收的记录
 	s.hub.Drop(id)
 	s.hub.BroadcastMeta()
 	writeJSON(w, 200, map[string]bool{"ok": true})

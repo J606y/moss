@@ -88,6 +88,7 @@ export interface AdminServer {
   upgradeErr?: string
   // GCP Spot 自动开机配置与运行态（运行态为内存值，面板重启归零）
   gcpEnabled: boolean
+  gcpCredId: string
   gcpProject: string
   gcpZone: string
   gcpInstance: string
@@ -152,10 +153,22 @@ export interface WebhookSettings {
   secretSet: boolean
 }
 
-export interface GcpSettings {
-  configured: boolean
-  clientEmail: string
+/** 一份 Service Account 凭证。私钥永不下发，这里只有用于识别的字段。 */
+export interface GcpCredential {
+  id: string
   projectId: string
+  clientEmail: string
+  /** 绑定本凭证且已开启自动开机的节点数，为 0 才删得掉 */
+  serverCount: number
+  createdAt: number
+  /** false = 密文还在但解不开（主密钥变更），需要提示用户而不是当成未配置 */
+  decryptable: boolean
+}
+
+export interface GcpSettings {
+  credentials: GcpCredential[]
+  /** 已开启自动开机却没绑凭证的节点数 */
+  unboundCount: number
   autoOn: boolean
   delay: number
   cooldown: number

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { ArrowUpCircle, Eye, EyeOff, GripVertical, Loader2, Pencil, Play, Plus, Terminal, Trash2 } from 'lucide-react'
 import { del, get, post, put } from '../../api/client'
-import type { AdminServer } from '../../types'
+import type { AdminServer, GcpCredential, GcpSettings } from '../../types'
 import { CmdBlock, ConfirmDelete, CopyBtn, Modal, StatusPill, Switch } from '../../components/ui'
 import Flag from '../../components/Flag'
 import { errMsg, installCmds, maskIp } from '../../utils/admin'
@@ -62,6 +62,16 @@ export function ServersTab({ toast }: { toast: Toast }) {
       .catch((e) => toast(errMsg(e)))
   }, [toast, setList])
   useEffect(load, [load])
+
+  // GCP 凭证列表供编辑弹窗里的凭证下拉使用。null 表示还没拉到——
+  // 弹窗据此区分「加载中」与「一份都没有」，不然一打开就会闪一句「尚未添加凭证」。
+  // 只在本页挂载时拉一次：凭证的增删在「GCP 守护」页，换页回来自然会重拉。
+  const [creds, setCreds] = useState<GcpCredential[] | null>(null)
+  useEffect(() => {
+    get<GcpSettings>('/api/admin/gcp')
+      .then((g) => setCreds(g.credentials))
+      .catch(() => setCreds([])) // 拉不到就当没有，别把服务器管理页也卡住
+  }, [])
 
   const filtered = list.filter(
     (s) => !search || s.name.toLowerCase().includes(search.toLowerCase()) || s.region.includes(search),
@@ -129,6 +139,9 @@ export function ServersTab({ toast }: { toast: Toast }) {
 
   const gcpTitle = (s: AdminServer) => {
     let t = 'GCP 立即开机'
+    // 多凭证下「用的是哪个账号」是排查的第一个问题，直接写进 tooltip
+    const cred = creds?.find((c) => c.id === s.gcpCredId)
+    if (cred) t += ` | 凭证 ${cred.projectId}`
     if (s.gcpTries > 0) {
       t += ` | 已自动尝试 ${s.gcpTries} 次`
       if (s.gcpLastTry > 0) t += `，最近 ${new Date(s.gcpLastTry * 1000).toLocaleTimeString()}`
@@ -372,6 +385,7 @@ export function ServersTab({ toast }: { toast: Toast }) {
         <ServerFormModal
           title="添加服务器"
           init={emptyServerForm}
+          creds={creds}
           onClose={() => setModal(null)}
           onSubmit={async (f) => {
             const tempId = `tmp-${Date.now()}`
@@ -381,8 +395,9 @@ export function ServersTab({ toast }: { toast: Toast }) {
               ip: '', ipv6: '', online: false,
               // 新建的机器还没装 agent，版本与可升级性都由后端在下次拉取时填。
               agentVersion: '', targetVersion: '', upgradable: false,
-              gcpEnabled: f.gcpEnabled, gcpProject: f.gcpProject, gcpZone: f.gcpZone,
-              gcpInstance: f.gcpInstance, gcpTries: 0, gcpLastTry: 0, gcpLastErr: '',
+              gcpEnabled: f.gcpEnabled, gcpCredId: f.gcpCredId, gcpProject: f.gcpProject,
+              gcpZone: f.gcpZone, gcpInstance: f.gcpInstance,
+              gcpTries: 0, gcpLastTry: 0, gcpLastErr: '',
             }
             setModal(null)
             await mutate(
@@ -409,10 +424,12 @@ export function ServersTab({ toast }: { toast: Toast }) {
             expireAt: modal.expireAt,
             note: modal.note,
             gcpEnabled: modal.gcpEnabled,
+            gcpCredId: modal.gcpCredId,
             gcpProject: modal.gcpProject,
             gcpZone: modal.gcpZone,
             gcpInstance: modal.gcpInstance,
           }}
+          creds={creds}
           onClose={() => setModal(null)}
           onSubmit={async (f) => {
             const id = modal.id

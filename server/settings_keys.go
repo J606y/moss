@@ -44,7 +44,15 @@ const (
 	// 而猜错的后果是把更新打到别的机器上。
 	keyPanelHostServer = "panel_host_server"
 
-	keyGCPSAJSON        = "gcp_sa_json"
+	// keyGCPSAJSON 是多凭证之前的全局单份凭证，已由 migrateGCPCredentials 迁进
+	// gcp_credentials 表。保留不删：降级回旧版本仍能读到它，排障时也是原始凭证的唯一底本。
+	keyGCPSAJSON = "gcp_sa_json"
+	// keyGCPCredMigrated 上述迁移的完成标记。
+	//
+	// 必须用显式哨兵，不能拿「gcp_credentials 表为空」当判据：用户把凭证全删了之后
+	// 重启面板，旧凭证会凭空复活——一个已被主动删除的私钥重新出现在面板里。
+	keyGCPCredMigrated = "gcp_cred_migrated"
+
 	keyGCPAutoOn        = "gcp_auto_on"
 	keyGCPStartDelay    = "gcp_start_delay"
 	keyGCPStartCooldown = "gcp_start_cooldown"

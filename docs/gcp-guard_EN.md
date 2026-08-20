@@ -62,9 +62,11 @@ rm moss-sa.json
 
 In the Moss admin panel → **GCP Guardian**:
 
-1. Paste the JSON from the previous step into the credential box;
-2. Click **Save & test connection** — the panel performs a real token exchange; on success it shows the account email and project ID;
+1. Click **添加凭证** (Add credential), paste the JSON from the previous step and save. A row appears in the credential list showing its project ID and account email;
+2. Click **测试** (Test) on that row — the panel performs a real token exchange and reports the account email on success;
 3. Enable the **auto-start master switch**.
+
+With more than one GCP account, repeat step 1 for each. Credentials coexist; every node picks which one it uses.
 
 The three parameters are fine at their defaults:
 
@@ -76,14 +78,15 @@ The three parameters are fine at their defaults:
 
 ## 3. Per-node setup ("服务器" / Servers tab, edit dialog)
 
-The credential is global; each guarded node carries its own location info. On the **Servers** tab, edit the node:
+Each guarded node picks its own credential and carries its own location info. On the **Servers** tab, edit the node:
 
 1. Check **GCP auto-start**;
-2. **Zone**: the instance's zone, e.g. `asia-east2-a`. Find it in the "Zone" column of "Compute Engine → VM instances" — note it's a zone (with the `-a`/`-b` suffix), not a region;
-3. **Instance name**: the name in the **first column** of the GCP instance list, character-for-character. This is the GCP instance name, not the Moss node name;
-4. **Project ID**: leave empty to use the credential's `project_id` — correct in almost all cases (see cross-project below).
+2. **凭证** (Credential): pick the one belonging to this instance's account — the dropdown shows project IDs. With only one credential added it is selected automatically;
+3. **Zone**: the instance's zone, e.g. `asia-east2-a`. Find it in the "Zone" column of "Compute Engine → VM instances" — note it's a zone (with the `-a`/`-b` suffix), not a region;
+4. **Instance name**: the name in the **first column** of the GCP instance list, character-for-character. This is the GCP instance name, not the Moss node name;
+5. **Project ID**: leave empty to use the selected credential's `project_id` — correct in almost all cases (cross-project within one account is covered below).
 
-Repeat for every Spot instance. Instances in the same project share the one credential — nothing extra on the GCP side.
+Repeat for every Spot instance. Instances in the same project of the same account share one credential — nothing extra on the GCP side.
 
 ## 4. Verify
 
@@ -95,9 +98,15 @@ After saving, a **▶** manual-start button appears on the node row. Click it:
 
 The ▶ button works regardless of the master switch; automatic guarding requires both the master switch and the node switch to be on.
 
-## Cross-project guarding
+## Multiple GCP accounts
 
-Instances spread across multiple projects don't need another credential — grant the same Service Account access in the other project. In Cloud Shell (`OTHER` = the other project ID, `SA_PROJECT` = the project the credential belongs to):
+When nodes belong to two unrelated GCP accounts, add one credential per account on the "GCP 守护" tab, then pick the right one in each node's edit dialog. The two credentials are fully independent, tokens cached separately.
+
+This is the only way across **accounts** — the cross-project grant below requires adding the Service Account to the other project's IAM, which is usually not permitted between two independent accounts or organizations.
+
+## Cross-project guarding (within one account)
+
+Within one account, instances spread across multiple projects don't need another credential — grant the same Service Account access in the other project. In Cloud Shell (`OTHER` = the other project ID, `SA_PROJECT` = the project the credential belongs to):
 
 ```bash
 OTHER=other-project-id
@@ -129,7 +138,15 @@ Most often Spot capacity shortage in that zone (error contains `ZONE_RESOURCE_PO
 Not yet; only `TERMINATED` is handled. Resume suspended instances manually in the GCP console.
 
 **Is the credential safe?**
-It's stored in plaintext in the panel's SQLite database (a deliberate trade-off for the single-admin scenario). So: grant only the two minimal permissions, bind only the projects you need, and use a strong panel admin password. To revoke, delete the key (or the whole Service Account) in GCP Console "IAM → Service Accounts", then paste a fresh one into the panel.
+The private key is encrypted with AES-256-GCM in the panel database. The master key comes from `MOSS_SECRET_KEY`, falling back to an auto-generated `secret.key` (mode 0600) in the data directory. Once saved, no endpoint ever echoes it back. Still: grant only the two minimal permissions, bind only the projects you need, and use a strong panel admin password.
+
+> Back up `secret.key` together with the database. Restoring the database without the master key leaves the credential undecryptable — the panel says so explicitly rather than pretending it was never configured, so recover the original key instead of overwriting it with a fresh paste.
+
+**The Service Account key was revoked — how do I replace it?**
+There is no in-place key rotation. Delete and re-add: turn off the auto-start switch on every node using that credential (it can't be deleted while in use), delete the old credential, add the new JSON, then re-select it on those nodes and switch them back on.
+
+**How do I revoke a credential?**
+Delete the key (or the whole Service Account) in GCP Console "IAM → Service Accounts", then delete its row in the panel.
 
 **AWS / Azure / other clouds?**
 Not yet — GCP only for now.
@@ -138,8 +155,10 @@ Not yet — GCP only for now.
 
 | Symptom | Cause & fix |
 | --- | --- |
-| Save & test connection fails | incomplete JSON paste (must be `{` through `}`), or the Service Account / key was deleted — regenerate the key and paste again |
-| ▶ returns 404 | wrong zone or instance name; a wrong project ID also 404s — check each field against the GCP instance list |
+| Adding a credential or clicking "测试" fails | incomplete JSON paste (must be `{` through `}`), or the Service Account / key was deleted — regenerate the key and follow "how do I replace it" above |
+| "该 Service Account 已在凭证列表中" (already in the list) | one account can only be stored once; to change its key, delete and re-add |
+| ▶ returns 404 | wrong zone or instance name; a wrong project ID also 404s — check each field against the GCP instance list. With multiple accounts, first confirm the node points at the right credential |
 | ▶ returns 403 | missing permission: the role isn't bound, or a cross-project node lacks the cross-project grant above |
+| Node says "请选择凭证" or the credential was deleted | that node has no credential bound (or its credential is gone) — pick one again in the edit dialog |
 | Preempted but never auto-started | check in order: master switch on? → node switch on? → offline longer than the confirmation delay? → any "gave up" notification (attempts exhausted; no more retries until the node comes back — use ▶ manually) |
 | Instance vanished after preemption | termination action was set to DELETE — rebuild the instance and keep STOP this time |

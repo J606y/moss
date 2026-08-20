@@ -145,7 +145,9 @@ gcloud iam service-accounts keys create moss-sa.json \
 
 (The predefined `roles/compute.instanceAdmin.v1` also works but is far broader than needed.)
 
-**2. Panel setup**: paste the contents of `moss-sa.json` on the admin "GCP 守护" (GCP Guardian) tab → save & test the connection → enable the auto-start master switch; then edit the node on the "服务器" (Servers) tab, enable "GCP auto-start" and fill in the zone (e.g. `us-central1-a`) and instance name. A ▶ button appears on the node row for manual immediate start.
+**2. Panel setup**: on the admin "GCP 守护" (GCP Guardian) tab click "添加凭证" (Add credential), paste the contents of `moss-sa.json` and save → hit "测试" (Test) to verify it works → enable the auto-start master switch; then edit the node on the "服务器" (Servers) tab, enable "GCP auto-start", pick the credential and fill in the zone (e.g. `us-central1-a`) and instance name. A ▶ button appears on the node row for manual immediate start.
+
+Multiple GCP accounts: add one credential per account. Credentials coexist, and each node picks the one it uses.
 
 **How it works**: after a node stays offline past the confirmation delay (default 120s), Moss queries the instance status — it only starts instances in `TERMINATED` state; `RUNNING` but offline means an agent / network problem, so Moss alerts without touching the instance. Failed starts (e.g. Spot capacity shortage) are retried after the cooldown (default 300s) up to the attempt cap (default 3), then Moss stops and notifies; counters reset automatically once the node comes back online.
 
@@ -154,7 +156,7 @@ gcloud iam service-accounts keys create moss-sa.json \
 - **Do not host the panel on a guarded Spot instance** — if the panel is preempted together with the instance, nothing is left to restart it.
 - **Disable the node's auto-start switch before intentional shutdowns** (or the master switch), or the instance will be pulled back up.
 - Keep the Spot instance's termination action at the default **STOP**; with **DELETE** the instance is gone after preemption and cannot be started.
-- The credential is stored in plaintext in the panel database — grant only the two minimal permissions above and bind only the necessary project.
+- Credential private keys are encrypted in the panel database (master key from `MOSS_SECRET_KEY`, falling back to an auto-generated `secret.key` in the data directory) — back up that master key together with the database. Still grant only the two minimal permissions above and bind only the necessary project.
 - `SUSPENDED` instances are not auto-resumed.
 
 ## 🏗 Architecture

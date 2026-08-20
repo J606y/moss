@@ -15,12 +15,20 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 // makeSA 生成一份可用的假 Service Account JSON 及其密钥。
 func makeSA(t *testing.T, tokenURI string) (string, *rsa.PrivateKey) {
+	t.Helper()
+	return makeSAAs(t, "moss@test-proj.iam.gserviceaccount.com", "test-proj", tokenURI)
+}
+
+// makeSAAs 同上，但可指定账号与项目——多凭证用例需要两个 client_email 各异的 SA，
+// 否则会撞上 gcp_credentials 的唯一索引。
+func makeSAAs(t *testing.T, email, project, tokenURI string) (string, *rsa.PrivateKey) {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -33,12 +41,45 @@ func makeSA(t *testing.T, tokenURI string) (string, *rsa.PrivateKey) {
 	pemStr := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
 	raw, _ := json.Marshal(map[string]string{
 		"type":         "service_account",
-		"client_email": "moss@test-proj.iam.gserviceaccount.com",
+		"client_email": email,
 		"private_key":  pemStr,
-		"project_id":   "test-proj",
+		"project_id":   project,
 		"token_uri":    tokenURI,
 	})
 	return string(raw), key
+}
+
+// addTestCred 走 HTTP 接口加一份凭证，返回其 id。
+func addTestCred(t *testing.T, app *App, saJSON string) string {
+	t.Helper()
+	w := httptest.NewRecorder()
+	body, _ := json.Marshal(map[string]any{"saJson": saJSON})
+	app.handleAddGCPCredential(w, httptest.NewRequest(http.MethodPost, "/api/admin/gcp/credentials", bytes.NewReader(body)))
+	if w.Code != 200 {
+		t.Fatalf("添加凭证失败 %d: %s", w.Code, w.Body.String())
+	}
+	var res struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil || res.ID == "" {
+		t.Fatalf("添加凭证响应异常: %s", w.Body.String())
+	}
+	return res.ID
+}
+
+// getGCPView 读一次设置视图，同时把原始响应体交给调用方做泄漏断言。
+func getGCPView(t *testing.T, app *App) (gcpSettingsView, string) {
+	t.Helper()
+	w := httptest.NewRecorder()
+	app.handleGetGCP(w, httptest.NewRequest(http.MethodGet, "/api/admin/gcp", nil))
+	if w.Code != 200 {
+		t.Fatalf("读取 GCP 设置失败 %d: %s", w.Code, w.Body.String())
+	}
+	var v gcpSettingsView
+	if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
+		t.Fatal(err)
+	}
+	return v, w.Body.String()
 }
 
 func TestParseGCPSA(t *testing.T) {
@@ -63,14 +104,26 @@ func TestParseGCPSA(t *testing.T) {
 }
 
 // mockGCP 同时扮演 OAuth 端点与 Compute API，记录调用。
+//
+// 一个 mock 可以同时服务多份凭证：accounts 按 client_email 登记公钥，
+// 计数也按账号/项目分开记。这是多凭证用例的基础设施——
+// gcpClient.base 取自进程级环境变量 MOSS_GCP_API_BASE（见 newGCPClient），
+// 一个变量指不到两个 mock，只能让同一个 mock 按 URL 里的 project 分流。
 type mockGCP struct {
-	t          *testing.T
-	pub        *rsa.PublicKey
-	tokenCalls int
-	startCalls int
-	status     string // 实例状态
-	startCode  int    // start 响应码，0 = 200
-	srv        *httptest.Server
+	t   *testing.T
+	pub *rsa.PublicKey
+	// accounts 非空时按 iss 选公钥（多账号模式），否则只认 makeSA 的默认账号。
+	accounts map[string]*rsa.PublicKey
+
+	mu           sync.Mutex
+	tokenCalls   int
+	startCalls   int
+	tokenCallsBy map[string]int // client_email → 换取 token 次数
+	startCallsBy map[string]int // project → start 次数
+
+	status    string // 实例状态
+	startCode int    // start 响应码，0 = 200
+	srv       *httptest.Server
 
 	// omitExpiresIn 模拟不返回 expires_in 的 token 端点（自建/代理网关常见，
 	// 真实 Google 端点总会返回，所以这条路只能靠 mock 复现）。
@@ -78,33 +131,80 @@ type mockGCP struct {
 }
 
 func newMockGCP(t *testing.T, status string) *mockGCP {
-	m := &mockGCP{t: t, status: status}
+	m := &mockGCP{
+		t: t, status: status,
+		accounts:     map[string]*rsa.PublicKey{},
+		tokenCallsBy: map[string]int{},
+		startCallsBy: map[string]int{},
+	}
 	m.srv = httptest.NewServer(http.HandlerFunc(m.handle))
 	t.Cleanup(m.srv.Close)
 	return m
 }
 
+// registerSA 生成一份指向本 mock 的 SA JSON 并登记其公钥，供多账号用例使用。
+func (m *mockGCP) registerSA(t *testing.T, email, project string) string {
+	t.Helper()
+	raw, key := makeSAAs(t, email, project, m.srv.URL+"/token")
+	m.mu.Lock()
+	m.accounts[email] = &key.PublicKey
+	m.mu.Unlock()
+	return raw
+}
+
+func (m *mockGCP) counts() (tokenBy, startBy map[string]int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	tokenBy, startBy = map[string]int{}, map[string]int{}
+	for k, v := range m.tokenCallsBy {
+		tokenBy[k] = v
+	}
+	for k, v := range m.startCallsBy {
+		startBy[k] = v
+	}
+	return
+}
+
+// projectFromPath 从 /compute/v1/projects/{proj}/zones/... 里取出项目 ID。
+func projectFromPath(p string) string {
+	parts := strings.Split(strings.Trim(p, "/"), "/")
+	for i, s := range parts {
+		if s == "projects" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	return ""
+}
+
 func (m *mockGCP) handle(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/token":
-		m.tokenCalls++
 		if err := r.ParseForm(); err != nil || r.Form.Get("grant_type") != "urn:ietf:params:oauth:grant-type:jwt-bearer" {
 			m.t.Error("grant_type 错误")
 		}
-		m.verifyJWT(r.Form.Get("assertion"))
+		iss := m.verifyJWT(r.Form.Get("assertion"))
+		m.mu.Lock()
+		m.tokenCalls++
+		m.tokenCallsBy[iss]++
+		omit := m.omitExpiresIn
+		m.mu.Unlock()
 		body := map[string]any{"access_token": "tok-1", "expires_in": 3600}
-		if m.omitExpiresIn {
+		if omit {
 			delete(body, "expires_in")
 		}
 		json.NewEncoder(w).Encode(body)
 	case strings.HasSuffix(r.URL.Path, "/start") && r.Method == "POST":
+		m.mu.Lock()
 		m.startCalls++
+		m.startCallsBy[projectFromPath(r.URL.Path)]++
+		code := m.startCode
+		m.mu.Unlock()
 		if r.Header.Get("Authorization") != "Bearer tok-1" {
 			m.t.Error("start 缺少 Bearer token")
 		}
-		if m.startCode != 0 {
-			w.WriteHeader(m.startCode)
-			json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": m.startCode, "message": "mock failure"}})
+		if code != 0 {
+			w.WriteHeader(code)
+			json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": code, "message": "mock failure"}})
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]any{"name": "operation-1"})
@@ -112,27 +212,21 @@ func (m *mockGCP) handle(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer tok-1" {
 			m.t.Error("status 查询缺少 Bearer token")
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": m.status})
+		m.mu.Lock()
+		status := m.status
+		m.mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]string{"status": status})
 	default:
 		w.WriteHeader(404)
 	}
 }
 
-// verifyJWT 用公钥验签并核对 claims。
-func (m *mockGCP) verifyJWT(assertion string) {
+// verifyJWT 用公钥验签并核对 claims，返回 iss（即 client_email）。
+func (m *mockGCP) verifyJWT(assertion string) string {
 	parts := strings.Split(assertion, ".")
 	if len(parts) != 3 {
 		m.t.Error("JWT 应为三段")
-		return
-	}
-	sum := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
-	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
-	if err != nil {
-		m.t.Errorf("签名 base64 解码失败: %v", err)
-		return
-	}
-	if err := rsa.VerifyPKCS1v15(m.pub, crypto.SHA256, sum[:], sig); err != nil {
-		m.t.Errorf("JWT 验签失败: %v", err)
+		return ""
 	}
 	payload, _ := base64.RawURLEncoding.DecodeString(parts[1])
 	var claims struct {
@@ -141,8 +235,29 @@ func (m *mockGCP) verifyJWT(assertion string) {
 		Aud   string `json:"aud"`
 	}
 	json.Unmarshal(payload, &claims)
-	if claims.Iss != "moss@test-proj.iam.gserviceaccount.com" {
-		m.t.Errorf("iss 错误: %s", claims.Iss)
+
+	// 先按 iss 定位公钥再验签：多账号模式下每个 SA 各有一把私钥。
+	m.mu.Lock()
+	pub, multi := m.accounts[claims.Iss], len(m.accounts) > 0
+	m.mu.Unlock()
+	if !multi {
+		pub = m.pub
+		if claims.Iss != "moss@test-proj.iam.gserviceaccount.com" {
+			m.t.Errorf("iss 错误: %s", claims.Iss)
+		}
+	} else if pub == nil {
+		m.t.Errorf("未登记的 iss: %s", claims.Iss)
+		return claims.Iss
+	}
+
+	sum := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
+	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		m.t.Errorf("签名 base64 解码失败: %v", err)
+		return claims.Iss
+	}
+	if err := rsa.VerifyPKCS1v15(pub, crypto.SHA256, sum[:], sig); err != nil {
+		m.t.Errorf("JWT 验签失败: %v", err)
 	}
 	if claims.Scope != "https://www.googleapis.com/auth/compute" {
 		m.t.Errorf("scope 错误: %s", claims.Scope)
@@ -150,6 +265,7 @@ func (m *mockGCP) verifyJWT(assertion string) {
 	if claims.Aud != m.srv.URL+"/token" {
 		m.t.Errorf("aud 错误: %s", claims.Aud)
 	}
+	return claims.Iss
 }
 
 func newTestClient(t *testing.T, m *mockGCP) *gcpClient {
@@ -238,8 +354,8 @@ func TestGCPTokenExpiry(t *testing.T) {
 	}
 }
 
-// TestPutGCPFailsClosedWhenEncryptFails 加密不可用时必须整单拒绝，不能把私钥明文写进库。
-func TestPutGCPFailsClosedWhenEncryptFails(t *testing.T) {
+// TestAddGCPCredFailsClosedWhenEncryptFails 加密不可用时必须整单拒绝，不能把私钥明文写进库。
+func TestAddGCPCredFailsClosedWhenEncryptFails(t *testing.T) {
 	useTestKey(t, "test-master-key")
 	app := mcpTestApp(t)
 	saJSON, _ := makeSA(t, "")
@@ -249,66 +365,61 @@ func TestPutGCPFailsClosedWhenEncryptFails(t *testing.T) {
 	secretRandRead = func(b []byte) (int, error) { return 0, errors.New("熵源不可用") }
 
 	w := httptest.NewRecorder()
-	body, _ := json.Marshal(map[string]any{"saJson": saJSON, "autoOn": true})
-	app.handlePutGCP(w, httptest.NewRequest(http.MethodPut, "/api/admin/gcp", bytes.NewReader(body)))
+	body, _ := json.Marshal(map[string]any{"saJson": saJSON})
+	app.handleAddGCPCredential(w, httptest.NewRequest(http.MethodPost, "/api/admin/gcp/credentials", bytes.NewReader(body)))
 	if w.Code != 500 {
 		t.Fatalf("加密失败时应返回 500，得到 %d: %s", w.Code, w.Body.String())
 	}
-
-	stored := getSetting(app.db, keyGCPSAJSON, "")
-	if stored != "" {
-		t.Fatalf("加密失败却写了库: %q", stored)
-	}
-	if strings.Contains(stored, "PRIVATE KEY") {
-		t.Fatal("私钥明文落库")
+	if n, _ := countGCPCredentials(app.db); n != 0 {
+		t.Fatalf("加密失败却落了库: %d 行", n)
 	}
 }
 
-// TestGetGCPStoresCiphertext 正常路径下库里必须是密文，读回是原文。
-func TestGetGCPStoresCiphertext(t *testing.T) {
+// TestAddGCPCredStoresCiphertext 正常路径下库里必须是密文，视图能读回 project/email。
+func TestAddGCPCredStoresCiphertext(t *testing.T) {
 	useTestKey(t, "test-master-key")
 	app := mcpTestApp(t)
 	saJSON, _ := makeSA(t, "")
+	id := addTestCred(t, app, saJSON)
 
-	w := httptest.NewRecorder()
-	body, _ := json.Marshal(map[string]any{"saJson": saJSON})
-	app.handlePutGCP(w, httptest.NewRequest(http.MethodPut, "/api/admin/gcp", bytes.NewReader(body)))
-	if w.Code != 200 {
-		t.Fatalf("保存失败 %d: %s", w.Code, w.Body.String())
+	var stored string
+	if err := app.db.QueryRow(`SELECT sa_json FROM gcp_credentials WHERE id = ?`, id).Scan(&stored); err != nil {
+		t.Fatal(err)
 	}
-	stored := getSetting(app.db, keyGCPSAJSON, "")
 	if !strings.HasPrefix(stored, encPrefix) || strings.Contains(stored, "PRIVATE KEY") {
 		t.Fatalf("凭证未加密落库: %q", stored)
 	}
 
-	w = httptest.NewRecorder()
-	app.handleGetGCP(w, httptest.NewRequest(http.MethodGet, "/api/admin/gcp", nil))
-	var v gcpSettingsView
-	if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
-		t.Fatal(err)
+	v, raw := getGCPView(t, app)
+	if len(v.Credentials) != 1 {
+		t.Fatalf("应有 1 份凭证: %+v", v)
 	}
-	if !v.Configured || v.ProjectID != "test-proj" {
-		t.Fatalf("读回的概要不对: %+v", v)
+	c := v.Credentials[0]
+	if c.ProjectID != "test-proj" || c.ClientEmail != "moss@test-proj.iam.gserviceaccount.com" || !c.Decryptable {
+		t.Fatalf("凭证概要不对: %+v", c)
+	}
+	// 响应体整体不得含私钥或密文。断言原始 body 而非结构体字段：
+	// 将来谁给视图加了个新字段并顺手带上 sa_json，这里立刻炸。
+	if strings.Contains(raw, "PRIVATE KEY") || strings.Contains(raw, encPrefix) {
+		t.Fatalf("响应体泄漏了凭证内容: %s", raw)
 	}
 }
 
-// TestTestGCPReportsUndecryptable 主密钥变更后，「测试」入口必须说出真实原因。
+// TestTestGCPCredReportsUndecryptable 主密钥变更后，「测试」入口必须说出真实原因。
 //
 // 只把解不开当成没配（400 请先粘贴凭证）会把排查方向从「密钥丢了」带偏到
 // 「再填一遍」，而再填一遍会覆盖掉还救得回来的密文。
-func TestTestGCPReportsUndecryptable(t *testing.T) {
+func TestTestGCPCredReportsUndecryptable(t *testing.T) {
 	useTestKey(t, "key-A")
 	app := mcpTestApp(t)
 	saJSON, _ := makeSA(t, "")
-	enc, err := encryptSecret(saJSON)
-	if err != nil {
-		t.Fatal(err)
-	}
-	setSetting(app.db, keyGCPSAJSON, enc)
+	id := addTestCred(t, app, saJSON)
 	useTestKey(t, "key-B") // 运维换了 MOSS_SECRET_KEY
 
 	w := httptest.NewRecorder()
-	app.handleTestGCP(w, httptest.NewRequest(http.MethodPost, "/api/admin/gcp/test", nil))
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/gcp/credentials/"+id+"/test", nil)
+	req.SetPathValue("id", id)
+	app.handleTestGCPCredential(w, req)
 	if w.Code == 400 {
 		t.Fatalf("解不开不能报成「没配」: %s", w.Body.String())
 	}
@@ -317,6 +428,39 @@ func TestTestGCPReportsUndecryptable(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "解密") {
 		t.Fatalf("错误文案应点明解密失败，得到 %s", w.Body.String())
+	}
+
+	// 解不开也必须照常列出来，且明确标记 decryptable=false——
+	// 显示成「未配置」会诱导用户重填，那才是真正把密文毁掉的一步。
+	v, _ := getGCPView(t, app)
+	if len(v.Credentials) != 1 || v.Credentials[0].Decryptable {
+		t.Fatalf("解不开的凭证应照常列出并标记不可解: %+v", v.Credentials)
+	}
+}
+
+// TestPutGCPRejectsLegacyCredFields 老接口不再接受凭证字段，且必须显式报错。
+// 静默忽略会让调用方拿着 200 以为私钥存好了，而实际上它从未落库。
+func TestPutGCPRejectsLegacyCredFields(t *testing.T) {
+	useTestKey(t, "test-master-key")
+	app := mcpTestApp(t)
+	saJSON, _ := makeSA(t, "")
+
+	for _, c := range []struct {
+		name string
+		body map[string]any
+	}{
+		{"带 saJson", map[string]any{"saJson": saJSON, "autoOn": true}},
+		{"带 clearSa", map[string]any{"clearSa": true, "autoOn": true}},
+	} {
+		w := httptest.NewRecorder()
+		body, _ := json.Marshal(c.body)
+		app.handlePutGCP(w, httptest.NewRequest(http.MethodPut, "/api/admin/gcp", bytes.NewReader(body)))
+		if w.Code != 400 {
+			t.Fatalf("%s: 应返回 400，得到 %d: %s", c.name, w.Code, w.Body.String())
+		}
+		if n, _ := countGCPCredentials(app.db); n != 0 {
+			t.Fatalf("%s: 不该落库", c.name)
+		}
 	}
 }
 

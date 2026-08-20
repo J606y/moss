@@ -80,6 +80,12 @@ func main() {
 
 	initSecret(*dataDir) // 敏感列（GCP SA 凭证）加密主密钥
 
+	// 必须排在 initSecret 之后：迁移要解密旧凭证，主密钥没初始化就必然失败。
+	// 失败不致命，下次启动重试，不能让它挡住整个面板启动。
+	if err := migrateGCPCredentials(db); err != nil {
+		log.Printf("GCP 凭证迁移未完成: %v", err)
+	}
+
 	app := &App{db: db, hub: newHub(db), trustProxy: *trustProxy, trustedProxies: parseTrustedProxies(*trustedProxies)}
 	app.exec = newExecManager(db)
 	app.upgrade = newUpgradeManager()
@@ -140,7 +146,9 @@ func main() {
 	mux.HandleFunc("POST /api/admin/webhook/test", app.requireAuth(app.handleTestWebhook))
 	mux.HandleFunc("GET /api/admin/gcp", app.requireAuth(app.handleGetGCP))
 	mux.HandleFunc("PUT /api/admin/gcp", app.requireAuth(app.handlePutGCP))
-	mux.HandleFunc("POST /api/admin/gcp/test", app.requireAuth(app.handleTestGCP))
+	mux.HandleFunc("POST /api/admin/gcp/credentials", app.requireAuth(app.handleAddGCPCredential))
+	mux.HandleFunc("DELETE /api/admin/gcp/credentials/{id}", app.requireAuth(app.handleDeleteGCPCredential))
+	mux.HandleFunc("POST /api/admin/gcp/credentials/{id}/test", app.requireAuth(app.handleTestGCPCredential))
 	mux.HandleFunc("POST /api/admin/servers/{id}/gcp-start", app.requireAuth(app.handleGCPManualStart))
 	// agent 一键升级：只挂在后台管理接口下，刻意不进 MCP 工具清单——
 	// 让 AI 升级自己脚下的 agent 等于绕过闸 2「篡改 moss 自身」的硬拦。

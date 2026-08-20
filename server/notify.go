@@ -84,12 +84,21 @@ type Notifier struct {
 	cfg    notifyConfig
 	states map[string]*alertState
 
-	gcpCfg   gcpConfig
-	gcp      map[string]*gcpState
-	gcpCli   *gcpClient // 懒建缓存，凭证变更（Reload/内容比对）后重建
-	gcpSARaw string
+	gcpCfg gcpConfig
+	gcp    map[string]*gcpState
+	// gcpClients 按凭证 id 缓存已建好的客户端（连同它内部的 OAuth token）。
+	// 必须按 id 分槽：单槽时两个账号的节点交替开机会互相冲刷，
+	// 每轮都要重签 JWT 重换 token。凭证变更后由 Reload 整体清空。
+	gcpClients map[string]*gcpCachedClient
 
 	webhook webhookConfig
+}
+
+// gcpCachedClient 缓存槽。留着 raw 是因为「更换同一份凭证的密钥」时 id 不变、
+// 只有 JSON 变，光看 id 认不出来该重建。
+type gcpCachedClient struct {
+	raw string
+	cli *gcpClient
 }
 
 // fire 是所有告警的唯一出口：一份事件同时走 Telegram 与 webhook。
@@ -114,9 +123,10 @@ func newNotifier(db *sql.DB) *Notifier {
 		isOnline: func(string) bool { return false },
 		cfg:      loadNotifyConfig(db),
 		states:   make(map[string]*alertState),
-		gcpCfg:   loadGCPConfig(db),
-		gcp:      make(map[string]*gcpState),
-		webhook:  loadWebhookConfig(db),
+		gcpCfg:     loadGCPConfig(db),
+		gcp:        make(map[string]*gcpState),
+		gcpClients: make(map[string]*gcpCachedClient),
+		webhook:    loadWebhookConfig(db),
 	}
 }
 
@@ -130,8 +140,7 @@ func (n *Notifier) Reload() {
 	n.cfg = cfg
 	n.gcpCfg = gcpCfg
 	n.webhook = wh
-	n.gcpCli = nil
-	n.gcpSARaw = ""
+	n.gcpClients = make(map[string]*gcpCachedClient)
 
 	// 开关被关掉、或阈值被改动时，清掉受影响指标的告警态。
 	//

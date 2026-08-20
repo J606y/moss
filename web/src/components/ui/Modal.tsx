@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useRef, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
 import { glassPanel, iconBtn } from '../../ui'
@@ -17,12 +17,25 @@ import { glassPanel, iconBtn } from '../../ui'
  * 挂 body 才能让所有使用者都不必再关心自己被放在哪。
  */
 export function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+  // 点遮罩关闭，判据是「按下」而不是「点击」。
+  //
+  // click 的 target 是 mousedown 与 mouseup 两处的最近公共祖先：在输入框里按住
+  // 拖选文字、松手时指针已经滑出输入框，这一下就落在遮罩上，弹窗当场关掉，
+  // 用户填了一半的表单随之丢失。选文字是编辑弹窗里最平常的动作，不能这么处理。
+  // 只有按下和松开都在遮罩上，才算真的点了外面。
+  const downOnBackdrop = useRef(false)
+
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4 backdrop-blur-sm" onClick={onClose}>
-      <div
-        className={`${glassPanel} max-h-[85vh] w-full max-w-md overflow-y-auto rounded-2xl p-5`}
-        onClick={(e) => e.stopPropagation()}
-      >
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4 backdrop-blur-sm"
+      onMouseDown={(e) => {
+        downOnBackdrop.current = e.target === e.currentTarget
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget && downOnBackdrop.current) onClose()
+      }}
+    >
+      <div className={`${glassPanel} max-h-[85vh] w-full max-w-md overflow-y-auto rounded-2xl p-5`}>
         <div className="mb-4 flex items-center justify-between">
           <h3 className="font-semibold">{title}</h3>
           <button onClick={onClose} className={iconBtn}>
