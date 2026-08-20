@@ -119,10 +119,10 @@ func (n *Notifier) fire(cfg notifyConfig, ev alertEvent) {
 
 func newNotifier(db *sql.DB) *Notifier {
 	return &Notifier{
-		db:       db,
-		isOnline: func(string) bool { return false },
-		cfg:      loadNotifyConfig(db),
-		states:   make(map[string]*alertState),
+		db:         db,
+		isOnline:   func(string) bool { return false },
+		cfg:        loadNotifyConfig(db),
+		states:     make(map[string]*alertState),
 		gcpCfg:     loadGCPConfig(db),
 		gcp:        make(map[string]*gcpState),
 		gcpClients: make(map[string]*gcpCachedClient),
