@@ -4,9 +4,11 @@ import type { NotifySettings, WebhookSettings } from '../../types'
 import { NumberInput, Toggle } from '../../components/ui'
 import { errMsg } from '../../utils/admin'
 import { btnGhost, btnPrimary, card, formLabel, input } from '../../ui'
+import { useT } from '../../i18n'
 import type { Toast } from './types'
 
 export function NotifyTab({ toast }: { toast: Toast }) {
+  const { t } = useT()
   const [n, setN] = useState<NotifySettings | null>(null)
   const [testing, setTesting] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -17,7 +19,7 @@ export function NotifyTab({ toast }: { toast: Toast }) {
       .catch((e) => toast(errMsg(e)))
   }, [toast])
 
-  if (!n) return <p className="text-sm text-zinc-500">加载中…</p>
+  if (!n) return <p className="text-sm text-zinc-500">{t('common.loading')}</p>
 
   const num = (k: keyof NotifySettings) => (v: number) => setN({ ...n, [k]: v })
 
@@ -27,7 +29,7 @@ export function NotifyTab({ toast }: { toast: Toast }) {
       await put('/api/admin/notify', n)
       const saved = await get<NotifySettings>('/api/admin/notify')
       setN(saved)
-      toast('通知设置已保存')
+      toast(t('notify.saved'))
     } catch (e) {
       toast(errMsg(e))
     } finally {
@@ -40,7 +42,7 @@ export function NotifyTab({ toast }: { toast: Toast }) {
     try {
       await put('/api/admin/notify', n) // 先保存再测试，避免测到旧配置
       await post('/api/admin/notify/test', {})
-      toast('测试消息已发送，请查看 Telegram')
+      toast(t('notify.test.tg.sent'))
     } catch (e) {
       toast(errMsg(e))
     } finally {
@@ -51,12 +53,12 @@ export function NotifyTab({ toast }: { toast: Toast }) {
   return (
     <div className="mx-auto max-w-xl space-y-4">
       <div className={`${card} space-y-3 p-4`}>
-        <h3 className="text-sm font-semibold">Telegram 推送</h3>
+        <h3 className="text-sm font-semibold">{t('notify.tg')}</h3>
         <div>
           <label className={formLabel}>Bot Token</label>
           <input
             className={input}
-            placeholder="123456:ABC-xxx（找 @BotFather 创建）"
+            placeholder={t('notify.tg.token.placeholder')}
             value={n.tgToken}
             onChange={(e) => setN({ ...n, tgToken: e.target.value })}
           />
@@ -65,14 +67,14 @@ export function NotifyTab({ toast }: { toast: Toast }) {
           <label className={formLabel}>Chat ID</label>
           <input
             className={input}
-            placeholder="个人/群组 ID（找 @userinfobot 获取）"
+            placeholder={t('notify.tg.chat.placeholder')}
             value={n.tgChat}
             onChange={(e) => setN({ ...n, tgChat: e.target.value })}
           />
         </div>
         <div className="flex justify-end">
           <button className={btnGhost} onClick={test} disabled={testing || saving}>
-            {testing ? '发送中…' : '保存并发送测试消息'}
+            {t(testing ? 'notify.testing' : 'notify.test')}
           </button>
         </div>
       </div>
@@ -83,87 +85,78 @@ export function NotifyTab({ toast }: { toast: Toast }) {
       <WebhookSection toast={toast} />
 
       <div className={`${card} space-y-3 p-4`}>
-        <h3 className="text-sm font-semibold">离线告警</h3>
-        <Toggle checked={n.offlineOn} label="服务器离线时推送通知（恢复上线时同步通知）" onChange={(v) => setN({ ...n, offlineOn: v })} />
+        <h3 className="text-sm font-semibold">{t('notify.offline')}</h3>
+        <Toggle
+          checked={n.offlineOn}
+          label={t('notify.offline.toggle')}
+          onChange={(v) => setN({ ...n, offlineOn: v })}
+        />
         <div>
-          <label className={formLabel}>离线判定延迟（秒，30 ~ 3600）</label>
+          <label className={formLabel}>{t('notify.offline.delay')}</label>
           <NumberInput min={30} max={3600} value={n.offlineDelay} onChange={num('offlineDelay')} />
-          <p className="mt-1 text-xs text-zinc-400">离线超过该时长才告警，避免网络抖动产生骚扰。</p>
+          <p className="mt-1 text-xs text-zinc-400">{t('notify.offline.delay.hint')}</p>
         </div>
       </div>
 
       <div className={`${card} space-y-3 p-4`}>
-        <h3 className="text-sm font-semibold">负载告警</h3>
-        <Toggle checked={n.loadOn} label="资源使用率持续超阈值时推送通知" onChange={(v) => setN({ ...n, loadOn: v })} />
+        <h3 className="text-sm font-semibold">{t('notify.load')}</h3>
+        <Toggle checked={n.loadOn} label={t('notify.load.toggle')} onChange={(v) => setN({ ...n, loadOn: v })} />
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className={formLabel}>CPU 阈值（%）</label>
+            <label className={formLabel}>{t('notify.cpu')}</label>
             <NumberInput min={1} max={100} value={n.cpuThreshold} onChange={num('cpuThreshold')} />
           </div>
           <div>
-            <label className={formLabel}>内存阈值（%）</label>
+            <label className={formLabel}>{t('notify.mem')}</label>
             <NumberInput min={1} max={100} value={n.memThreshold} onChange={num('memThreshold')} />
           </div>
           <div>
-            <label className={formLabel}>硬盘阈值（%）</label>
+            <label className={formLabel}>{t('notify.disk')}</label>
             <NumberInput min={1} max={100} value={n.diskThreshold} onChange={num('diskThreshold')} />
           </div>
           <div>
-            <label className={formLabel}>恢复确认（秒）</label>
+            <label className={formLabel}>{t('notify.recover')}</label>
             <NumberInput min={10} max={3600} value={n.recoverSec} onChange={num('recoverSec')} />
           </div>
           <div>
-            <label className={formLabel}>持续时间（分钟）</label>
+            <label className={formLabel}>{t('notify.duration')}</label>
             <NumberInput min={1} max={120} value={n.loadMinutes} onChange={num('loadMinutes')} />
           </div>
         </div>
         {/* 恢复条件必须写准：实现是 val < 阈值×0.9（见 notify.go 的迟滞判定），
             原文案写的「回落至阈值 5% 以下」既数值不对，字面还会被读成
             「低于阈值的 5%」——阈值 90% 时那是 4.5%，永远等不到恢复通知。 */}
-        <p className="text-xs text-zinc-400">
-          超阈值持续指定时间才告警；回落到阈值的 90% 以下、并持续「恢复确认」时长后，才发送恢复通知
-          （如阈值 90%，需降至 81% 以下并保持住）。两道条件缺一不可：回差挡阈值附近的抖动，
-          时长挡大幅波动——否则负载在高低之间来回摆，告警和恢复会交替刷屏。恢复确认对网速告警同样生效。
-        </p>
+        <p className="text-xs text-zinc-400">{t('notify.load.hint')}</p>
 
         <div className="space-y-3 border-t border-zinc-500/10 pt-3 dark:border-white/5">
-          <Toggle
-            checked={n.netOn}
-            label="单台服务器网速持续超阈值时推送通知"
-            onChange={(v) => setN({ ...n, netOn: v })}
-          />
+          <Toggle checked={n.netOn} label={t('notify.net.toggle')} onChange={(v) => setN({ ...n, netOn: v })} />
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className={formLabel}>网速阈值（MB/s）</label>
+              <label className={formLabel}>{t('notify.net')}</label>
               <NumberInput min={1} max={100000} value={n.netThreshold} onChange={num('netThreshold')} />
             </div>
             <div>
-              <label className={formLabel}>持续时间（秒，10 ~ 3600）</label>
+              <label className={formLabel}>{t('notify.net.sec')}</label>
               <NumberInput min={10} max={3600} value={n.netSeconds} onChange={num('netSeconds')} />
             </div>
           </div>
-          <p className="text-xs text-zinc-400">
-            上行或下行任一方向超过阈值并持续指定时长即告警，与上方开关相互独立；
-            恢复判定与负载告警同一套规则（回落到阈值的 90% 以下 + 上方的「恢复确认」时长）。
-          </p>
+          <p className="text-xs text-zinc-400">{t('notify.net.hint')}</p>
         </div>
       </div>
 
       <div className={`${card} space-y-3 p-4`}>
-        <h3 className="text-sm font-semibold">到期提醒</h3>
-        <Toggle checked={n.expireOn} label="服务器临近到期时推送通知" onChange={(v) => setN({ ...n, expireOn: v })} />
+        <h3 className="text-sm font-semibold">{t('notify.expire')}</h3>
+        <Toggle checked={n.expireOn} label={t('notify.expire.toggle')} onChange={(v) => setN({ ...n, expireOn: v })} />
         <div>
-          <label className={formLabel}>提前天数（1 ~ 7）</label>
+          <label className={formLabel}>{t('notify.expire.days')}</label>
           <NumberInput min={1} max={7} value={n.expireDays} onChange={num('expireDays')} />
-          <p className="mt-1 text-xs text-zinc-400">
-            到期时间需为 YYYY-MM-DD 格式方可识别；每个到期日只提醒一次，续期修改日期后会按新日期重新提醒。
-          </p>
+          <p className="mt-1 text-xs text-zinc-400">{t('notify.expire.hint')}</p>
         </div>
       </div>
 
       <div className="flex justify-end">
         <button className={btnPrimary} onClick={save} disabled={saving || testing}>
-          {saving ? '保存中…' : '保存设置'}
+          {t(saving ? 'common.saving' : 'settings.save')}
         </button>
       </div>
     </div>
@@ -175,6 +168,7 @@ export function NotifyTab({ toast }: { toast: Toast }) {
  * 因此单独管理状态与保存按钮，模式参考 GcpTab 的凭证区块——密钥只写不回显。
  */
 function WebhookSection({ toast }: { toast: Toast }) {
+  const { t } = useT()
   const [w, setW] = useState<WebhookSettings | null>(null)
   // 密钥单独用一个受控字段：留空提交 = 保留原密钥，绝不会被服务端回显的明文污染
   const [secret, setSecret] = useState('')
@@ -203,7 +197,7 @@ function WebhookSection({ toast }: { toast: Toast }) {
     setSaving(true)
     try {
       await save()
-      toast('Webhook 设置已保存')
+      toast(t('wh.saved'))
     } catch (e) {
       toast(errMsg(e))
     } finally {
@@ -215,7 +209,7 @@ function WebhookSection({ toast }: { toast: Toast }) {
     setClearing(true)
     try {
       await save(true)
-      toast('密钥已清除')
+      toast(t('wh.secret.cleared'))
     } catch (e) {
       toast(errMsg(e))
     } finally {
@@ -228,7 +222,7 @@ function WebhookSection({ toast }: { toast: Toast }) {
     try {
       await save() // 先保存再测试，避免测到旧配置
       await post('/api/admin/webhook/test', {})
-      toast('测试消息已发送，请检查接收端')
+      toast(t('wh.test.sent'))
     } catch (e) {
       toast(errMsg(e))
     } finally {
@@ -238,14 +232,11 @@ function WebhookSection({ toast }: { toast: Toast }) {
 
   return (
     <div className={`${card} space-y-3 p-4`}>
-      <h3 className="text-sm font-semibold">Webhook 推送</h3>
-      <p className="text-xs text-zinc-400">
-        告警会实时发送到下面这个地址，接入常驻的 AI
-        助手后，服务器一出问题就能第一时间唤醒它自动排查，不必人工盯盘。
-      </p>
-      <Toggle checked={w.on} label="启用 Webhook 推送" onChange={(v) => setW({ ...w, on: v })} />
+      <h3 className="text-sm font-semibold">{t('wh.title')}</h3>
+      <p className="text-xs text-zinc-400">{t('wh.intro')}</p>
+      <Toggle checked={w.on} label={t('wh.toggle')} onChange={(v) => setW({ ...w, on: v })} />
       <div>
-        <label className={formLabel}>地址</label>
+        <label className={formLabel}>{t('wh.url')}</label>
         <input
           className={`${input} truncate`}
           placeholder="https://your-ai-gateway.example.com/hooks/moss"
@@ -254,11 +245,11 @@ function WebhookSection({ toast }: { toast: Toast }) {
         />
       </div>
       <div>
-        <label className={formLabel}>密钥（可选）</label>
+        <label className={formLabel}>{t('wh.secret')}</label>
         <input
           className={input}
           type="password"
-          placeholder={w.secretSet ? '已配置，留空则不修改' : '用于验证请求来源，可留空'}
+          placeholder={t(w.secretSet ? 'wh.secret.set' : 'wh.secret.unset')}
           value={secret}
           onChange={(e) => setSecret(e.target.value)}
         />
@@ -270,14 +261,14 @@ function WebhookSection({ toast }: { toast: Toast }) {
             onClick={onClearSecret}
             disabled={clearing || saving || testing}
           >
-            {clearing ? '清除中…' : '清除密钥'}
+            {t(clearing ? 'wh.clearing' : 'wh.clear')}
           </button>
         )}
         <button className={btnGhost} onClick={onTest} disabled={testing || saving || clearing}>
-          {testing ? '发送中…' : '保存并发送测试消息'}
+          {t(testing ? 'notify.testing' : 'notify.test')}
         </button>
         <button className={btnPrimary} onClick={onSave} disabled={saving || testing || clearing}>
-          {saving ? '保存中…' : '保存'}
+          {t(saving ? 'common.saving' : 'common.save')}
         </button>
       </div>
     </div>

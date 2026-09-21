@@ -194,7 +194,7 @@ func (s *App) handleListKeys(w http.ResponseWriter, r *http.Request) {
 	                         FROM api_keys ORDER BY id DESC`)
 	if err != nil {
 		log.Printf("handleListKeys query: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	defer rows.Close()
@@ -209,7 +209,7 @@ func (s *App) handleListKeys(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(&it.ID, &it.Name, &it.Prefix, &caps, &servers,
 			&it.ExpiresAt, &it.CreatedAt, &it.LastUsedAt, &revoked); err != nil {
 			log.Printf("handleListKeys scan: %v", err)
-			writeErr(w, 500, "内部错误")
+			writeErr(w, errInternal)
 			return
 		}
 		it.Caps, it.Servers = splitList(caps), splitList(servers)
@@ -224,7 +224,7 @@ func (s *App) handleListKeys(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := rows.Err(); err != nil {
 		log.Printf("handleListKeys rows: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	writeJSON(w, 200, list)
@@ -255,19 +255,19 @@ func normalizeCaps(in []string) []string {
 func (s *App) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	var f keyForm
 	if err := json.NewDecoder(r.Body).Decode(&f); err != nil || strings.TrimSpace(f.Name) == "" {
-		writeErr(w, 400, "名称不能为空")
+		writeErr(w, errNameRequired)
 		return
 	}
 	caps := normalizeCaps(f.Caps)
 	if len(caps) == 0 {
-		writeErr(w, 400, "至少需要选择一项能力")
+		writeErr(w, errCapsRequired)
 		return
 	}
 	// 机器白名单里的 ID 必须真实存在，否则用户会以为已授权、实际永远调不通。
 	for _, id := range f.Servers {
 		var n int
 		if err := s.db.QueryRow(`SELECT COUNT(1) FROM servers WHERE id = ?`, id).Scan(&n); err != nil || n == 0 {
-			writeErr(w, 400, "机器白名单包含不存在的服务器: "+id)
+			writeErr(w, errKeyBadServers.with(id))
 			return
 		}
 	}
@@ -282,7 +282,7 @@ func (s *App) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Printf("handleCreateKey insert: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	id, _ := res.LastInsertId()
@@ -297,17 +297,17 @@ func (s *App) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 func (s *App) handleUpdateKey(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		writeErr(w, 400, "参数错误")
+		writeErr(w, errBadParams)
 		return
 	}
 	var f keyForm
 	if err := json.NewDecoder(r.Body).Decode(&f); err != nil || strings.TrimSpace(f.Name) == "" {
-		writeErr(w, 400, "名称不能为空")
+		writeErr(w, errNameRequired)
 		return
 	}
 	caps := normalizeCaps(f.Caps)
 	if len(caps) == 0 {
-		writeErr(w, 400, "至少需要选择一项能力")
+		writeErr(w, errCapsRequired)
 		return
 	}
 	// 与新建同一套校验：白名单里的 ID 必须真实存在，
@@ -315,7 +315,7 @@ func (s *App) handleUpdateKey(w http.ResponseWriter, r *http.Request) {
 	for _, sid := range f.Servers {
 		var n int
 		if err := s.db.QueryRow(`SELECT COUNT(1) FROM servers WHERE id = ?`, sid).Scan(&n); err != nil || n == 0 {
-			writeErr(w, 400, "机器白名单包含不存在的服务器: "+sid)
+			writeErr(w, errKeyBadServers.with(sid))
 			return
 		}
 	}
@@ -324,7 +324,7 @@ func (s *App) handleUpdateKey(w http.ResponseWriter, r *http.Request) {
 	// 改完权限再启用回来是正常用法。
 	var exists int
 	if err := s.db.QueryRow(`SELECT COUNT(1) FROM api_keys WHERE id = ?`, id).Scan(&exists); err != nil || exists == 0 {
-		writeErr(w, 404, "密钥不存在")
+		writeErr(w, errKeyNotFound)
 		return
 	}
 
@@ -333,7 +333,7 @@ func (s *App) handleUpdateKey(w http.ResponseWriter, r *http.Request) {
 		strings.TrimSpace(f.Name), strings.Join(caps, ","), strings.Join(f.Servers, ","), f.ExpiresAt, id,
 	); err != nil {
 		log.Printf("handleUpdateKey: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	// 鉴权走的是数据库实时查询，改完立即生效，无需让客户端重连。
@@ -350,14 +350,14 @@ func (s *App) handleUpdateKey(w http.ResponseWriter, r *http.Request) {
 func (s *App) handleToggleKey(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		writeErr(w, 400, "参数错误")
+		writeErr(w, errBadParams)
 		return
 	}
 	var body struct {
 		Disabled bool `json:"disabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, 400, "请求格式错误")
+		writeErr(w, errBadJSON)
 		return
 	}
 	v := 0
@@ -367,11 +367,11 @@ func (s *App) handleToggleKey(w http.ResponseWriter, r *http.Request) {
 	res, err := s.db.Exec(`UPDATE api_keys SET revoked = ? WHERE id = ?`, v, id)
 	if err != nil {
 		log.Printf("handleToggleKey: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		writeErr(w, 404, "密钥不存在")
+		writeErr(w, errKeyNotFound)
 		return
 	}
 	// 鉴权每次都查库，停用/启用立即生效，无需客户端重连。
@@ -381,12 +381,12 @@ func (s *App) handleToggleKey(w http.ResponseWriter, r *http.Request) {
 func (s *App) handleDeleteKey(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		writeErr(w, 400, "参数错误")
+		writeErr(w, errBadParams)
 		return
 	}
 	if _, err := s.db.Exec(`DELETE FROM api_keys WHERE id = ?`, id); err != nil {
 		log.Printf("handleDeleteKey: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})

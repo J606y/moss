@@ -3,6 +3,7 @@ import type { LucideIcon } from 'lucide-react'
 import { getLive, useAllStatsVersion, useServers } from '../api/store'
 import { fmtBytes, fmtSpeed } from '../utils/format'
 import { card } from '../ui'
+import { useT } from '../i18n'
 
 function Stat({
   icon: Icon,
@@ -32,6 +33,7 @@ function Stat({
 }
 
 export default function StatsBar() {
+  const { t } = useT()
   const servers = useServers()
   useAllStatsVersion() // 全局合计：任意一台 tick 都重算（仅本组件承担）
   const online = servers.filter((s) => s.online)
@@ -52,30 +54,34 @@ export default function StatsBar() {
     <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
       <Stat
         icon={Server}
-        label="服务器"
-        value={`${online.length} / ${servers.length} 在线`}
-        sub={servers.length - online.length > 0 ? `${servers.length - online.length} 台离线` : '全部正常'}
+        label={t('dash.stat.servers')}
+        value={t('dash.stat.servers.value', { online: online.length, total: servers.length })}
+        sub={
+          servers.length - online.length > 0
+            ? t('dash.stat.servers.offline', { n: servers.length - online.length })
+            : t('dash.stat.servers.allOk')
+        }
         tint="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
       />
       <Stat
         icon={Wifi}
-        label="实时网速"
+        label={t('dash.stat.speed')}
         value={`↑ ${fmtSpeed(up)}`}
         sub={`↓ ${fmtSpeed(down)}`}
         tint="bg-sky-500/10 text-sky-600 dark:text-sky-400"
       />
       <Stat
         icon={HardDriveDownload}
-        label="总流量"
+        label={t('dash.stat.traffic')}
         value={`↑ ${fmtBytes(totalUp)}`}
         sub={`↓ ${fmtBytes(totalDown)}`}
         tint="bg-violet-500/10 text-violet-600 dark:text-violet-400"
       />
       <Stat
         icon={Globe2}
-        label="地区分布"
-        value={`${regions} 个地区`}
-        sub="点击卡片查看详情"
+        label={t('dash.stat.regions')}
+        value={t('dash.stat.regions.value', { n: regions })}
+        sub={t('dash.stat.regions.hint')}
         tint="bg-amber-500/10 text-amber-600 dark:text-amber-400"
       />
     </div>

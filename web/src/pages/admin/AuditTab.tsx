@@ -7,6 +7,7 @@ import { Modal, Select } from '../../components/ui'
 import { errMsg } from '../../utils/admin'
 import { btnGhost, card, formLabel, td, th } from '../../ui'
 import { fmtDateTime, fmtTime } from '../../utils/format'
+import { useT } from '../../i18n'
 import type { Toast } from './types'
 
 /**
@@ -37,6 +38,7 @@ function pageNumbers(current: number, total: number): Array<number | '…'> {
  * 只有审计会随使用无限增长，挤在第三块里既看不清也翻不到。
  */
 export function AuditTab({ toast }: { toast: Toast }) {
+  const { t } = useT()
   const [rows, setRows] = useState<ExecAudit[]>([])
   const [detail, setDetail] = useState<ExecAuditDetail | null>(null)
   const [servers, setServers] = useState<AdminServer[]>([])
@@ -104,7 +106,7 @@ export function AuditTab({ toast }: { toast: Toast }) {
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <h2 className="flex items-center gap-2 font-semibold">
           <ScrollText className="h-4 w-4 text-emerald-500" />
-          执行审计
+          {t('admin.tab.audit')}
         </h2>
         <div className="flex flex-wrap items-center gap-2">
           {/* 「仅拦截」单独给一个按钮而不是塞进下拉：被拦下的尝试是这里最该被
@@ -118,28 +120,27 @@ export function AuditTab({ toast }: { toast: Toast }) {
             onClick={() => changeFilter(() => setOnlyBlocked((v) => !v))}
           >
             <ShieldAlert className="h-3.5 w-3.5" />
-            仅看拦截
+            {t('audit.onlyBlocked')}
           </button>
           <div className="w-40">
             <Select
               value={serverId}
               onChange={(v) => changeFilter(() => setServerId(v))}
-              options={[{ value: '', label: '全部机器' }, ...servers.map((s) => ({ value: s.id, label: s.name }))]}
+              options={[
+                { value: '', label: t('audit.allServers') },
+                ...servers.map((s) => ({ value: s.id, label: s.name })),
+              ]}
             />
           </div>
           <button className={btnGhost} onClick={load}>
-            刷新
+            {t('common.refresh')}
           </button>
         </div>
       </div>
 
       {rows.length === 0 ? (
         <p className="py-8 text-center text-sm text-zinc-400">
-          {loading
-            ? '加载中…'
-            : onlyBlocked
-              ? '没有被拦截的记录。'
-              : '暂无记录。AI 执行的每一条命令都会出现在这里。'}
+          {loading ? t('common.loading') : t(onlyBlocked ? 'audit.empty.blocked' : 'audit.empty')}
         </p>
       ) : (
         <>
@@ -147,11 +148,11 @@ export function AuditTab({ toast }: { toast: Toast }) {
             <table className="w-full">
               <thead>
                 <tr className="border-b border-white/40 dark:border-white/10">
-                  <th className={th}>时间</th>
-                  <th className={th}>机器</th>
-                  <th className={`${th} hidden md:table-cell`}>调用方</th>
-                  <th className={th}>命令</th>
-                  <th className={th}>结果</th>
+                  <th className={th}>{t('audit.col.time')}</th>
+                  <th className={th}>{t('audit.col.server')}</th>
+                  <th className={`${th} hidden md:table-cell`}>{t('audit.col.caller')}</th>
+                  <th className={th}>{t('audit.col.cmd')}</th>
+                  <th className={th}>{t('audit.col.result')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -183,9 +184,7 @@ export function AuditTab({ toast }: { toast: Toast }) {
           </div>
 
           <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-400">
-            <span>
-              共 {total.toLocaleString()} 条 · 第 {page} / {pages} 页
-            </span>
+            <span>{t('audit.pager', { total: total.toLocaleString(), page, pages })}</span>
             {pages > 1 && (
               <div className="flex items-center gap-1">
                 <PageBtn disabled={page === 1 || loading} onClick={() => setPage(page - 1)}>
@@ -243,11 +242,17 @@ function PageBtn({
 }
 
 function AuditStatus({ row }: { row: ExecAudit }) {
+  const { t } = useT()
   if (row.finishedAt === 0) {
-    return <span className="rounded bg-sky-500/10 px-1.5 py-0.5 text-xs text-sky-600">执行中</span>
+    return <span className="rounded bg-sky-500/10 px-1.5 py-0.5 text-xs text-sky-600">{t('audit.status.running')}</span>
   }
   if (row.error) {
     // 被拦截的命令是审计里最值得注意的记录，单独标红并原样展示原因。
+    //
+    // 判据仍是中文子串，且**不该**跟着 HTTP 错误码一起改：这里的 row.error
+    // 是当初落库的历史文本，不是错误响应——exec_audit 表没有 code 列，后端
+    // 自己的「仅看拦截」筛选也是 error LIKE '命令被拦截：%'。要改得先加列并
+    // 回填，属于 docs/error-codes.md 的 D 段，届时这一处与后端同步改。
     const blocked = row.error.includes('拦截')
     return (
       <span
@@ -256,27 +261,34 @@ function AuditStatus({ row }: { row: ExecAudit }) {
         }`}
         title={row.error}
       >
-        {blocked ? '已拦截' : '失败'}
+        {t(blocked ? 'audit.status.blocked' : 'audit.status.failed')}
       </span>
     )
   }
   if (row.exitCode !== 0) {
-    return <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-600">退出码 {row.exitCode}</span>
+    return (
+      <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-600">
+        {t('audit.status.exit', { code: row.exitCode })}
+      </span>
+    )
   }
-  return <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-xs text-emerald-600">成功</span>
+  return (
+    <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-xs text-emerald-600">{t('audit.status.ok')}</span>
+  )
 }
 
 function AuditDetailModal({ d, onClose }: { d: ExecAuditDetail; onClose: () => void }) {
+  const { t } = useT()
   const r = d.record
   return (
-    <Modal title="执行详情" onClose={onClose}>
+    <Modal title={t('audit.detail')} onClose={onClose}>
       <div className="space-y-3 text-sm">
-        <Field label="机器" value={r.serverName || r.serverId} />
-        <Field label="调用方" value={r.caller} />
-        <Field label="时间" value={fmtDateTime(r.startedAt)} />
-        {r.dir && <Field label="工作目录" value={r.dir} />}
+        <Field label={t('audit.col.server')} value={r.serverName || r.serverId} />
+        <Field label={t('audit.col.caller')} value={r.caller} />
+        <Field label={t('audit.col.time')} value={fmtDateTime(r.startedAt)} />
+        {r.dir && <Field label={t('audit.field.dir')} value={r.dir} />}
         <div>
-          <label className={formLabel}>命令</label>
+          <label className={formLabel}>{t('audit.col.cmd')}</label>
           <pre className="glass-sheen overflow-x-auto rounded-xl border border-white/50 bg-white/45 p-2.5 font-mono text-xs dark:border-white/10 dark:bg-zinc-900/40">
             {r.cmd}
           </pre>
@@ -286,12 +298,12 @@ function AuditDetailModal({ d, onClose }: { d: ExecAuditDetail; onClose: () => v
             {r.error}
           </div>
         )}
-        {d.stdout && <OutputBlock label="标准输出" text={d.stdout} />}
-        {d.stderr && <OutputBlock label="标准错误" text={d.stderr} />}
-        {r.truncated && <p className="text-xs text-zinc-400">输出较长，审计中只保留了开头部分。</p>}
+        {d.stdout && <OutputBlock label={t('audit.stdout')} text={d.stdout} />}
+        {d.stderr && <OutputBlock label={t('audit.stderr')} text={d.stderr} />}
+        {r.truncated && <p className="text-xs text-zinc-400">{t('audit.truncated')}</p>}
         <div className="flex justify-end">
           <button className={btnGhost} onClick={onClose}>
-            关闭
+            {t('common.close')}
           </button>
         </div>
       </div>

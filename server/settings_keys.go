@@ -3,8 +3,11 @@ package main
 // settings 表的 key 常量，集中定义避免写入端/读取端拼写漂移
 // （拼错时 getSetting 会静默返回 fallback，难以排查）。
 const (
-	keySiteName         = "site_name"
-	keySiteDesc         = "site_desc"
+	keySiteName = "site_name"
+	keySiteDesc = "site_desc"
+	// keyLang 界面语言档位：auto（跟随访客浏览器）/ zh / en。
+	// 缺省 auto 而非 zh：老站点升级上来，中文浏览器解析结果仍是中文，行为不变。
+	keyLang             = "lang"
 	keyReportInterval   = "report_interval"
 	keySampleInterval   = "sample_interval"
 	keySampleUnitSec    = "sample_unit_sec"

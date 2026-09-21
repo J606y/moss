@@ -1,5 +1,8 @@
+import { useT } from '../../i18n'
+
 /** 在线 / 离线状态徽章：三端（Admin / ServerDetail / Dashboard / ServerCard）通用 */
 export function StatusPill({ online }: { online: boolean }) {
+  const { t } = useT()
   return (
     <span
       className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${
@@ -9,7 +12,7 @@ export function StatusPill({ online }: { online: boolean }) {
       }`}
     >
       <span className={`h-1.5 w-1.5 rounded-full ${online ? 'animate-pulse bg-emerald-500' : 'bg-rose-500'}`} />
-      {online ? '在线' : '离线'}
+      {t(online ? 'status.online' : 'status.offline')}
     </span>
   )
 }

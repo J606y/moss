@@ -24,18 +24,20 @@ import { axisProps, ChartCard, ChartTip, gridStroke, palette, SeriesChips } from
 import { fmtAxisTime, fmtBytes, fmtDateTime, fmtPercent, fmtSpeed, fmtTime, fmtUptime } from '../utils/format'
 import { brushFill, brushStroke, pingPalette, timelineStroke } from '../tokens'
 import { card } from '../ui'
+import { useT, type TextKey } from '../i18n'
 
-const ranges = [
-  { label: '实时', h: 0 },
-  { label: '1 小时', h: 1 },
-  { label: '6 小时', h: 6 },
-  { label: '24 小时', h: 24 },
-  { label: '7 天', h: 168 },
+// 标签只存 key，渲染时才查表：这两张表是模块级常量，在 t() 拿得到之前就已求值。
+const ranges: Array<{ labelKey: TextKey; h: number }> = [
+  { labelKey: 'detail.range.live', h: 0 },
+  { labelKey: 'detail.range.1h', h: 1 },
+  { labelKey: 'detail.range.6h', h: 6 },
+  { labelKey: 'detail.range.24h', h: 24 },
+  { labelKey: 'detail.range.7d', h: 168 },
 ]
 
 const tabs = [
-  { key: 'load' as const, label: '负载监控', icon: Activity },
-  { key: 'ping' as const, label: '延迟监控', icon: Radar },
+  { key: 'load' as const, labelKey: 'detail.tab.load' as TextKey, icon: Activity },
+  { key: 'ping' as const, labelKey: 'detail.tab.ping' as TextKey, icon: Radar },
 ]
 
 function Info({ k, v }: { k: string; v: string }) {
@@ -79,6 +81,7 @@ function GaugeCard({
 }
 
 export default function ServerDetail() {
+  const { t } = useT()
   const { id } = useParams<{ id: string }>()
   const serverList = useServers()
   const st = useLiveStats(id) // 仅当前服务器 tick 驱动实时数字/图（hooks 须在 early return 前调用）
@@ -186,24 +189,24 @@ export default function ServerDetail() {
   if (!server) {
     // 列表尚未首次拉取完成时先显示「加载中」，避免刷新瞬间 serverList 为空被误判为「未找到」
     if (!serversReady()) {
-      return <div className="py-20 text-center text-sm text-zinc-400">加载中…</div>
+      return <div className="py-20 text-center text-sm text-zinc-400">{t('common.loading')}</div>
     }
     return (
       <div className="py-20 text-center text-zinc-500">
-        未找到该服务器
+        {t('detail.notFound')}
         <div className="mt-4">
           <Link to="/" className="text-emerald-600 hover:underline dark:text-emerald-400">
-            返回首页
+            {t('detail.backHome')}
           </Link>
         </div>
       </div>
     )
   }
 
-  const tf = (t: number) => (isLive ? fmtTime(t) : fmtAxisTime(t, hours))
+  const tf = (ts: number) => (isLive ? fmtTime(ts) : fmtAxisTime(ts, hours))
   // 刷选条拖动时两端显示的时间文字（短格式：月/日 时:分）
-  const brushTf = (t: number) => {
-    const d = new Date(t)
+  const brushTf = (ts: number) => {
+    const d = new Date(ts)
     return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
   }
 
@@ -228,7 +231,7 @@ export default function ServerDetail() {
               {fmtDateTime(timeWin[0])} — {fmtDateTime(timeWin[1])}
             </span>
           ) : (
-            '时间轴 · 拖动两端手柄框选时间段，定位具体时间点'
+            t('detail.timeline.hint')
           )}
         </span>
         {timeWin && (
@@ -236,7 +239,7 @@ export default function ServerDetail() {
             onClick={() => setTimeWin(null)}
             className="press shrink-0 rounded-md px-2 py-0.5 text-xs font-medium text-emerald-600 transition hover:bg-emerald-500/10 active:bg-emerald-500/20 dark:text-emerald-400"
           >
-            重置
+            {t('detail.reset')}
           </button>
         )}
       </div>
@@ -290,7 +293,7 @@ export default function ServerDetail() {
           <span className="ml-auto text-sm tabular-nums text-zinc-500 sm:hidden">
             {[
               [server.region, server.note].filter(Boolean).join(' · '),
-              server.online ? `在线 ${fmtUptime(server.uptimeSec)}` : '',
+              server.online ? t('card.uptime', { t: fmtUptime(server.uptimeSec) }) : '',
             ]
               .filter(Boolean)
               .join(' · ')}
@@ -302,7 +305,7 @@ export default function ServerDetail() {
         </span>
         {server.online && (
           <span className="ml-auto hidden text-sm tabular-nums text-zinc-500 sm:inline">
-            在线 {fmtUptime(server.uptimeSec)}
+            {t('card.uptime', { t: fmtUptime(server.uptimeSec) })}
           </span>
         )}
       </div>
@@ -310,32 +313,38 @@ export default function ServerDetail() {
       {/* 基本信息（静态配置） */}
       <div className={`${card} p-4`}>
         <dl className="grid grid-cols-2 gap-x-6 gap-y-3 md:grid-cols-3 lg:grid-cols-4">
-          <Info k="操作系统" v={server.os} />
-          <Info k="架构 / 虚拟化" v={`${server.arch} / ${server.virtualization}`} />
-          <Info k="CPU" v={`${server.cpuModel} (${server.cpuCores} 核)`} />
-          <Info k="内存 / 交换" v={`${fmtBytes(server.memTotal, 0)} / ${server.swapTotal > 0 ? fmtBytes(server.swapTotal, 0) : 'off'}`} />
-          <Info k="硬盘" v={fmtBytes(server.diskTotal, 0)} />
-          <Info k="Agent 版本" v={`v${server.agentVersion} · ${server.intervalSec}s 上报`} />
-          <Info k="分组" v={server.group} />
-          <Info k="到期时间" v={server.expireAt ?? '长期'} />
+          <Info k={t('detail.info.os')} v={server.os} />
+          <Info k={t('detail.info.arch')} v={`${server.arch} / ${server.virtualization}`} />
+          <Info k="CPU" v={t('detail.info.cpu.value', { model: server.cpuModel, n: server.cpuCores })} />
+          <Info
+            k={t('detail.info.memSwap')}
+            v={`${fmtBytes(server.memTotal, 0)} / ${server.swapTotal > 0 ? fmtBytes(server.swapTotal, 0) : 'off'}`}
+          />
+          <Info k={t('metric.disk')} v={fmtBytes(server.diskTotal, 0)} />
+          <Info
+            k={t('detail.info.agent')}
+            v={t('detail.info.agent.value', { v: server.agentVersion, n: server.intervalSec })}
+          />
+          <Info k={t('detail.info.group')} v={server.group} />
+          <Info k={t('detail.info.expire')} v={server.expireAt ?? t('detail.info.expire.never')} />
         </dl>
       </div>
 
       {/* 页签 + 时间范围 */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="glass flex gap-1 rounded-xl p-1">
-          {tabs.map((t) => (
+          {tabs.map((tb) => (
             <button
-              key={t.key}
-              onClick={() => setTab(t.key)}
+              key={tb.key}
+              onClick={() => setTab(tb.key)}
               className={`press flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-sm transition ${
-                tab === t.key
+                tab === tb.key
                   ? 'bg-emerald-500/15 font-medium text-emerald-600 dark:text-emerald-400'
                   : 'text-zinc-500 hover:text-zinc-800 active:bg-white/60 dark:hover:text-zinc-200 dark:active:bg-white/10'
               }`}
             >
-              <t.icon className="h-4 w-4" />
-              {t.label}
+              <tb.icon className="h-4 w-4" />
+              {t(tb.labelKey)}
             </button>
           ))}
         </div>
@@ -353,7 +362,7 @@ export default function ServerDetail() {
                   : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'
               }`}
             >
-              {r.label}
+              {t(r.labelKey)}
             </button>
           ))}
         </div>
@@ -363,39 +372,39 @@ export default function ServerDetail() {
         <>
           {/* 实时监控 */}
           <section>
-            <h2 className="mb-2 text-sm font-semibold text-zinc-500">实时监控</h2>
+            <h2 className="mb-2 text-sm font-semibold text-zinc-500">{t('detail.live')}</h2>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <div className={`${card} p-4`}>
-                <div className="text-xs text-zinc-500">系统负载</div>
+                <div className="text-xs text-zinc-500">{t('detail.load')}</div>
                 <div className="mt-1 text-lg font-semibold tabular-nums">{st.load1.toFixed(2)}</div>
                 <div className="mt-0.5 text-xs tabular-nums text-zinc-500">
-                  5 分 {st.load5.toFixed(2)} · 15 分 {st.load15.toFixed(2)}
+                  {t('detail.load.sub', { l5: st.load5.toFixed(2), l15: st.load15.toFixed(2) })}
                 </div>
               </div>
               <div className={`${card} p-4`}>
-                <div className="text-xs text-zinc-500">内存</div>
+                <div className="text-xs text-zinc-500">{t('metric.mem')}</div>
                 <div className="mt-3 space-y-3">
                   <ProgressBar
-                    label="内存"
+                    label={t('metric.mem')}
                     right={`${fmtBytes(st.memUsed)} / ${fmtBytes(server.memTotal)}`}
                     pct={pct(st.memUsed, server.memTotal)}
                   />
                   <ProgressBar
-                    label="交换"
+                    label={t('metric.swap')}
                     right={server.swapTotal > 0 ? `${fmtBytes(st.swapUsed)} / ${fmtBytes(server.swapTotal)}` : 'off'}
                     pct={pct(st.swapUsed, server.swapTotal)}
                   />
                 </div>
               </div>
               <GaugeCard
-                title="硬盘"
+                title={t('metric.disk')}
                 pct={pct(st.diskUsed, server.diskTotal)}
                 detail={`${fmtBytes(st.diskUsed)} / ${fmtBytes(server.diskTotal)}`}
               />
               <div className={`${card} p-4`}>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <div className="text-xs text-zinc-500">实时网速</div>
+                    <div className="text-xs text-zinc-500">{t('dash.stat.speed')}</div>
                     <div className="mt-1.5 space-y-1 text-sm font-medium tabular-nums">
                       <div className="flex items-center gap-1.5">
                         <ArrowUp className="h-3.5 w-3.5 text-emerald-500" />
@@ -408,7 +417,7 @@ export default function ServerDetail() {
                     </div>
                   </div>
                   <div>
-                    <div className="text-xs text-zinc-500">总流量</div>
+                    <div className="text-xs text-zinc-500">{t('metric.traffic')}</div>
                     <div className="mt-1.5 space-y-1 text-sm font-medium tabular-nums">
                       <div className="flex items-center gap-1.5">
                         <ArrowUp className="h-3.5 w-3.5 text-emerald-500" />
@@ -429,7 +438,7 @@ export default function ServerDetail() {
 
           {/* 历史记录 */}
           <section>
-            <h2 className="mb-2 text-sm font-semibold text-zinc-500">历史记录</h2>
+            <h2 className="mb-2 text-sm font-semibold text-zinc-500">{t('detail.history')}</h2>
             <div className="grid gap-3 lg:grid-cols-2">
               <ChartCard title="CPU (%)">
                 <ResponsiveContainer width="100%" height="100%">
@@ -450,12 +459,12 @@ export default function ServerDetail() {
                 </ResponsiveContainer>
               </ChartCard>
               <ChartCard
-                title="内存 / 交换 (%)"
+                title={t('detail.chart.memSwap')}
                 right={
                   <SeriesChips
                     items={[
-                      { name: '内存', color: palette.sky },
-                      { name: '交换', color: palette.rose },
+                      { name: t('metric.mem'), color: palette.sky },
+                      { name: t('metric.swap'), color: palette.rose },
                     ]}
                   />
                 }
@@ -473,18 +482,18 @@ export default function ServerDetail() {
                     />
                     <YAxis domain={[0, 100]} width={36} {...axisProps} />
                     <Tooltip content={<ChartTip fmt={(v) => fmtPercent(v)} />} />
-                    <Line type="monotone" dataKey="mem" name="内存" stroke={palette.sky} dot={false} strokeWidth={1.5} isAnimationActive={!isLive} />
-                    <Line type="monotone" dataKey="swap" name="交换" stroke={palette.rose} dot={false} strokeWidth={1.5} isAnimationActive={!isLive} />
+                    <Line type="monotone" dataKey="mem" name={t('metric.mem')} stroke={palette.sky} dot={false} strokeWidth={1.5} isAnimationActive={!isLive} />
+                    <Line type="monotone" dataKey="swap" name={t('metric.swap')} stroke={palette.rose} dot={false} strokeWidth={1.5} isAnimationActive={!isLive} />
                   </LineChart>
                 </ResponsiveContainer>
               </ChartCard>
               <ChartCard
-                title="网络速率"
+                title={t('detail.chart.net')}
                 right={
                   <SeriesChips
                     items={[
-                      { name: '上行', color: palette.green },
-                      { name: '下行', color: palette.sky },
+                      { name: t('series.up'), color: palette.green },
+                      { name: t('series.down'), color: palette.sky },
                     ]}
                   />
                 }
@@ -505,7 +514,7 @@ export default function ServerDetail() {
                     <Area
                       type="monotone"
                       dataKey="netUp"
-                      name="上行"
+                      name={t('series.up')}
                       stroke={palette.green}
                       fill={palette.green}
                       fillOpacity={0.12}
@@ -516,7 +525,7 @@ export default function ServerDetail() {
                     <Area
                       type="monotone"
                       dataKey="netDown"
-                      name="下行"
+                      name={t('series.down')}
                       stroke={palette.sky}
                       fill={palette.sky}
                       fillOpacity={0.12}
@@ -527,7 +536,7 @@ export default function ServerDetail() {
                   </AreaChart>
                 </ResponsiveContainer>
               </ChartCard>
-              <ChartCard title="硬盘 (%)">
+              <ChartCard title={t('detail.chart.disk')}>
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={histView}>
                     <CartesianGrid stroke={gridStroke} vertical={false} />
@@ -541,18 +550,18 @@ export default function ServerDetail() {
                     />
                     <YAxis domain={[0, 100]} width={36} {...axisProps} />
                     <Tooltip content={<ChartTip fmt={(v) => fmtPercent(v)} />} />
-                    <Line type="monotone" dataKey="disk" name="硬盘" stroke={palette.amber} dot={false} strokeWidth={1.5} isAnimationActive={!isLive} />
+                    <Line type="monotone" dataKey="disk" name={t('metric.disk')} stroke={palette.amber} dot={false} strokeWidth={1.5} isAnimationActive={!isLive} />
                   </LineChart>
                 </ResponsiveContainer>
               </ChartCard>
               <div className="lg:col-span-2">
                 <ChartCard
-                  title="连接数 / 进程数"
+                  title={t('detail.chart.conn')}
                   right={
                     <SeriesChips
                       items={[
                         { name: 'TCP', color: palette.violet },
-                        { name: '进程', color: palette.amber },
+                        { name: t('series.proc'), color: palette.amber },
                       ]}
                     />
                   }
@@ -574,7 +583,7 @@ export default function ServerDetail() {
                       <Line
                         type="monotone"
                         dataKey="processes"
-                        name="进程"
+                        name={t('series.proc')}
                         stroke={palette.amber}
                         dot={false}
                         strokeWidth={1.5}
@@ -592,7 +601,7 @@ export default function ServerDetail() {
           {!isLive && timelineBar}
           {pingStats.length === 0 && (
             <div className={`${card} p-10 text-center text-sm text-zinc-500`}>
-              暂无探测任务 · 可在 管理后台 → 探测任务 中添加
+              {t('detail.ping.empty')}
             </div>
           )}
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
@@ -603,13 +612,17 @@ export default function ServerDetail() {
                   <span className="inline-block h-2 w-2 rounded-full" style={{ background: p.color }} />
                   {p.name}
                 </span>
-                <span className="text-xs tabular-nums text-zinc-400">丢包 {p.loss.toFixed(1)}%</span>
+                <span className="text-xs tabular-nums text-zinc-400">
+                  {t('detail.ping.loss', { n: p.loss.toFixed(1) })}
+                </span>
               </div>
               <div className="mt-1 flex items-baseline gap-2">
                 <span className="text-lg font-semibold tabular-nums">
                   {p.cur == null ? '—' : `${p.cur} ms`}
                 </span>
-                <span className="text-xs tabular-nums text-zinc-500">平均 {Math.round(p.avg)} ms</span>
+                <span className="text-xs tabular-nums text-zinc-500">
+                  {t('detail.ping.avg', { n: Math.round(p.avg) })}
+                </span>
               </div>
               <div className="mt-2 h-32">
                 <ResponsiveContainer width="100%" height="100%">

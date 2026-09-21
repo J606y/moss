@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { AdminServer, PingTask } from '../../types'
 import { CheckBox, Modal, NumberInput, Select } from '../../components/ui'
 import { btnGhost, btnPrimary, formLabel, input } from '../../ui'
+import { useT } from '../../i18n'
 
 export interface TaskFormData {
   name: string
@@ -23,6 +24,7 @@ function ServerPicker({
   value: string
   onChange: (v: string) => void
 }) {
+  const { t } = useT()
   const all = value === ''
   const picked = new Set(value ? value.split(',') : [])
   const toggle = (id: string) => {
@@ -37,7 +39,7 @@ function ServerPicker({
     <div className="glass-sheen max-h-44 space-y-0.5 overflow-y-auto rounded-xl border border-white/50 bg-white/45 p-1.5 dark:border-white/10 dark:bg-zinc-900/40">
       <button type="button" role="checkbox" aria-checked={all} className={row} onClick={() => onChange('')}>
         <CheckBox checked={all} />
-        <span className={all ? 'font-medium' : ''}>全部服务器</span>
+        <span className={all ? 'font-medium' : ''}>{t('task.scope.all')}</span>
       </button>
       {servers.map((s) => {
         const on = !all && picked.has(s.id)
@@ -48,7 +50,7 @@ function ServerPicker({
           </button>
         )
       })}
-      {servers.length === 0 && <p className="px-2 py-1.5 text-sm text-zinc-400">暂无服务器</p>}
+      {servers.length === 0 && <p className="px-2 py-1.5 text-sm text-zinc-400">{t('task.scope.empty')}</p>}
     </div>
   )
 }
@@ -66,6 +68,7 @@ export function TaskFormModal({
   onClose: () => void
   onSubmit: (f: TaskFormData) => Promise<void>
 }) {
+  const { t } = useT()
   const [f, setF] = useState(init)
   const [busy, setBusy] = useState(false)
 
@@ -73,10 +76,10 @@ export function TaskFormModal({
     <Modal title={title} onClose={onClose}>
       <div className="space-y-3">
         <div>
-          <label className={formLabel}>名称 *</label>
+          <label className={formLabel}>{t('task.name')}</label>
           <input
             className={input}
-            placeholder="例如：电信 ping"
+            placeholder={t('task.name.placeholder')}
             value={f.name}
             onChange={(e) => setF({ ...f, name: e.target.value })}
             autoFocus
@@ -84,7 +87,7 @@ export function TaskFormModal({
         </div>
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className={formLabel}>类型</label>
+            <label className={formLabel}>{t('task.type')}</label>
             <Select
               value={f.type}
               options={[
@@ -96,26 +99,32 @@ export function TaskFormModal({
             />
           </div>
           <div>
-            <label className={formLabel}>间隔（秒）</label>
+            <label className={formLabel}>{t('task.interval')}</label>
             <NumberInput min={10} value={f.interval} onChange={(v) => setF({ ...f, interval: v })} />
           </div>
         </div>
         <div>
-          <label className={formLabel}>目标 *</label>
+          <label className={formLabel}>{t('task.target')}</label>
           <input
             className={input}
-            placeholder={f.type === 'tcp' ? 'IP:端口，如 1.2.3.4:22' : f.type === 'http' ? 'https://example.com' : '域名或 IP'}
+            placeholder={
+              f.type === 'tcp'
+                ? t('task.target.tcp')
+                : f.type === 'http'
+                  ? 'https://example.com'
+                  : t('task.target.icmp')
+            }
             value={f.target}
             onChange={(e) => setF({ ...f, target: e.target.value })}
           />
         </div>
         <div>
-          <label className={formLabel}>应用于</label>
+          <label className={formLabel}>{t('task.scope')}</label>
           <ServerPicker servers={servers} value={f.serverId} onChange={(v) => setF({ ...f, serverId: v })} />
         </div>
         <div className="flex justify-end gap-2 pt-2">
           <button className={btnGhost} onClick={onClose}>
-            取消
+            {t('common.cancel')}
           </button>
           <button
             className={btnPrimary}
@@ -129,7 +138,7 @@ export function TaskFormModal({
               }
             }}
           >
-            保存
+            {t('common.save')}
           </button>
         </div>
       </div>

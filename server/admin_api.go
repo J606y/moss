@@ -36,11 +36,15 @@ type adminServer struct {
 	// 不自己比较版本号——否则「哪些 agent 认识升级指令」这条判据会散落两处，
 	// 改一处漏一处。UpgradeStage / UpgradeErr 为内存态，面板重启归零。
 	AgentVersion  string `json:"agentVersion"`
-	TargetVersion string `json:"targetVersion"`          // server 自身版本对应的 tag，开发态为空
-	Upgradable    bool   `json:"upgradable"`             // 可一键升级：版本不一致、在线、且 agent 认识升级指令
-	UpgradeHint   string `json:"upgradeHint,omitempty"`  // 不可一键升级时的原因；已是最新时为空
-	UpgradeStage  string `json:"upgradeStage,omitempty"` // 进行中/终态阶段
-	UpgradeErr    string `json:"upgradeErr,omitempty"`
+	TargetVersion string `json:"targetVersion"`         // server 自身版本对应的 tag，开发态为空
+	Upgradable    bool   `json:"upgradable"`            // 可一键升级：版本不一致、在线、且 agent 认识升级指令
+	UpgradeHint   string `json:"upgradeHint,omitempty"` // 不可一键升级时的原因；已是最新时为空
+	// UpgradeHintCode 上一行那句提示的错误码，供前端翻译；
+	// 认不出时前端退回显示 UpgradeHint 的中文原文。
+	UpgradeHintCode   string `json:"upgradeHintCode,omitempty"`
+	UpgradeHintDetail string `json:"upgradeHintDetail,omitempty"`
+	UpgradeStage      string `json:"upgradeStage,omitempty"` // 进行中/终态阶段
+	UpgradeErr        string `json:"upgradeErr,omitempty"`
 
 	// GCP Spot 自动开机配置与运行态（运行态为内存值，面板重启归零）
 	GcpEnabled  bool   `json:"gcpEnabled"`
@@ -74,7 +78,7 @@ func (s *App) handleAdminServers(w http.ResponseWriter, r *http.Request) {
 		 FROM servers ORDER BY sort, created_at`)
 	if err != nil {
 		log.Printf("handleAdminServers query: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	defer rows.Close()
@@ -88,13 +92,17 @@ func (s *App) handleAdminServers(w http.ResponseWriter, r *http.Request) {
 			&a.ExpireAt, &a.Token, &a.IP, &a.IPv6, &a.LastSeen, &a.CreatedAt,
 			&a.GcpEnabled, &a.GcpCredID, &a.GcpProject, &a.GcpZone, &a.GcpInstance, &a.AgentVersion, &agentOS); err != nil {
 			log.Printf("handleAdminServers scan: %v", err)
-			writeErr(w, 500, "内部错误")
+			writeErr(w, errInternal)
 			return
 		}
 		_, _, a.Online = s.hub.Snapshot(a.ID)
 		a.GcpTries, a.GcpLastTry, a.GcpLastErr = s.notifier.GCPStatus(a.ID)
 		a.TargetVersion = upgradeTarget()
-		a.Upgradable, a.UpgradeHint = upgradeAvailability(a.AgentVersion, agentOS, a.Online)
+		var hint *codedError
+		a.Upgradable, hint = upgradeAvailability(a.AgentVersion, agentOS, a.Online)
+		if hint != nil {
+			a.UpgradeHint, a.UpgradeHintCode, a.UpgradeHintDetail = hint.Error(), hint.Code, hint.Detail
+		}
 		a.UpgradeStage, a.UpgradeErr = s.upgrade.Status(a.ID)
 		out = append(out, a)
 	}
@@ -102,51 +110,54 @@ func (s *App) handleAdminServers(w http.ResponseWriter, r *http.Request) {
 }
 
 // normalizeGCP 整理并校验表单里的 GCP 字段（启用时 zone/实例名与凭证必填），
-// 返回错误提示，空串为通过。
+// 返回 nil 表示通过。
 //
 // 凭证在这里定死而不是留到运行时再解析：写入侧堵住「启用了却没绑凭证」这个状态，
 // 是让节点不会在用户添加第二份凭证的那一刻集体失守的前提之一
 // （另一半在 handleAddGCPCredential 里）。
-func normalizeGCP(db *sql.DB, f *serverForm) string {
+//
+// 返回 *apiErr 而不是中文字符串：这些提示会原样流到界面上，
+// 带上错误码前端才翻得动（见 apierr.go）。
+func normalizeGCP(db *sql.DB, f *serverForm) *apiErr {
 	f.GcpCredID = strings.TrimSpace(f.GcpCredID)
 	f.GcpProject = strings.TrimSpace(f.GcpProject)
 	f.GcpZone = strings.TrimSpace(f.GcpZone)
 	f.GcpInstance = strings.TrimSpace(f.GcpInstance)
 	if !f.GcpEnabled {
-		return ""
+		return nil
 	}
 	if f.GcpZone == "" || f.GcpInstance == "" {
-		return "GCP 自动开机需填写 zone 与实例名"
+		return &errGCPZoneRequired
 	}
 	if f.GcpCredID == "" {
 		// 只有一份凭证时不为难用户，直接替他选上。
 		if only := gcpOnlyCredentialID(db); only != "" {
 			f.GcpCredID = only
-			return ""
+			return nil
 		}
 		if n, err := countGCPCredentials(db); err == nil && n == 0 {
-			return "尚未添加 GCP 凭证，请先到「GCP 守护」页添加"
+			return &errGCPNoCred
 		}
-		return "请选择这台节点使用哪一份 GCP 凭证"
+		return &errGCPPickCred
 	}
 	var got string
 	if err := db.QueryRow(`SELECT id FROM gcp_credentials WHERE id = ?`, f.GcpCredID).Scan(&got); err != nil {
-		return "所选 GCP 凭证不存在，请刷新页面后重新选择"
+		return &errGCPCredGone
 	}
-	return ""
+	return nil
 }
 
 func (s *App) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	var f serverForm
 	if err := json.NewDecoder(r.Body).Decode(&f); err != nil || f.Name == "" {
-		writeErr(w, 400, "名称不能为空")
+		writeErr(w, errNameRequired)
 		return
 	}
 	if f.Group == "" {
 		f.Group = "默认"
 	}
-	if msg := normalizeGCP(s.db, &f); msg != "" {
-		writeErr(w, 400, msg)
+	if e := normalizeGCP(s.db, &f); e != nil {
+		writeErr(w, *e)
 		return
 	}
 	id := randString(8)
@@ -162,7 +173,7 @@ func (s *App) handleAddServer(w http.ResponseWriter, r *http.Request) {
 		f.GcpEnabled, f.GcpCredID, f.GcpProject, f.GcpZone, f.GcpInstance,
 	); err != nil {
 		log.Printf("handleAddServer insert (id=%s): %v", id, err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	s.hub.BroadcastMeta()
@@ -173,14 +184,14 @@ func (s *App) handleUpdateServer(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var f serverForm
 	if err := json.NewDecoder(r.Body).Decode(&f); err != nil || f.Name == "" {
-		writeErr(w, 400, "名称不能为空")
+		writeErr(w, errNameRequired)
 		return
 	}
 	if f.Group == "" {
 		f.Group = "默认"
 	}
-	if msg := normalizeGCP(s.db, &f); msg != "" {
-		writeErr(w, 400, msg)
+	if e := normalizeGCP(s.db, &f); e != nil {
+		writeErr(w, *e)
 		return
 	}
 	// 先取旧的 GCP 配置：改动过就要丢弃运行态。用户改凭证/实例名多半正是在修故障，
@@ -196,11 +207,11 @@ func (s *App) handleUpdateServer(w http.ResponseWriter, r *http.Request) {
 		f.GcpEnabled, f.GcpCredID, f.GcpProject, f.GcpZone, f.GcpInstance, id)
 	if err != nil {
 		log.Printf("handleUpdateServer (id=%s): %v", id, err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		writeErr(w, 404, "服务器不存在")
+		writeErr(w, errServerNotFound)
 		return
 	}
 	if old.GcpEnabled != f.GcpEnabled || old.GcpCredID != f.GcpCredID || old.GcpProject != f.GcpProject ||
@@ -215,7 +226,7 @@ func (s *App) handleDeleteServer(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if _, err := s.db.Exec(`DELETE FROM servers WHERE id=?`, id); err != nil {
 		log.Printf("handleDeleteServer (id=%s): %v", id, err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	s.db.Exec(`DELETE FROM history WHERE server_id=?`, id)
@@ -230,26 +241,26 @@ func (s *App) handleDeleteServer(w http.ResponseWriter, r *http.Request) {
 func (s *App) handleReorderServers(w http.ResponseWriter, r *http.Request) {
 	var ids []string
 	if err := json.NewDecoder(r.Body).Decode(&ids); err != nil {
-		writeErr(w, 400, "请求格式错误")
+		writeErr(w, errBadJSON)
 		return
 	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		log.Printf("handleReorderServers begin: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	defer tx.Rollback()
 	for i, id := range ids {
 		if _, err := tx.Exec(`UPDATE servers SET sort=? WHERE id=?`, i, id); err != nil {
 			log.Printf("handleReorderServers update (id=%s): %v", id, err)
-			writeErr(w, 500, "内部错误")
+			writeErr(w, errInternal)
 			return
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		log.Printf("handleReorderServers commit: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	s.hub.BroadcastMeta()
@@ -274,7 +285,7 @@ func (s *App) handleAdminTasks(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(`SELECT id, name, type, target, interval, enabled, server_id FROM ping_tasks ORDER BY sort, id`)
 	if err != nil {
 		log.Printf("handleAdminTasks query: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	defer rows.Close()
@@ -283,7 +294,7 @@ func (s *App) handleAdminTasks(w http.ResponseWriter, r *http.Request) {
 		var t taskItem
 		if err := rows.Scan(&t.ID, &t.Name, &t.Type, &t.Target, &t.Interval, &t.Enabled, &t.ServerID); err != nil {
 			log.Printf("handleAdminTasks scan: %v", err)
-			writeErr(w, 500, "内部错误")
+			writeErr(w, errInternal)
 			return
 		}
 		out = append(out, t)
@@ -294,7 +305,7 @@ func (s *App) handleAdminTasks(w http.ResponseWriter, r *http.Request) {
 func (s *App) handleAddTask(w http.ResponseWriter, r *http.Request) {
 	var t taskItem
 	if err := json.NewDecoder(r.Body).Decode(&t); err != nil || t.Name == "" || t.Target == "" || !validTaskType(t.Type) {
-		writeErr(w, 400, "参数不完整")
+		writeErr(w, errMissingParams)
 		return
 	}
 	if t.Interval < 10 {
@@ -308,7 +319,7 @@ func (s *App) handleAddTask(w http.ResponseWriter, r *http.Request) {
 		t.Name, t.Type, t.Target, t.Interval, t.Enabled, t.ServerID, maxSort+1)
 	if err != nil {
 		log.Printf("handleAddTask insert: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	id, _ := res.LastInsertId()
@@ -320,7 +331,7 @@ func (s *App) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	var t taskItem
 	if err := json.NewDecoder(r.Body).Decode(&t); err != nil || t.Name == "" || t.Target == "" || !validTaskType(t.Type) {
-		writeErr(w, 400, "参数不完整")
+		writeErr(w, errMissingParams)
 		return
 	}
 	if t.Interval < 10 {
@@ -330,7 +341,7 @@ func (s *App) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 		`UPDATE ping_tasks SET name=?, type=?, target=?, interval=?, enabled=?, server_id=? WHERE id=?`,
 		t.Name, t.Type, t.Target, t.Interval, t.Enabled, t.ServerID, id); err != nil {
 		log.Printf("handleUpdateTask (id=%d): %v", id, err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	s.pushConfigAll()
@@ -341,7 +352,7 @@ func (s *App) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if _, err := s.db.Exec(`DELETE FROM ping_tasks WHERE id=?`, id); err != nil {
 		log.Printf("handleDeleteTask (id=%d): %v", id, err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	s.db.Exec(`DELETE FROM ping_results WHERE task_id=?`, id)
@@ -354,26 +365,26 @@ func (s *App) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 func (s *App) handleReorderTasks(w http.ResponseWriter, r *http.Request) {
 	var ids []int64
 	if err := json.NewDecoder(r.Body).Decode(&ids); err != nil {
-		writeErr(w, 400, "请求格式错误")
+		writeErr(w, errBadJSON)
 		return
 	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		log.Printf("handleReorderTasks begin: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	defer tx.Rollback()
 	for i, id := range ids {
 		if _, err := tx.Exec(`UPDATE ping_tasks SET sort=? WHERE id=?`, i, id); err != nil {
 			log.Printf("handleReorderTasks update (id=%d): %v", id, err)
-			writeErr(w, 500, "内部错误")
+			writeErr(w, errInternal)
 			return
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		log.Printf("handleReorderTasks commit: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})
@@ -382,9 +393,12 @@ func (s *App) handleReorderTasks(w http.ResponseWriter, r *http.Request) {
 /* ---------- 站点设置 ---------- */
 
 type settingsView struct {
-	Username       string `json:"username"`
-	SiteName       string `json:"siteName"`
-	SiteDesc       string `json:"siteDesc"`
+	Username string `json:"username"`
+	SiteName string `json:"siteName"`
+	SiteDesc string `json:"siteDesc"`
+	// Lang 界面语言档位：auto / zh / en。auto 表示跟随每位访客的浏览器语言，
+	// zh、en 则是全站强制——首页对外公开，这个选择对所有访客生效，不只是管理员自己。
+	Lang           string `json:"lang"`
 	ReportInterval int    `json:"reportInterval"`
 	SampleInterval int    `json:"sampleInterval"`
 	HistoryDays    int    `json:"historyDays"`
@@ -406,6 +420,7 @@ func (s *App) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		Username:         getSetting(s.db, keyUsername, "admin"),
 		SiteName:         getSetting(s.db, keySiteName, "Moss"),
 		SiteDesc:         getSetting(s.db, keySiteDesc, "智控中心"),
+		Lang:             normLang(getSetting(s.db, keyLang, "auto")),
 		ReportInterval:   getSettingInt(s.db, keyReportInterval, 2),
 		SampleInterval:   getSettingInt(s.db, keySampleInterval, 10),
 		HistoryDays:      getSettingInt(s.db, keyHistoryDays, 7),
@@ -434,7 +449,7 @@ func clampInt(v, min, max, fallback int) int {
 func (s *App) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	var v settingsView
 	if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
-		writeErr(w, 400, "请求格式错误")
+		writeErr(w, errBadJSON)
 		return
 	}
 	if v.SiteName == "" {
@@ -446,6 +461,7 @@ func (s *App) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	setSetting(s.db, keyUsername, v.Username)
 	setSetting(s.db, keySiteName, v.SiteName)
 	setSetting(s.db, keySiteDesc, v.SiteDesc)
+	setSetting(s.db, keyLang, normLang(v.Lang))
 	setSetting(s.db, keyReportInterval, strconv.Itoa(clampInt(v.ReportInterval, 1, 60, 2)))
 	setSetting(s.db, keySampleInterval, strconv.Itoa(clampInt(v.SampleInterval, 5, 3600, 10)))
 	setSetting(s.db, keyHistoryDays, strconv.Itoa(clampInt(v.HistoryDays, 1, 365, 7)))
@@ -465,17 +481,17 @@ func (s *App) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		New string `json:"new"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.New) < 6 {
-		writeErr(w, 400, "新密码至少 6 位")
+		writeErr(w, errPasswordTooShort)
 		return
 	}
 	if !s.checkPassword(body.Old) {
-		writeErr(w, 401, "当前密码错误")
+		writeErr(w, errWrongPassword)
 		return
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(body.New), bcrypt.DefaultCost)
 	if err != nil {
 		log.Printf("handleChangePassword bcrypt: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	setSetting(s.db, keyPasswordHash, string(hash))

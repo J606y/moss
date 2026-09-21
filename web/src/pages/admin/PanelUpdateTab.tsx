@@ -4,8 +4,9 @@ import { ArrowDownToLine, CheckCircle2, ChevronDown, Loader2, RefreshCw, Triangl
 import { get, post, put } from '../../api/client'
 import type { AdminServer, PanelUpdate } from '../../types'
 import { Select } from '../../components/ui'
-import { errMsg } from '../../utils/admin'
+import { errMsg, hintText } from '../../utils/admin'
 import { btnGhost, btnPrimary, card } from '../../ui'
+import { getLang, translate, useT } from '../../i18n'
 import type { Toast } from './types'
 
 /** 更新期间面板会重启，轮询间隔。 */
@@ -21,6 +22,7 @@ const ctlWidth = 'w-36'
  * 「2.0.0-beta.3 和 2.0.0 谁更新」这种规则散落两处，改一处就会漏。
  */
 export function PanelUpdateTab({ toast }: { toast: Toast }) {
+  const { t } = useT()
   const [d, setD] = useState<PanelUpdate | null>(null)
   const [servers, setServers] = useState<AdminServer[]>([])
   const [checking, setChecking] = useState(false)
@@ -58,11 +60,18 @@ export function PanelUpdateTab({ toast }: { toast: Toast }) {
         if (target && data.current === target) {
           setUpdating(false)
           updatingTo.current = null
-          toast(`已更新到 v${target}`)
+          // 这里用 translate 而不是闭包里的 t：轮询的依赖数组不该把语言也拉进来，
+          // 否则切一次语言就重置一次计时器。取调用当刻的语言正是想要的行为。
+          toast(translate(getLang(), 'upd.done', { v: target }))
         } else if (data.stage === 'failed') {
           setUpdating(false)
           updatingTo.current = null
-          toast(`更新失败：${data.stageErr || '原因未知'}`)
+          const lang = getLang()
+          toast(
+            translate(lang, 'upd.failed', {
+              err: data.stageErr || translate(lang, 'upd.failed.unknown'),
+            }),
+          )
         }
       } catch {
         /* 面板正在重启，连不上是正常的，继续等 */
@@ -95,10 +104,10 @@ export function PanelUpdateTab({ toast }: { toast: Toast }) {
     if (!d?.latest) return
     setStarting(true)
     try {
-      const res = await post<{ message: string; target: string }>('/api/admin/panel-update/start')
+      const res = await post<{ target: string }>('/api/admin/panel-update/start')
       updatingTo.current = res.target
       setUpdating(true)
-      toast(res.message)
+      toast(t('upd.started'))
     } catch (e) {
       toast(errMsg(e))
     } finally {
@@ -110,7 +119,7 @@ export function PanelUpdateTab({ toast }: { toast: Toast }) {
     return (
       <div className={`${card} flex items-center justify-center gap-2 p-10 text-sm text-zinc-400`}>
         <Loader2 className="h-4 w-4 animate-spin" />
-        加载中…
+        {t('common.loading')}
       </div>
     )
   }
@@ -127,36 +136,32 @@ export function PanelUpdateTab({ toast }: { toast: Toast }) {
         {/* 三行的控件统一用下拉、且同宽：右边缘对齐，读起来才是一组设置，
             而不是三个各自为政的控件。 */}
         <Row
-          title="自动更新"
-          desc="发现新版本时自动安装。启动失败会自动回滚，但更新期间面板会短暂中断。"
+          title={t('upd.auto')}
+          desc={t('upd.auto.desc')}
           control={
             <div className={ctlWidth}>
               <Select
                 value={d.config.auto ? 'on' : 'off'}
                 onChange={(v) => save({ auto: v === 'on' })}
                 options={[
-                  { value: 'off', label: '关闭' },
-                  { value: 'on', label: '开启' },
+                  { value: 'off', label: t('common.off') },
+                  { value: 'on', label: t('common.on') },
                 ]}
               />
             </div>
           }
         />
         <Row
-          title="更新通道"
-          desc={
-            d.config.channel === 'beta'
-              ? '第一时间收到新功能，可能存在未发现的问题'
-              : '只接收正式发布的版本，跳过测试版'
-          }
+          title={t('upd.channel')}
+          desc={t(d.config.channel === 'beta' ? 'upd.channel.beta.desc' : 'upd.channel.stable.desc')}
           control={
             <div className={ctlWidth}>
               <Select
                 value={d.config.channel}
                 onChange={(v) => save({ channel: v as 'stable' | 'beta' })}
                 options={[
-                  { value: 'stable', label: '正式版' },
-                  { value: 'beta', label: '测试版' },
+                  { value: 'stable', label: t('upd.channel.stable') },
+                  { value: 'beta', label: t('upd.channel.beta') },
                 ]}
               />
             </div>
@@ -165,8 +170,8 @@ export function PanelUpdateTab({ toast }: { toast: Toast }) {
         {/* 不做自动探测：NAT、多网卡、反代都会让「出口 IP 对得上」这种猜法出错，
             而猜错的后果是把更新打到别的机器上。 */}
         <Row
-          title="面板所在服务器"
-          desc="更新由这台机器上的 agent 执行，需要它已开启远程执行能力"
+          title={t('upd.host')}
+          desc={t('upd.host.desc')}
           last
           control={
             <div className={ctlWidth}>
@@ -174,7 +179,7 @@ export function PanelUpdateTab({ toast }: { toast: Toast }) {
                 value={d.config.hostServer}
                 onChange={(v) => save({ hostServer: v })}
                 options={[
-                  { value: '', label: '未指定' },
+                  { value: '', label: t('upd.host.none') },
                   ...servers.map((s) => ({ value: s.id, label: s.name })),
                 ]}
               />
@@ -183,10 +188,7 @@ export function PanelUpdateTab({ toast }: { toast: Toast }) {
         />
       </section>
 
-      <p className="px-1 text-xs text-zinc-400">
-        切换通道后只会提示版本号更高的更新。当前跑测试版时，要等正式版追上这个版本号才会出现更新提示；
-        需要回退请到服务器上操作。
-      </p>
+      <p className="px-1 text-xs text-zinc-400">{t('upd.channelHint')}</p>
 
       {/* ── 主体：版本状态 ── */}
       <section className={`${card} p-5`}>
@@ -199,7 +201,7 @@ export function PanelUpdateTab({ toast }: { toast: Toast }) {
               <p className="mt-1 text-xs text-zinc-500">
                 {d.latest.name || d.latest.version}
                 {d.latest.published && ` · ${d.latest.published.slice(0, 10)}`}
-                {d.latest.prerelease && ' · 测试版'}
+                {d.latest.prerelease && ` · ${t('upd.channel.beta')}`}
               </p>
             )}
 
@@ -211,7 +213,7 @@ export function PanelUpdateTab({ toast }: { toast: Toast }) {
                   onClick={() => setShowNotes((v) => !v)}
                 >
                   <ChevronDown className={`h-3.5 w-3.5 transition ${showNotes ? 'rotate-180' : ''}`} />
-                  {showNotes ? '收起更新说明' : '查看更新说明'}
+                  {t(showNotes ? 'upd.notes.hide' : 'upd.notes.show')}
                 </button>
                 {showNotes && (
                   <div className="glass-sheen mt-2 max-h-64 space-y-2 overflow-auto rounded-xl border border-white/50 bg-white/45 p-3 text-xs leading-relaxed dark:border-white/10 dark:bg-zinc-900/40">
@@ -225,18 +227,18 @@ export function PanelUpdateTab({ toast }: { toast: Toast }) {
               <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">{d.checkError}</p>
             )}
             {d.avail.action === 'downgrade' && (
-              <p className="mt-2 text-xs text-zinc-500">
-                {d.avail.reason}。面板只做升级，需要回退请到服务器上操作。
-              </p>
+              <p className="mt-2 text-xs text-zinc-500">{t('upd.downgrade', { reason: d.avail.reason ?? '' })}</p>
             )}
             {!d.hostReady && d.avail.action === 'update' && (
               <p className="mt-2 flex items-start gap-1.5 text-xs text-amber-600 dark:text-amber-400">
                 <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                {d.hostHint}
+                {hintText(d.hostHint, d.hostHintCode, d.hostHintDetail)}
               </p>
             )}
             {d.stage === 'failed' && !updating && (
-              <p className="mt-2 text-xs text-rose-500">上次更新失败：{d.stageErr}</p>
+              <p className="mt-2 text-xs text-rose-500">
+                {t('upd.lastFailed', { err: d.stageErr || t('upd.failed.unknown') })}
+              </p>
             )}
           </div>
         </div>
@@ -247,12 +249,12 @@ export function PanelUpdateTab({ toast }: { toast: Toast }) {
         <div className="mt-4 flex items-center justify-end gap-2">
           <button className={btnGhost} onClick={check} disabled={checking || updating}>
             <RefreshCw className={`h-4 w-4 ${checking ? 'animate-spin' : ''}`} />
-            {checking ? '检查中…' : '检查更新'}
+            {t(checking ? 'upd.checking' : 'upd.check')}
           </button>
           {canUpdate && (
             <button className={btnPrimary} onClick={start} disabled={starting}>
               <ArrowDownToLine className="h-4 w-4" />
-              {starting ? '正在下发…' : '立即更新'}
+              {t(starting ? 'upd.starting' : 'upd.start')}
             </button>
           )}
         </div>
@@ -301,19 +303,20 @@ function StatusIcon({
 
 /** 状态标题。措辞照 iOS：可更新时给版本号，最新时明确说"已是最新版本"。 */
 function Headline({ d, updating }: { d: PanelUpdate; updating: boolean }) {
+  const { t } = useT()
   if (updating) {
     return (
       <>
-        <h2 className="font-semibold">正在更新…</h2>
-        <p className="mt-0.5 text-sm text-zinc-500">面板即将重启，期间会短暂无法访问。</p>
+        <h2 className="font-semibold">{t('upd.updating')}</h2>
+        <p className="mt-0.5 text-sm text-zinc-500">{t('upd.updating.desc')}</p>
       </>
     )
   }
   if (d.avail.action === 'update' && d.latest) {
     return (
       <>
-        <h2 className="font-semibold">可更新至 {d.latest.version}</h2>
-        <p className="mt-0.5 text-sm text-zinc-500">当前 v{d.current}</p>
+        <h2 className="font-semibold">{t('upd.available', { v: d.latest.version })}</h2>
+        <p className="mt-0.5 text-sm text-zinc-500">{t('upd.current', { v: d.current })}</p>
       </>
     )
   }
@@ -321,7 +324,11 @@ function Headline({ d, updating }: { d: PanelUpdate; updating: boolean }) {
     <>
       <h2 className="font-semibold">Moss v{d.current}</h2>
       <p className="mt-0.5 text-sm text-zinc-500">
-        {d.checkError ? '无法检查更新' : d.avail.action === 'unknown' ? d.avail.reason : '已是最新版本'}
+        {d.checkError
+          ? t('upd.checkFailed')
+          : d.avail.action === 'unknown'
+            ? d.avail.reason
+            : t('upd.upToDate')}
       </p>
     </>
   )

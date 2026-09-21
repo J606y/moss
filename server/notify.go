@@ -113,8 +113,27 @@ func (n *Notifier) fire(cfg notifyConfig, ev alertEvent) {
 	wh := n.webhook
 	n.mu.Unlock()
 
+	// 文案在这里才成形：告警产生处只给结构化字段与参数。
+	// 两条通道拿同一句话——webhook 的 text 本就是「人类可读兜底」，
+	// 没有理由和 Telegram 里那句不一致。
+	ev.Text = renderAlert(ev, n.alertLang())
 	n.send(cfg, ev.Text)
 	n.sendWebhook(wh, ev)
+}
+
+// alertLang 推送用的语言。
+//
+// 站点档位 auto 时退回中文：推送没有浏览器可问，auto 在这条路上无从解析，
+// 而中文是改造前的行为。要英文告警就把站点语言显式设成 English。
+//
+// 现读不缓存：站点设置保存时不会调 Reload，缓存会一直陈旧到进程重启。
+// 告警是低频事件，每条多一次 settings 读可以忽略——同一条路径上的
+// serverName 本来就每次查一次库。
+func (n *Notifier) alertLang() string {
+	if normLang(getSetting(n.db, keyLang, langAuto)) == langEN {
+		return langEN
+	}
+	return langZH
 }
 
 func newNotifier(db *sql.DB) *Notifier {
@@ -150,16 +169,16 @@ func (n *Notifier) Reload() {
 	// 又会凭空发出一条「✅ 网速恢复」——用户从未收到过对应的告警。
 	// 改阈值同理：留下来的告警态是按旧阈值算出来的，对新阈值没有意义。
 	if !cfg.LoadOn || cfg.CPUThreshold != old.CPUThreshold {
-		n.clearMetricState("CPU")
+		n.clearMetricState(metricCPU)
 	}
 	if !cfg.LoadOn || cfg.MemThreshold != old.MemThreshold {
-		n.clearMetricState("内存")
+		n.clearMetricState(metricMem)
 	}
 	if !cfg.LoadOn || cfg.DiskThreshold != old.DiskThreshold {
-		n.clearMetricState("硬盘")
+		n.clearMetricState(metricDisk)
 	}
 	if !cfg.NetOn || cfg.NetThreshold != old.NetThreshold {
-		n.clearMetricState("net")
+		n.clearMetricState(metricNet)
 	}
 	n.mu.Unlock()
 }
@@ -214,7 +233,7 @@ func (n *Notifier) OnOnline(id string) {
 			Type:       evtServerOnline,
 			ServerID:   id,
 			ServerName: name,
-			Text:       fmt.Sprintf("🟢 服务器恢复\n%s 已重新上线（离线 %s）", name, dur),
+			params:     map[string]string{"name": name, "dur": dur.String()},
 		})
 	}
 }
@@ -240,12 +259,15 @@ func (n *Notifier) OnReport(id string, cpu, mem, disk, netUp, netDown float64) {
 	st := n.state(id)
 	// 除文案外一并携带指标名、实测值与阈值：接收端（AI 网关）应当读结构化字段，
 	// 而不是去解析中文告警文案——文案一改，对端就崩。
+	//
+	// 判定在锁内、推送在锁外：机器名要查库，不能持锁时做。
+	// 所以 params 里的 name 留到出锁后统一补。
 	type fire struct {
-		msg   string
-		typ   string
-		met   string
-		val   float64
-		thres float64
+		typ    string
+		met    string
+		val    float64
+		thres  float64
+		params map[string]string
 	}
 	var fires []fire
 	now := time.Now()
@@ -267,9 +289,12 @@ func (n *Notifier) OnReport(id string, cpu, mem, disk, netUp, netDown float64) {
 			if !st.highAlerted[metric] && now.Sub(st.highSince[metric]) >= hold {
 				st.highAlerted[metric] = true
 				fires = append(fires, fire{
-					msg: fmt.Sprintf("⚠️ 负载告警\n%%NAME%% %s 使用率 %.1f%%，已持续 %d 分钟（阈值 %d%%）",
-						metric, val, cfg.LoadMinutes, threshold),
 					typ: evtLoadAlert, met: metric, val: val, thres: th,
+					params: map[string]string{
+						"val": fmt.Sprintf("%.1f", val),
+						"min": strconv.Itoa(cfg.LoadMinutes),
+						"th":  strconv.Itoa(threshold),
+					},
 				})
 			}
 		// 按比例迟滞带（恢复回差），低阈值也可达，避免在阈值附近反复告警；
@@ -283,17 +308,20 @@ func (n *Notifier) OnReport(id string, cpu, mem, disk, netUp, netDown float64) {
 				st.highAlerted[metric] = false
 				delete(st.lowSince, metric)
 				fires = append(fires, fire{
-					msg: fmt.Sprintf("✅ 负载恢复\n%%NAME%% %s 已回落至 %.1f%% 并持续 %d 秒", metric, val, cfg.RecoverSec),
 					typ: evtLoadRecovered, met: metric, val: val, thres: th,
+					params: map[string]string{
+						"val": fmt.Sprintf("%.1f", val),
+						"sec": strconv.Itoa(cfg.RecoverSec),
+					},
 				})
 			}
 			// 回差带内两个计时都不动：既不算高也不算低，维持现状。
 		}
 	}
 	if cfg.LoadOn {
-		check("CPU", cpu, cfg.CPUThreshold)
-		check("内存", mem, cfg.MemThreshold)
-		check("硬盘", disk, cfg.DiskThreshold)
+		check(metricCPU, cpu, cfg.CPUThreshold)
+		check(metricMem, mem, cfg.MemThreshold)
+		check(metricDisk, disk, cfg.DiskThreshold)
 	}
 
 	// 网速：上/下行任一方向超阈值即计时，独立的持续时长（秒），复用同一状态机与迟滞逻辑
@@ -304,32 +332,40 @@ func (n *Notifier) OnReport(id string, cpu, mem, disk, netUp, netDown float64) {
 		if netDown > speed {
 			speed = netDown
 		}
+		// 上下行两个数字两条文案都要用，先算好
+		up := fmt.Sprintf("%.1f", netUp/mb)
+		down := fmt.Sprintf("%.1f", netDown/mb)
 		switch {
 		case speed >= th:
-			delete(st.lowSince, "net")
-			if st.highSince["net"].IsZero() {
-				st.highSince["net"] = now
+			delete(st.lowSince, metricNet)
+			if st.highSince[metricNet].IsZero() {
+				st.highSince[metricNet] = now
 			}
-			if !st.highAlerted["net"] && now.Sub(st.highSince["net"]) >= time.Duration(cfg.NetSeconds)*time.Second {
-				st.highAlerted["net"] = true
+			if !st.highAlerted[metricNet] && now.Sub(st.highSince[metricNet]) >= time.Duration(cfg.NetSeconds)*time.Second {
+				st.highAlerted[metricNet] = true
 				fires = append(fires, fire{
-					msg: fmt.Sprintf("⚠️ 网速告警\n%%NAME%% 上行 %.1f MB/s / 下行 %.1f MB/s，已持续 %d 秒（阈值 %d MB/s）",
-						netUp/mb, netDown/mb, cfg.NetSeconds, cfg.NetThreshold),
-					typ: evtNetAlert, met: "net", val: speed, thres: th,
+					typ: evtNetAlert, met: metricNet, val: speed, thres: th,
+					params: map[string]string{
+						"up": up, "down": down,
+						"sec": strconv.Itoa(cfg.NetSeconds),
+						"th":  strconv.Itoa(cfg.NetThreshold),
+					},
 				})
 			}
 		case speed < th*0.9:
-			delete(st.highSince, "net")
-			if st.lowSince["net"].IsZero() {
-				st.lowSince["net"] = now
+			delete(st.highSince, metricNet)
+			if st.lowSince[metricNet].IsZero() {
+				st.lowSince[metricNet] = now
 			}
-			if st.highAlerted["net"] && now.Sub(st.lowSince["net"]) >= recoverHold {
-				st.highAlerted["net"] = false
-				delete(st.lowSince, "net")
+			if st.highAlerted[metricNet] && now.Sub(st.lowSince[metricNet]) >= recoverHold {
+				st.highAlerted[metricNet] = false
+				delete(st.lowSince, metricNet)
 				fires = append(fires, fire{
-					msg: fmt.Sprintf("✅ 网速恢复\n%%NAME%% 网速已回落至 ↑ %.1f / ↓ %.1f MB/s 并持续 %d 秒",
-						netUp/mb, netDown/mb, cfg.RecoverSec),
-					typ: evtNetRecovered, met: "net", val: speed, thres: th,
+					typ: evtNetRecovered, met: metricNet, val: speed, thres: th,
+					params: map[string]string{
+						"up": up, "down": down,
+						"sec": strconv.Itoa(cfg.RecoverSec),
+					},
 				})
 			}
 		}
@@ -339,14 +375,15 @@ func (n *Notifier) OnReport(id string, cpu, mem, disk, netUp, netDown float64) {
 	if len(fires) > 0 {
 		name := n.serverName(id)
 		for _, f := range fires {
+			f.params["name"] = name
 			n.fire(cfg, alertEvent{
 				Type:       f.typ,
 				ServerID:   id,
 				ServerName: name,
-				Text:       strings.ReplaceAll(f.msg, "%NAME%", name),
 				Metric:     f.met,
 				Value:      f.val,
 				Threshold:  f.thres,
+				params:     f.params,
 			})
 		}
 	}
@@ -440,7 +477,7 @@ func (n *Notifier) Run() {
 				Type:       evtServerOffline,
 				ServerID:   p.id,
 				ServerName: name,
-				Text:       fmt.Sprintf("🔴 服务器离线\n%s 已离线超过 %d 秒", name, cfg.OfflineDelay),
+				params:     map[string]string{"name": name, "sec": strconv.Itoa(cfg.OfflineDelay)},
 			})
 		}
 
@@ -490,15 +527,21 @@ func (n *Notifier) checkExpiry(cfg notifyConfig) {
 			log.Printf("checkExpiry mark (id=%s): %v", d.id, err)
 			continue
 		}
-		left := fmt.Sprintf("剩余 %d 天", d.daysLeft)
+		// 「今天到期」换一条文案而不是让 {days} 填 0：「剩余 0 天」在两种语言里都别扭。
+		key := ""
 		if d.daysLeft == 0 {
-			left = "今天到期"
+			key = txtExpiringToday
 		}
 		n.fire(cfg, alertEvent{
 			Type:       evtServerExpiring,
 			ServerID:   d.id,
 			ServerName: d.name,
-			Text:       fmt.Sprintf("📅 到期提醒\n%s 将于 %s 到期（%s）", d.name, d.expireAt, left),
+			textKey:    key,
+			params: map[string]string{
+				"name": d.name,
+				"date": d.expireAt,
+				"days": strconv.Itoa(d.daysLeft),
+			},
 		})
 	}
 }
@@ -520,11 +563,12 @@ func (n *Notifier) NotifyBlocked(serverName, caller, cmd, reason string) {
 	n.fire(cfg, alertEvent{
 		Type:       evtCommandBlocked,
 		ServerName: serverName,
-		Text: "🚫 命令被拦截\n\n" +
-			"机器：" + serverName + "\n" +
-			"调用方：" + caller + "\n" +
-			"原因：" + reason + "\n\n" +
-			"命令：\n" + cmd,
+		params: map[string]string{
+			"name":   serverName,
+			"caller": caller,
+			"reason": reason,
+			"cmd":    cmd,
+		},
 	})
 }
 
@@ -573,7 +617,7 @@ func (s *App) handleGetNotify(w http.ResponseWriter, r *http.Request) {
 func (s *App) handlePutNotify(w http.ResponseWriter, r *http.Request) {
 	var v notifyConfig
 	if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
-		writeErr(w, 400, "请求格式错误")
+		writeErr(w, errBadJSON)
 		return
 	}
 	b2s := func(b bool) string {
@@ -585,7 +629,7 @@ func (s *App) handlePutNotify(w http.ResponseWriter, r *http.Request) {
 	// Bot Token 加密落库：拿到 moss.db 就等于拿到 bot 的完全控制权。
 	tgToken, err := encryptSecret(strings.TrimSpace(v.TgToken))
 	if err != nil {
-		writeErr(w, 500, "Bot Token 加密失败，未保存，请检查服务器状态后重试")
+		writeErr(w, errNotifyEncrypt)
 		return
 	}
 	setSetting(s.db, keyNotifyTgToken, tgToken)
@@ -610,11 +654,11 @@ func (s *App) handlePutNotify(w http.ResponseWriter, r *http.Request) {
 func (s *App) handleTestNotify(w http.ResponseWriter, r *http.Request) {
 	cfg := loadNotifyConfig(s.db)
 	if cfg.TgToken == "" || cfg.TgChat == "" {
-		writeErr(w, 400, "请先填写并保存 Bot Token 与 Chat ID")
+		writeErr(w, errNotifyNotConfigured)
 		return
 	}
 	if err := sendTelegram(cfg.TgToken, cfg.TgChat, "✅ Moss 测试消息\n通知配置正常。"); err != nil {
-		writeErr(w, 502, "发送失败: "+redactURLErr(err))
+		writeErr(w, errNotifySendFailed.with(redactURLErr(err)))
 		return
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})

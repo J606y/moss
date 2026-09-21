@@ -536,39 +536,47 @@ func TestNormalizeGCPCredential(t *testing.T) {
 		return serverForm{Name: "n", GcpEnabled: true, GcpZone: "us-central1-a", GcpInstance: "vm-1"}
 	}
 
+	// 断言错误码而不是中文措辞：文案会改，码不会——这正是错误码方案要买的东西。
+	codeOf := func(e *apiErr) string {
+		if e == nil {
+			return ""
+		}
+		return e.Code
+	}
+
 	f := base()
-	if msg := normalizeGCP(app.db, &f); !strings.Contains(msg, "尚未添加") {
-		t.Fatalf("没有凭证时应提示去添加，得到 %q", msg)
+	if got := codeOf(normalizeGCP(app.db, &f)); got != errGCPNoCred.Code {
+		t.Fatalf("没有凭证时应提示去添加，得到 %q", got)
 	}
 
 	saA, _ := makeSAAs(t, "a@proj-a.iam.gserviceaccount.com", "proj-a", "")
 	idA := addTestCred(t, app, saA)
 	f = base()
-	if msg := normalizeGCP(app.db, &f); msg != "" || f.GcpCredID != idA {
-		t.Fatalf("只有一份凭证时应自动选上: msg=%q credID=%q", msg, f.GcpCredID)
+	if got := codeOf(normalizeGCP(app.db, &f)); got != "" || f.GcpCredID != idA {
+		t.Fatalf("只有一份凭证时应自动选上: code=%q credID=%q", got, f.GcpCredID)
 	}
 
 	f = base()
 	f.GcpCredID = "nope"
-	if msg := normalizeGCP(app.db, &f); msg == "" {
-		t.Fatal("不存在的凭证应被拒绝")
+	if got := codeOf(normalizeGCP(app.db, &f)); got != errGCPCredGone.Code {
+		t.Fatalf("不存在的凭证应被拒绝，得到 %q", got)
 	}
 
 	saB, _ := makeSAAs(t, "b@proj-b.iam.gserviceaccount.com", "proj-b", "")
 	idB := addTestCred(t, app, saB)
 	f = base()
-	if msg := normalizeGCP(app.db, &f); msg == "" {
-		t.Fatal("多份凭证且未指定时应要求选择")
+	if got := codeOf(normalizeGCP(app.db, &f)); got != errGCPPickCred.Code {
+		t.Fatalf("多份凭证且未指定时应要求选择，得到 %q", got)
 	}
 	f = base()
 	f.GcpCredID = idB
-	if msg := normalizeGCP(app.db, &f); msg != "" {
-		t.Fatalf("显式指定的合法凭证应通过: %q", msg)
+	if got := codeOf(normalizeGCP(app.db, &f)); got != "" {
+		t.Fatalf("显式指定的合法凭证应通过: %q", got)
 	}
 
 	// 没开自动开机就不该被凭证卡住
 	f = serverForm{Name: "n"}
-	if msg := normalizeGCP(app.db, &f); msg != "" {
-		t.Fatalf("未启用时不应校验凭证: %q", msg)
+	if got := codeOf(normalizeGCP(app.db, &f)); got != "" {
+		t.Fatalf("未启用时不应校验凭证: %q", got)
 	}
 }

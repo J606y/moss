@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Modal, Select, Toggle } from '../../components/ui'
 import { btnGhost, btnPrimary, formLabel, input } from '../../ui'
+import { useT } from '../../i18n'
 import type { GcpCredential } from '../../types'
 
 export interface ServerFormData {
@@ -36,17 +37,18 @@ export function ServerFormModal({
   onClose: () => void
   onSubmit: (f: ServerFormData) => Promise<void>
 }) {
+  const { t } = useT()
   const [f, setF] = useState(init)
   const [busy, setBusy] = useState(false)
   const set = (k: keyof ServerFormData) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setF((prev) => ({ ...prev, [k]: e.target.value }))
 
   const credOptions = [
-    { value: '', label: '请选择凭证' },
+    { value: '', label: t('srv.gcp.cred.pick') },
     ...(creds ?? []).map((c) => ({ value: c.id, label: c.projectId })),
     // 绑定的凭证已被删除时补一个占位项：否则 Select 会把裸 id 当标签显示出来。
     ...(f.gcpCredId && creds && !creds.some((c) => c.id === f.gcpCredId)
-      ? [{ value: f.gcpCredId, label: '（凭证已删除，请重新选择）' }]
+      ? [{ value: f.gcpCredId, label: t('srv.gcp.cred.deleted') }]
       : []),
   ]
 
@@ -54,38 +56,54 @@ export function ServerFormModal({
     <Modal title={title} onClose={onClose}>
       <div className="space-y-3">
         <div>
-          <label className={formLabel}>名称 *</label>
-          <input className={input} placeholder="例如：HK-Lite" value={f.name} onChange={set('name')} autoFocus />
+          <label className={formLabel}>{t('srv.name')}</label>
+          <input
+            className={input}
+            placeholder={t('srv.name.placeholder')}
+            value={f.name}
+            onChange={set('name')}
+            autoFocus
+          />
         </div>
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className={formLabel}>分组</label>
-            <input className={input} placeholder="生产 / 测试…" value={f.group} onChange={set('group')} />
+            <label className={formLabel}>{t('srv.group')}</label>
+            <input
+              className={input}
+              placeholder={t('srv.group.placeholder')}
+              value={f.group}
+              onChange={set('group')}
+            />
           </div>
           <div>
-            <label className={formLabel}>地区（不填则自动）</label>
-            <input className={input} placeholder="香港 / 东京…" value={f.region} onChange={set('region')} />
+            <label className={formLabel}>{t('srv.region')}</label>
+            <input
+              className={input}
+              placeholder={t('srv.region.placeholder')}
+              value={f.region}
+              onChange={set('region')}
+            />
           </div>
         </div>
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className={formLabel}>国旗代码（不填则自动）</label>
+            <label className={formLabel}>{t('srv.flag')}</label>
             <input className={input} placeholder="hk / jp / us…" value={f.flag} onChange={set('flag')} />
           </div>
           <div>
-            <label className={formLabel}>到期时间（可选）</label>
+            <label className={formLabel}>{t('srv.expire')}</label>
             <input className={input} placeholder="2026-12-31" value={f.expireAt} onChange={set('expireAt')} />
           </div>
         </div>
         <div>
-          <label className={formLabel}>备注（可选）</label>
-          <input className={input} placeholder="备注信息" value={f.note} onChange={set('note')} />
+          <label className={formLabel}>{t('srv.note')}</label>
+          <input className={input} placeholder={t('srv.note.placeholder')} value={f.note} onChange={set('note')} />
         </div>
 
         <div className="space-y-3 border-t border-zinc-500/10 pt-3 dark:border-white/5">
           <Toggle
             checked={f.gcpEnabled}
-            label="GCP 自动开机（Spot 实例被抢占后自动拉起）"
+            label={t('srv.gcp.toggle')}
             onChange={(v) =>
               setF((prev) => ({
                 ...prev,
@@ -98,16 +116,14 @@ export function ServerFormModal({
           {f.gcpEnabled && (
             <>
               <div>
-                <label className={formLabel}>凭证 *</label>
+                <label className={formLabel}>{t('srv.gcp.cred')}</label>
                 <Select
                   value={f.gcpCredId}
                   options={credOptions}
                   onChange={(v) => setF((prev) => ({ ...prev, gcpCredId: v }))}
                 />
                 {creds?.length === 0 && (
-                  <p className="mt-1 text-xs text-amber-500/90">
-                    尚未添加任何凭证，请先到「GCP 守护」页添加。
-                  </p>
+                  <p className="mt-1 text-xs text-amber-500/90">{t('srv.gcp.cred.none')}</p>
                 )}
               </div>
               <div className="grid grid-cols-2 gap-3">
@@ -116,25 +132,32 @@ export function ServerFormModal({
                   <input className={input} placeholder="us-central1-a" value={f.gcpZone} onChange={set('gcpZone')} />
                 </div>
                 <div>
-                  <label className={formLabel}>实例名 *</label>
-                  <input className={input} placeholder="GCP 控制台里的实例名称" value={f.gcpInstance} onChange={set('gcpInstance')} />
+                  <label className={formLabel}>{t('srv.gcp.instance')}</label>
+                  <input
+                    className={input}
+                    placeholder={t('srv.gcp.instance.placeholder')}
+                    value={f.gcpInstance}
+                    onChange={set('gcpInstance')}
+                  />
                 </div>
               </div>
               <div>
-                <label className={formLabel}>项目 ID（可选）</label>
-                <input className={input} placeholder="留空使用所选凭证的 project_id" value={f.gcpProject} onChange={set('gcpProject')} />
+                <label className={formLabel}>{t('srv.gcp.project')}</label>
+                <input
+                  className={input}
+                  placeholder={t('srv.gcp.project.placeholder')}
+                  value={f.gcpProject}
+                  onChange={set('gcpProject')}
+                />
               </div>
-              <p className="text-xs text-zinc-400">
-                凭证决定用哪个 GCP 账号开机；同一账号下实例在别的项目时，才需要填项目 ID。
-                需在「GCP 守护」页开启总开关；人为关机前请先关闭此开关，否则会被自动拉起。
-              </p>
+              <p className="text-xs text-zinc-400">{t('srv.gcp.hint')}</p>
             </>
           )}
         </div>
 
         <div className="flex justify-end gap-2 pt-2">
           <button className={btnGhost} onClick={onClose}>
-            取消
+            {t('common.cancel')}
           </button>
           <button
             className={btnPrimary}
@@ -152,7 +175,7 @@ export function ServerFormModal({
               }
             }}
           >
-            保存
+            {t('common.save')}
           </button>
         </div>
       </div>

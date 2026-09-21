@@ -4,23 +4,25 @@ import { Monitor, Moon, Settings, Sun } from 'lucide-react'
 import MossEye from './MossEye'
 import { useTheme } from '../useTheme'
 import { iconBtn } from '../ui'
+import { useT } from '../i18n'
+import { fmtTime } from '../utils/format'
 
 function Clock() {
   const [now, setNow] = useState(Date.now())
+  // useT 订阅语言：时钟的 locale 藏在 fmtTime 里，不订阅的话切换语言后
+  // 这里会一直停在旧格式，直到下一次外部重渲染才跟上。
+  useT()
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(t)
   }, [])
-  return (
-    <span className="hidden text-sm tabular-nums text-zinc-500 sm:inline">
-      {new Date(now).toLocaleTimeString('zh-CN', { hour12: false })}
-    </span>
-  )
+  return <span className="hidden text-sm tabular-nums text-zinc-500 sm:inline">{fmtTime(now)}</span>
 }
 
 export default function Layout() {
   const { mode, cycle } = useTheme()
-  const themeTitle = mode === 'auto' ? '主题：跟随系统' : mode === 'light' ? '主题：浅色' : '主题：深色'
+  const { t } = useT()
+  const themeTitle = t(mode === 'auto' ? 'theme.auto' : mode === 'light' ? 'theme.light' : 'theme.dark')
   // 根容器 pt 预留状态栏安全区高度：让 dock 的常规流占位盒随内容整体下移，
   // 避免 sticky dock 在滚动到顶时压住下方卡片（非 iOS 独立模式该 inset 为 0）
   return (
@@ -39,7 +41,7 @@ export default function Layout() {
           <Link to="/" className="press flex items-center gap-2">
             <MossEye className="h-6 w-6" />
             <span className="text-lg font-bold tracking-tight">Moss</span>
-            <span className="mt-0.5 hidden text-xs text-zinc-500 sm:inline">智控中心</span>
+            <span className="mt-0.5 hidden text-xs text-zinc-500 sm:inline">{t('brand.tagline')}</span>
           </Link>
           <div className="flex items-center gap-2">
             <Clock />
@@ -52,19 +54,23 @@ export default function Layout() {
                 <Moon className="h-4.5 w-4.5" />
               )}
             </button>
-            <Link to="/login" className={iconBtn} title="管理后台">
+            <Link to="/login" className={iconBtn} title={t('nav.admin')}>
               <Settings className="h-4.5 w-4.5" />
             </Link>
           </div>
         </div>
       </header>
       <main className="mx-auto w-full max-w-7xl flex-1 px-3 py-5 sm:px-4 sm:py-6">
-        <Suspense fallback={<div className="flex items-center justify-center py-20 text-sm text-zinc-400">加载中…</div>}>
+        <Suspense
+          fallback={
+            <div className="flex items-center justify-center py-20 text-sm text-zinc-400">{t('common.loading')}</div>
+          }
+        >
           <Outlet />
         </Suspense>
       </main>
       <footer className="py-5 text-center text-xs text-zinc-400 dark:text-zinc-600">
-        Moss v{__APP_VERSION__} · 智控中心
+        Moss v{__APP_VERSION__} · {t('brand.tagline')}
       </footer>
     </div>
   )

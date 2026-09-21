@@ -169,7 +169,7 @@ func (l *limiter) gcLoop() {
 
 func tooMany(w http.ResponseWriter) {
 	w.Header().Set("Retry-After", "60")
-	writeErr(w, http.StatusTooManyRequests, "请求过于频繁，请稍后再试")
+	writeErr(w, errRateLimited)
 }
 
 // limit 用指定限流器包住 handler，超额返回 429；lim 为 nil 时（该层关闭）原样放行。

@@ -1,3 +1,5 @@
+import type { LangMode } from './i18n'
+
 export interface ServerMeta {
   id: string
   name: string
@@ -83,7 +85,10 @@ export interface AdminServer {
   agentVersion: string
   targetVersion: string
   upgradable: boolean
+  /** upgradeHint 是中文兜底串；认得出 upgradeHintCode 时按访客语言翻译它。 */
   upgradeHint?: string
+  upgradeHintCode?: string
+  upgradeHintDetail?: string
   upgradeStage?: string
   upgradeErr?: string
   // GCP Spot 自动开机配置与运行态（运行态为内存值，面板重启归零）
@@ -141,7 +146,10 @@ export interface PanelUpdate {
   /** none=已是最新 update=可更新 downgrade=目标更旧（不允许） unknown=无法比较 */
   avail: { action: 'none' | 'update' | 'downgrade' | 'unknown'; reason?: string }
   hostReady: boolean
+  /** 同 AdminServer.upgradeHint：hostHint 是中文兜底，有码时按访客语言翻译。 */
   hostHint?: string
+  hostHintCode?: string
+  hostHintDetail?: string
   stage?: string
   stageErr?: string
 }
@@ -179,6 +187,8 @@ export interface Settings {
   username: string
   siteName: string
   siteDesc: string
+  /** 界面语言档位：auto 跟随每位访客的浏览器，zh / en 为全站强制。 */
+  lang: LangMode
   reportInterval: number
   sampleInterval: number
   historyDays: number

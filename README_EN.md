@@ -25,9 +25,10 @@
 - 🔔 **Alerts** — offline / load-threshold / network-speed-threshold alerts and server expiry reminders via Telegram (with recovery notices)
 - ☁️ **GCP Spot guardian** — when a Spot instance gets preempted, the panel automatically calls the GCP API to start it again (with confirmation delay / retry cooldown / attempt cap)
 - ⚙️ **Admin** — drag-to-reorder servers and probe tasks, one-click install commands, single-admin password login
+- 🌍 **中文 & English** — pick one in site settings: follow the visitor's browser, 中文, or English. On "follow", everyone gets their own language on the same panel — error messages and alert pushes included
 - 🚀 **Dead-simple deploy** — server single binary (frontend embedded) + agent single binary, works on Linux / macOS / Windows
 
-> Deliberately out of scope: OAuth / 2FA / multi-user, WebSSH, theme marketplace, i18n. Stay light, stay simple.
+> Deliberately out of scope: OAuth / 2FA / multi-user, WebSSH, theme marketplace. Stay light, stay simple.
 
 ## 📸 Screenshots
 

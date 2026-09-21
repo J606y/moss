@@ -570,9 +570,11 @@ MCP 在 `2026-07-28` 做了断代改动——废除协议级会话与 `Mcp-Sessi
 
 原先六处告警各自调 `n.send()`。新增通道时若逐处补调用，漏一处就意味着某类故障永远不会通知到 AI——所以全部收敛到 `Notifier.fire()`：接收一个 `alertEvent`，内部同时投递 Telegram（用 `Text` 字段）与 webhook（结构化载荷）。以后再加通道只改一处。
 
-**载荷同时携带人类文案与结构化字段**：人看 `text`，AI 读 `type` / `metric` / `value` / `threshold`。让 AI 去解析中文告警文案是脆弱的——文案一改，接收端就崩。
+**载荷同时携带人类文案与结构化字段**：人看 `text`，AI 读 `type` / `metric` / `value` / `threshold`。让 AI 去解析告警文案是脆弱的——文案一改，接收端就崩。这不是假设：`text` 现在按站点语言渲染，站点切成 English 它整句都变（见 `server/alert_text.go`）。
 
-事件类型：`server.online` / `server.offline` / `server.load_alert` / `server.load_recovered` / `server.net_alert` / `server.net_recovered` / `server.expiring` / `exec.blocked`。命名用 `<对象>.<事件>`，接收端可按前缀路由。
+事件类型：`server.online` / `server.offline` / `server.load_alert` / `server.load_recovered` / `server.net_alert` / `server.net_recovered` / `server.expiring` / `exec.blocked`，外加 GCP 守护的 `gcp.autostart` / `gcp.autostart_failed` / `gcp.autostart_gaveup` / `gcp.running_not_connected`。命名用 `<对象>.<事件>`，接收端可按前缀路由。
+
+`metric` 取值：`cpu` / `mem` / `disk` / `net`，与 `get_history` 的指标名同一套词。它也是告警状态机的 key，所以定成了常量（`server/webhook.go`）——此前是 `CPU` / `内存` / `硬盘` / `net` 的中英混杂字面量，改一个字状态机就对不上。
 
 #### 两个刻意的取舍
 

@@ -1,13 +1,15 @@
 import { useState } from 'react'
 import { Check, Copy } from 'lucide-react'
 import { iconBtn } from '../../ui'
+import { useT } from '../../i18n'
 
 export function CopyBtn({ text }: { text: string }) {
   const [ok, setOk] = useState(false)
+  const { t } = useT()
   return (
     <button
       className={iconBtn}
-      title="复制"
+      title={t('common.copy')}
       onClick={() => {
         navigator.clipboard.writeText(text).catch(() => {})
         setOk(true)

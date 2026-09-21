@@ -6,16 +6,21 @@ import { CheckBox, CopyBtn, Modal, ConfirmDelete } from '../../components/ui'
 import { errMsg } from '../../utils/admin'
 import { fmtDateTime } from '../../utils/format'
 import { btnGhost, btnPrimary, card, formLabel, input, iconBtn, td, th } from '../../ui'
+import { getLang, translate, useT, type TextKey } from '../../i18n'
 import type { Toast } from './types'
 
 /** 能力集与后端 apikey.go 的常量一一对应，改动需同步。 */
-const CAPS: Array<{ key: string; label: string; desc: string }> = [
-  { key: 'read', label: '读取', desc: '列出机器、读实时指标' },
-  { key: 'exec', label: '执行命令', desc: '在机器上跑命令' },
-  { key: 'write', label: '写入文件', desc: '写配置文件' },
+const CAPS: Array<{ key: string; labelKey: TextKey; descKey: TextKey }> = [
+  { key: 'read', labelKey: 'ai.cap.read', descKey: 'ai.cap.read.desc' },
+  { key: 'exec', labelKey: 'ai.cap.exec', descKey: 'ai.cap.exec.desc' },
+  { key: 'write', labelKey: 'ai.cap.write', descKey: 'ai.cap.write.desc' },
 ]
 
-const capLabel = (k: string) => CAPS.find((c) => c.key === k)?.label ?? k
+/** 认不出的能力码原样显示：后端新增了能力而前端还没跟上时，不至于变成空白。 */
+const capLabel = (k: string) => {
+  const cap = CAPS.find((c) => c.key === k)
+  return cap ? translate(getLang(), cap.labelKey) : k
+}
 
 /**
  * 有效期上限：10 年。
@@ -27,6 +32,7 @@ const capLabel = (k: string) => CAPS.find((c) => c.key === k)?.label ?? k
 const MAX_DAYS = 3650
 
 export function AiTab({ toast }: { toast: Toast }) {
+  const { t } = useT()
   const [keys, setKeys] = useState<ApiKey[]>([])
   const [servers, setServers] = useState<AdminServer[]>([])
   const [creating, setCreating] = useState(false)
@@ -52,7 +58,7 @@ export function AiTab({ toast }: { toast: Toast }) {
   const toggle = async (k: ApiKey) => {
     try {
       await put(`/api/admin/keys/${k.id}/disabled`, { disabled: !k.disabled })
-      toast(k.disabled ? `已启用「${k.name}」` : `已停用「${k.name}」`)
+      toast(t(k.disabled ? 'ai.toast.enabled' : 'ai.toast.disabled', { name: k.name }))
       load()
     } catch (e) {
       toast(errMsg(e))
@@ -62,7 +68,7 @@ export function AiTab({ toast }: { toast: Toast }) {
   const remove = async (k: ApiKey) => {
     try {
       await del(`/api/admin/keys/${k.id}`)
-      toast(`已删除「${k.name}」`)
+      toast(t('ai.toast.deleted', { name: k.name }))
       setDeleting(null)
       load()
     } catch (e) {
@@ -78,18 +84,16 @@ export function AiTab({ toast }: { toast: Toast }) {
         <div className="mb-4 flex items-center justify-between gap-3">
           <h2 className="flex items-center gap-2 font-semibold">
             <KeyRound className="h-4 w-4 text-emerald-500" />
-            接入密钥
+            {t('ai.keys')}
           </h2>
           <button className={btnPrimary} onClick={() => setCreating(true)}>
             <Plus className="h-4 w-4" />
-            新建密钥
+            {t('ai.new')}
           </button>
         </div>
 
         {keys.length === 0 ? (
-          <p className="py-8 text-center text-sm text-zinc-400">
-            还没有密钥。新建一把后，把它填进 AI 客户端即可接入。
-          </p>
+          <p className="py-8 text-center text-sm text-zinc-400">{t('ai.empty')}</p>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full">
@@ -97,12 +101,12 @@ export function AiTab({ toast }: { toast: Toast }) {
                 {/* 次要列在窄屏隐藏：手机上要能直接够到停用/删除，
                     而不是横滑一段才摸得到操作按钮 */}
                 <tr className="border-b border-white/40 dark:border-white/10">
-                  <th className={th}>名称</th>
-                  <th className={`${th} hidden md:table-cell`}>密钥</th>
-                  <th className={th}>能力</th>
-                  <th className={`${th} hidden lg:table-cell`}>机器范围</th>
-                  <th className={`${th} hidden md:table-cell`}>有效期</th>
-                  <th className={`${th} hidden lg:table-cell`}>最后使用</th>
+                  <th className={th}>{t('dash.col.name')}</th>
+                  <th className={`${th} hidden md:table-cell`}>{t('ai.col.key')}</th>
+                  <th className={th}>{t('ai.col.caps')}</th>
+                  <th className={`${th} hidden lg:table-cell`}>{t('ai.col.scope')}</th>
+                  <th className={`${th} hidden md:table-cell`}>{t('ai.col.expiry')}</th>
+                  <th className={`${th} hidden lg:table-cell`}>{t('ai.col.lastUsed')}</th>
                   <th className={th}></th>
                 </tr>
               </thead>
@@ -152,9 +156,12 @@ export function AiTab({ toast }: { toast: Toast }) {
       {newKey && <NewKeyModal plain={newKey} onClose={() => setNewKey(null)} />}
 
       {deleting && (
-        <ConfirmDelete title="删除密钥" onCancel={() => setDeleting(null)} onConfirm={() => remove(deleting)}>
-          删除「{deleting.name}」后不可恢复，列表里也不再留下任何痕迹。
-          只是想临时关掉的话用「停用」——那个随时可以再启用。
+        <ConfirmDelete
+          title={t('ai.del.title')}
+          onCancel={() => setDeleting(null)}
+          onConfirm={() => remove(deleting)}
+        >
+          {t('ai.del.body', { name: deleting.name })}
         </ConfirmDelete>
       )}
     </div>
@@ -174,24 +181,25 @@ function KeyRow({
   onToggle: () => void
   onDelete: () => void
 }) {
+  const { t } = useT()
   const expired = k.expiresAt > 0 && Date.now() / 1000 > k.expiresAt
   const dead = k.disabled || expired
 
   const scope =
     k.servers.length === 0
-      ? '全部机器'
-      : k.servers
-          .map((id) => servers.find((s) => s.id === id)?.name ?? id)
-          .join('、')
+      ? t('ai.scope.all')
+      : k.servers.map((id) => servers.find((s) => s.id === id)?.name ?? id).join(t('list.sep'))
 
   return (
     <tr className={`border-b border-white/25 dark:border-white/5 ${dead ? 'opacity-50' : ''}`}>
       <td className={td}>
         <div className="flex items-center gap-2">
           {k.name}
-          {k.disabled && <span className="rounded bg-zinc-500/15 px-1.5 py-0.5 text-xs text-zinc-500">已停用</span>}
+          {k.disabled && (
+            <span className="rounded bg-zinc-500/15 px-1.5 py-0.5 text-xs text-zinc-500">{t('ai.disabled')}</span>
+          )}
           {!k.disabled && expired && (
-            <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-600">已过期</span>
+            <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-600">{t('ai.expired')}</span>
           )}
         </div>
       </td>
@@ -211,25 +219,25 @@ function KeyRow({
         {scope}
       </td>
       <td className={`${td} hidden md:table-cell`}>
-        {k.expiresAt === 0 ? '永久' : fmtDateTime(k.expiresAt * 1000)}
+        {k.expiresAt === 0 ? t('ai.never') : fmtDateTime(k.expiresAt * 1000)}
       </td>
       <td className={`${td} hidden lg:table-cell`}>
-        {k.lastUsedAt === 0 ? '从未' : fmtDateTime(k.lastUsedAt * 1000)}
+        {k.lastUsedAt === 0 ? t('ai.neverUsed') : fmtDateTime(k.lastUsedAt * 1000)}
       </td>
       <td className={`${td} text-right`}>
         <div className="flex justify-end gap-1">
-          <button className={iconBtn} title="编辑" onClick={onEdit}>
+          <button className={iconBtn} title={t('common.edit')} onClick={onEdit}>
             <Pencil className="h-4 w-4" />
           </button>
           {/* 停用可来回切；删除才是不可恢复的那个 */}
           <button
             className={`${iconBtn} ${k.disabled ? '!text-emerald-500' : ''}`}
-            title={k.disabled ? '启用' : '停用'}
+            title={t(k.disabled ? 'common.enable' : 'common.disable')}
             onClick={onToggle}
           >
             {k.disabled ? <Power className="h-4 w-4" /> : <PowerOff className="h-4 w-4" />}
           </button>
-          <button className={iconBtn} title="删除" onClick={onDelete}>
+          <button className={iconBtn} title={t('common.delete')} onClick={onDelete}>
             <Trash2 className="h-4 w-4" />
           </button>
         </div>
@@ -259,6 +267,7 @@ function KeyFormModal({
   onCreated: (plain: string) => void
   toast: Toast
 }) {
+  const { t } = useT()
   const [name, setName] = useState(edit?.name ?? '')
   const [caps, setCaps] = useState<string[]>(edit?.caps ?? ['read'])
   const [scope, setScope] = useState(edit?.servers.join(',') ?? '') // 逗号分隔；空串表示全部机器
@@ -288,8 +297,8 @@ function KeyFormModal({
     setCaps((prev) => (prev.includes(c) ? prev.filter((x) => x !== c) : [...prev, c]))
 
   const submit = async () => {
-    if (!name.trim()) return toast('请填写名称')
-    if (caps.length === 0) return toast('至少选择一项能力')
+    if (!name.trim()) return toast(t('ai.form.nameRequired'))
+    if (caps.length === 0) return toast(t('ai.form.capRequired'))
     setBusy(true)
     try {
       const n = Number(days)
@@ -297,7 +306,7 @@ function KeyFormModal({
       const body = { name: name.trim(), caps, servers: scope ? scope.split(',') : [], expiresAt }
       if (edit) {
         await put(`/api/admin/keys/${edit.id}`, body)
-        toast(`已保存「${name.trim()}」`)
+        toast(t('ai.toast.saved', { name: name.trim() }))
         onCreated('') // 编辑不产生新密钥，父组件只需刷新列表
         return
       }
@@ -322,21 +331,24 @@ function KeyFormModal({
     'group flex w-full cursor-pointer select-none items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition duration-100 hover:bg-white/50 active:bg-white/75 dark:hover:bg-white/10 dark:active:bg-white/15'
 
   return (
-    <Modal title={edit ? `编辑「${edit.name}」` : "新建接入密钥"} onClose={onClose}>
+    <Modal
+      title={edit ? t('ai.form.edit', { name: edit.name }) : t('ai.form.new')}
+      onClose={onClose}
+    >
       <div className="space-y-4">
         <div>
-          <label className={formLabel}>名称</label>
+          <label className={formLabel}>{t('ai.form.name')}</label>
           <input
             className={input}
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="例如 OpenClaw 值守"
+            placeholder={t('ai.form.name.placeholder')}
             autoFocus
           />
         </div>
 
         <div>
-          <label className={formLabel}>能力</label>
+          <label className={formLabel}>{t('ai.col.caps')}</label>
           <div className="glass-sheen space-y-0.5 rounded-xl border border-white/50 bg-white/45 p-1.5 dark:border-white/10 dark:bg-zinc-900/40">
             {CAPS.map((c) => (
               <button
@@ -348,20 +360,20 @@ function KeyFormModal({
                 onClick={() => toggleCap(c.key)}
               >
                 <CheckBox checked={caps.includes(c.key)} />
-                <span>{c.label}</span>
-                <span className="text-xs text-zinc-400">{c.desc}</span>
+                <span>{t(c.labelKey)}</span>
+                <span className="text-xs text-zinc-400">{t(c.descKey)}</span>
               </button>
             ))}
           </div>
-          <p className="mt-1 text-xs text-zinc-400">按需最小授予。只做值守的密钥不必给执行权限。</p>
+          <p className="mt-1 text-xs text-zinc-400">{t('ai.form.caps.hint')}</p>
         </div>
 
         <div>
-          <label className={formLabel}>机器范围</label>
+          <label className={formLabel}>{t('ai.col.scope')}</label>
           <div className="glass-sheen max-h-44 space-y-0.5 overflow-y-auto rounded-xl border border-white/50 bg-white/45 p-1.5 dark:border-white/10 dark:bg-zinc-900/40">
             <button type="button" role="checkbox" aria-checked={all} className={row} onClick={() => setScope('')}>
               <CheckBox checked={all} />
-              <span className={all ? 'font-medium' : ''}>全部机器</span>
+              <span className={all ? 'font-medium' : ''}>{t('ai.scope.all')}</span>
             </button>
             {servers.map((s) => {
               const on = !all && picked.has(s.id)
@@ -379,32 +391,32 @@ function KeyFormModal({
                 </button>
               )
             })}
-            {servers.length === 0 && <p className="px-2 py-1.5 text-sm text-zinc-400">暂无服务器</p>}
+            {servers.length === 0 && (
+              <p className="px-2 py-1.5 text-sm text-zinc-400">{t('task.scope.empty')}</p>
+            )}
           </div>
         </div>
 
         <div>
-          <label className={formLabel}>有效期（天）</label>
+          <label className={formLabel}>{t('ai.form.days')}</label>
           <input
             className={input}
             value={days}
             onChange={(e) => onDaysChange(e.target.value)}
-            placeholder="留空表示永不过期"
+            placeholder={t('ai.form.days.placeholder')}
             inputMode="numeric"
           />
           <p className={`mt-1 text-xs ${capped ? 'text-amber-600 dark:text-amber-500' : 'text-zinc-400'}`}>
-            {capped
-              ? `超出上限，已改为 ${MAX_DAYS} 天（10 年）。需要更长请留空，设为永不过期。`
-              : `留空表示永不过期，最长 ${MAX_DAYS} 天（10 年）。`}
+            {t(capped ? 'ai.form.days.capped' : 'ai.form.days.hint', { max: MAX_DAYS })}
           </p>
         </div>
 
         <div className="flex justify-end gap-2 pt-1">
           <button className={btnGhost} onClick={onClose}>
-            取消
+            {t('common.cancel')}
           </button>
           <button className={btnPrimary} onClick={submit} disabled={busy}>
-            {busy ? '保存中…' : edit ? '保存' : '创建'}
+            {busy ? t('common.saving') : t(edit ? 'common.save' : 'common.create')}
           </button>
         </div>
       </div>
@@ -414,12 +426,13 @@ function KeyFormModal({
 
 /** 明文只在创建时出现这一次，之后库里只有哈希，任何人都取不回来。 */
 function NewKeyModal({ plain, onClose }: { plain: string; onClose: () => void }) {
+  const { t } = useT()
   return (
-    <Modal title="密钥已创建" onClose={onClose}>
+    <Modal title={t('ai.newKey.title')} onClose={onClose}>
       <div className="space-y-3">
         <div className="flex items-start gap-2 rounded-xl border border-amber-400/30 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-400">
           <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
-          <span>请立即复制保存。关闭后将无法再次查看——服务端只存哈希，找不回原文。</span>
+          <span>{t('ai.newKey.warn')}</span>
         </div>
         <div className="glass-sheen flex items-center gap-2 rounded-xl border border-white/50 bg-white/45 p-3 dark:border-white/10 dark:bg-zinc-900/40">
           <code className="flex-1 break-all font-mono text-sm">{plain}</code>
@@ -427,7 +440,7 @@ function NewKeyModal({ plain, onClose }: { plain: string; onClose: () => void })
         </div>
         <div className="flex justify-end">
           <button className={btnPrimary} onClick={onClose}>
-            我已保存
+            {t('ai.newKey.ok')}
           </button>
         </div>
       </div>
@@ -438,6 +451,7 @@ function NewKeyModal({ plain, onClose }: { plain: string; onClose: () => void })
 /* ---------- 接入说明 ---------- */
 
 function ConnectGuide() {
+  const { t } = useT()
   const endpoint = `${window.location.origin}/mcp`
   const snippet = JSON.stringify(
     {
@@ -445,7 +459,7 @@ function ConnectGuide() {
         moss: {
           type: 'http',
           url: endpoint,
-          headers: { Authorization: 'Bearer 你的密钥' },
+          headers: { Authorization: `Bearer ${t('ai.guide.token')}` },
         },
       },
     },
@@ -454,20 +468,17 @@ function ConnectGuide() {
   )
   return (
     <section className={`${card} p-4 sm:p-5`}>
-      <h2 className="mb-3 font-semibold">接入方式</h2>
-      <p className="mb-3 text-sm text-zinc-500 dark:text-zinc-400">
-        moss 以 MCP 协议对外提供服务。把下面的地址和密钥填进 AI 客户端（OpenClaw、Claude Code 等），
-        它就能查看机器状态、执行命令、写配置文件——所有操作都会被记录在下方的审计里。
-      </p>
+      <h2 className="mb-3 font-semibold">{t('ai.guide.title')}</h2>
+      <p className="mb-3 text-sm text-zinc-500 dark:text-zinc-400">{t('ai.guide.intro')}</p>
       <div className="mb-3">
-        <label className={formLabel}>服务地址</label>
+        <label className={formLabel}>{t('ai.guide.endpoint')}</label>
         <div className="glass-sheen flex items-center gap-2 rounded-xl border border-white/50 bg-white/45 px-3 py-2 dark:border-white/10 dark:bg-zinc-900/40">
           <code className="flex-1 break-all font-mono text-sm">{endpoint}</code>
           <CopyBtn text={endpoint} />
         </div>
       </div>
       <div>
-        <label className={formLabel}>配置示例</label>
+        <label className={formLabel}>{t('ai.guide.snippet')}</label>
         <div className="glass-sheen relative rounded-xl border border-white/50 bg-white/45 p-3 dark:border-white/10 dark:bg-zinc-900/40">
           <div className="absolute right-2 top-2">
             <CopyBtn text={snippet} />

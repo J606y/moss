@@ -104,3 +104,56 @@ func TestSettingsRoundTrip(t *testing.T) {
 		t.Errorf("审计条数上限未保存，实际 %d", v.ExecAuditMaxRows)
 	}
 }
+
+// 语言档位必须收敛到 auto/zh/en。
+//
+// 漏网的脏值不会报错，只会让前端拿着一个查不到文案表的语言码去渲染，
+// 整页退化成一串 key——比报错更难查，因为服务端一切正常。
+func TestLangClamped(t *testing.T) {
+	app := mcpTestApp(t)
+
+	cases := []struct {
+		in   string
+		want string
+		why  string
+	}{
+		{`"en"`, "en", "英文可设"},
+		{`"zh"`, "zh", "中文可设"},
+		{`"auto"`, "auto", "跟随浏览器可设"},
+		{`"fr"`, "auto", "未支持的语言回落 auto"},
+		{`""`, "auto", "空串回落 auto"},
+		{`"EN"`, "auto", "大小写不匹配即视为非法，不做纠正"},
+	}
+	for _, c := range cases {
+		putSettings(t, app, `{"siteName":"Moss","username":"admin","lang":`+c.in+`}`)
+		if got := getSettings(t, app).Lang; got != c.want {
+			t.Errorf("%s：输入 %s 得到 %q，期望 %q", c.why, c.in, got, c.want)
+		}
+	}
+}
+
+// 首页对外公开，访客不登录就得拿到站点选定的语言，
+// 否则 auto 之外的两档形同虚设：只有管理员自己能看到正确的语言。
+func TestSiteExposesLang(t *testing.T) {
+	app := mcpTestApp(t)
+	putSettings(t, app, `{"siteName":"Moss","username":"admin","lang":"en"}`)
+
+	w := httptest.NewRecorder()
+	app.handleSite(w, httptest.NewRequest(http.MethodGet, "/api/site", nil))
+	var site map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &site); err != nil {
+		t.Fatalf("解析站点信息失败: %v", err)
+	}
+	if site["lang"] != "en" {
+		t.Errorf("公开接口未下发语言，实际 %q", site["lang"])
+	}
+}
+
+// 老库里没有 lang 这一行，读出来必须是 auto：
+// 升级上来的站点不该被硬切成某一门语言，中文用户的浏览器仍会解析回中文。
+func TestLangDefaultsToAutoOnUpgrade(t *testing.T) {
+	app := mcpTestApp(t)
+	if got := getSettings(t, app).Lang; got != "auto" {
+		t.Errorf("未设置过语言时应为 auto，实际 %q", got)
+	}
+}

@@ -25,13 +25,13 @@ func (s *App) handleExec(w http.ResponseWriter, r *http.Request) {
 	serverID := r.PathValue("id")
 	var req execRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Cmd == "" {
-		writeErr(w, 400, "参数不完整")
+		writeErr(w, errMissingParams)
 		return
 	}
 
 	var exists int
 	if err := s.db.QueryRow(`SELECT COUNT(1) FROM servers WHERE id = ?`, serverID).Scan(&exists); err != nil || exists == 0 {
-		writeErr(w, 404, "服务器不存在")
+		writeErr(w, errServerNotFound)
 		return
 	}
 
@@ -119,7 +119,7 @@ func (s *App) handleExecAudit(w http.ResponseWriter, r *http.Request) {
 		`SELECT COUNT(*) FROM exec_audit a`+where, filterArgs...,
 	).Scan(&total); err != nil {
 		log.Printf("handleExecAudit count: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 
@@ -130,7 +130,7 @@ func (s *App) handleExecAudit(w http.ResponseWriter, r *http.Request) {
 		ORDER BY a.started_at DESC LIMIT ? OFFSET ?`, append(filterArgs, limit, offset)...)
 	if err != nil {
 		log.Printf("handleExecAudit query: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	defer rows.Close()
@@ -142,7 +142,7 @@ func (s *App) handleExecAudit(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(&it.JobID, &it.ServerID, &it.ServerName, &it.Caller, &it.Cmd, &it.Dir,
 			&it.StartedAt, &it.FinishedAt, &it.ExitCode, &it.Error, &truncated); err != nil {
 			log.Printf("handleExecAudit scan: %v", err)
-			writeErr(w, 500, "内部错误")
+			writeErr(w, errInternal)
 			return
 		}
 		it.Truncated = truncated == 1
@@ -150,7 +150,7 @@ func (s *App) handleExecAudit(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := rows.Err(); err != nil {
 		log.Printf("handleExecAudit rows: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	writeJSON(w, 200, execAuditPage{Items: list, Total: total})
@@ -174,7 +174,7 @@ func (s *App) handleExecAuditDetail(w http.ResponseWriter, r *http.Request) {
 		Scan(&it.JobID, &it.ServerID, &it.ServerName, &it.Caller, &it.Cmd, &it.Dir, &timeout,
 			&it.StartedAt, &it.FinishedAt, &it.ExitCode, &it.Error, &stdout, &stderr, &truncated)
 	if err != nil {
-		writeErr(w, 404, "记录不存在")
+		writeErr(w, errRecordNotFound)
 		return
 	}
 	it.Truncated = truncated == 1

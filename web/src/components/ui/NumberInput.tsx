@@ -1,5 +1,6 @@
 import { ChevronDown, ChevronUp } from 'lucide-react'
 import { input } from '../../ui'
+import { useT } from '../../i18n'
 
 /** 数字输入：原生上下箭头已全局隐藏，这里补一组液态玻璃风格的步进按钮 */
 export function NumberInput({
@@ -15,6 +16,7 @@ export function NumberInput({
   max?: number
   step?: number
 }) {
+  const { t } = useT()
   const clamp = (v: number) => {
     if (min !== undefined && v < min) v = min
     if (max !== undefined && v > max) v = max
@@ -36,10 +38,10 @@ export function NumberInput({
         onBlur={() => onChange(clamp(value))}
       />
       <div className="absolute inset-y-1 right-1 flex w-6 flex-col gap-px">
-        <button type="button" tabIndex={-1} title="增加" onClick={() => bump(step)} className={stepBtn}>
+        <button type="button" tabIndex={-1} title={t('common.increase')} onClick={() => bump(step)} className={stepBtn}>
           <ChevronUp className="h-3 w-3" />
         </button>
-        <button type="button" tabIndex={-1} title="减少" onClick={() => bump(-step)} className={stepBtn}>
+        <button type="button" tabIndex={-1} title={t('common.decrease')} onClick={() => bump(-step)} className={stepBtn}>
           <ChevronDown className="h-3 w-3" />
         </button>
       </div>

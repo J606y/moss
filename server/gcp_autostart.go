@@ -8,9 +8,26 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 )
+
+// gcpAttemptParams 三处开机告警共用的文案参数：机器名 + 第几次 / 共几次。
+//
+// err 为 nil 时不填 {err}：那条文案（evtGCPStarting）里本就没有这个占位符，
+// 多塞一个也无害，但少塞一个能让「哪条文案该有 err」一眼看得出来。
+func gcpAttemptParams(name string, tries, max int, err error) map[string]string {
+	p := map[string]string{
+		"name":  name,
+		"tries": strconv.Itoa(tries),
+		"max":   strconv.Itoa(max),
+	}
+	if err != nil {
+		p["err"] = err.Error()
+	}
+	return p
+}
 
 var errGCPBusy = errors.New("自动开机执行中，请稍候")
 
@@ -140,8 +157,7 @@ func (n *Notifier) checkGCPStart() {
 					Type:       evtGCPGaveUp,
 					ServerID:   t.id,
 					ServerName: t.name,
-					Text: fmt.Sprintf("🛑 GCP 自动开机已停止\n%s 已尝试 %d 次仍未上线，等待人工处理（节点上线后自动复位）",
-						t.name, cfg.MaxTries),
+					params:     map[string]string{"name": t.name, "max": strconv.Itoa(cfg.MaxTries)},
 				})
 			}
 			continue
@@ -194,7 +210,8 @@ func (n *Notifier) gcpStartAttempt(t gcpTarget, tries int, cfg gcpConfig, tgCfg 
 			Type:       evtGCPFailed,
 			ServerID:   t.id,
 			ServerName: t.name,
-			Text:       fmt.Sprintf("⚠️ GCP 自动开机失败\n%s 第 %d/%d 次：查询实例状态失败：%v", t.name, tries, cfg.MaxTries, err),
+			textKey:    txtGCPFailedStatus,
+			params:     gcpAttemptParams(t.name, tries, cfg.MaxTries, err),
 		})
 		return
 	}
@@ -207,7 +224,7 @@ func (n *Notifier) gcpStartAttempt(t gcpTarget, tries int, cfg gcpConfig, tgCfg 
 				Type:       evtGCPFailed,
 				ServerID:   t.id,
 				ServerName: t.name,
-				Text:       fmt.Sprintf("⚠️ GCP 自动开机失败\n%s 第 %d/%d 次：%v", t.name, tries, cfg.MaxTries, err),
+				params:     gcpAttemptParams(t.name, tries, cfg.MaxTries, err),
 			})
 			return
 		}
@@ -217,7 +234,7 @@ func (n *Notifier) gcpStartAttempt(t gcpTarget, tries int, cfg gcpConfig, tgCfg 
 			Type:       evtGCPStarting,
 			ServerID:   t.id,
 			ServerName: t.name,
-			Text:       fmt.Sprintf("🔄 GCP 自动开机\n%s 已调用 instances.start（第 %d/%d 次），等待节点上线", t.name, tries, cfg.MaxTries),
+			params:     gcpAttemptParams(t.name, tries, cfg.MaxTries, nil),
 		})
 	case "RUNNING":
 		n.setGCPErr(t.id, "实例运行中但节点离线，疑似 agent/网络故障")
@@ -233,7 +250,7 @@ func (n *Notifier) gcpStartAttempt(t gcpTarget, tries int, cfg gcpConfig, tgCfg 
 				Type:       evtGCPRunningNC,
 				ServerID:   t.id,
 				ServerName: t.name,
-				Text:       fmt.Sprintf("⚠️ GCP 守护提醒\n%s 实例状态为 RUNNING 但节点离线，可能是 agent 或网络故障，不执行开机", t.name),
+				params:     map[string]string{"name": t.name},
 			})
 		}
 	case "SUSPENDED":

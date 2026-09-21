@@ -147,7 +147,7 @@ func (s *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErr(w, 400, "请求格式错误")
+		writeErr(w, errBadJSON)
 		return
 	}
 	ip := realIP(r, s.trustProxy, s.trustedProxies) // 真实访客 IP（--trust-proxy 下按可信代理名单从右取）
@@ -155,7 +155,7 @@ func (s *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// 锁定期内直接拒绝，不去比对密码。检查与登记必须在同一个临界区里完成，
 	// 否则并发请求会在第一次记账之前全部放行（详见 beginLoginAttempt）。
 	if !beginLoginAttempt(ip, time.Now()) {
-		writeErr(w, 429, "登录失败次数过多，该 IP 已被锁定 30 分钟")
+		writeErr(w, errLockedOut)
 		return
 	}
 
@@ -172,10 +172,10 @@ func (s *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		locked := loginLocked(ip, time.Now())
 		loginMu.Unlock()
 		if locked {
-			writeErr(w, 429, "登录失败次数过多，该 IP 已被锁定 30 分钟")
+			writeErr(w, errLockedOut)
 			return
 		}
-		writeErr(w, 401, "用户名或密码错误")
+		writeErr(w, errBadCredentials)
 		return
 	}
 
@@ -187,7 +187,10 @@ func (s *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	token := randString(40)
 	expires := time.Now().Add(sessionTTL)
 	if _, err := s.db.Exec(`INSERT INTO sessions(token, expires) VALUES(?, ?)`, token, expires.Unix()); err != nil {
-		writeErr(w, 500, err.Error())
+		// 原来是把 SQL 错误原文回给客户端。那既是一句没人看得懂的英文，
+		// 也把库结构的细节暴露给了尚未登录的调用方。
+		log.Printf("handleLogin session: %v", err)
+		writeErr(w, errInternal)
 		return
 	}
 	// 仅在 HTTPS 下置 Secure，避免本地 HTTP(:8787) 登录被破坏；
@@ -229,7 +232,7 @@ func (s *App) isAuthed(r *http.Request) bool {
 func (s *App) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.isAuthed(r) {
-			writeErr(w, 401, "未登录")
+			writeErr(w, errUnauthorized)
 			return
 		}
 		next(w, r)

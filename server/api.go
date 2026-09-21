@@ -23,10 +23,6 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
-func writeErr(w http.ResponseWriter, code int, msg string) {
-	writeJSON(w, code, map[string]string{"error": msg})
-}
-
 // publicServer 与前端 ServerMeta + stats 对齐。
 type publicServer struct {
 	ID             string `json:"id"`
@@ -94,16 +90,37 @@ func (s *App) handleServers(w http.ResponseWriter, r *http.Request) {
 	list, err := s.listPublicServers()
 	if err != nil {
 		log.Printf("handleServers: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	writeJSON(w, 200, list)
 }
 
+// normLang 把界面语言档位收敛到白名单内，非法值一律当 auto。
+// 读写两端都过一遍：写入端挡住构造的请求体，读取端兜住手工改库留下的脏值——
+// 任一端漏网，前端拿到的就是个查不到文案表的语言码，整页退化成 key。
+func normLang(v string) string {
+	switch v {
+	case langZH, langEN:
+		return v
+	default:
+		return langAuto
+	}
+}
+
+// 界面语言档位。auto 表示每位访客各自按浏览器语言解析。
+const (
+	langAuto = "auto"
+	langZH   = "zh"
+	langEN   = "en"
+)
+
 func (s *App) handleSite(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{
 		"name": getSetting(s.db, keySiteName, "Moss"),
 		"desc": getSetting(s.db, keySiteDesc, "智控中心"),
+		// 公开下发：首页不登录也能看，访客必须拿得到站点选定的语言。
+		"lang": normLang(getSetting(s.db, keyLang, "auto")),
 	})
 }
 
@@ -149,7 +166,7 @@ func (s *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 		 GROUP BY time / ? ORDER BY 1`, id, since, bucket)
 	if err != nil {
 		log.Printf("handleHistory query (server=%s): %v", id, err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	defer rows.Close()
@@ -159,7 +176,7 @@ func (s *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(&p.Time, &p.CPU, &p.Mem, &p.Swap, &p.Disk, &p.Load1,
 			&p.NetUp, &p.NetDown, &p.TCP, &p.Processes); err != nil {
 			log.Printf("handleHistory scan (server=%s): %v", id, err)
-			writeErr(w, 500, "内部错误")
+			writeErr(w, errInternal)
 			return
 		}
 		out = append(out, p)
@@ -186,7 +203,7 @@ func (s *App) handlePing(w http.ResponseWriter, r *http.Request) {
 	taskRows, err := s.db.Query(`SELECT id, name, server_id FROM ping_tasks ORDER BY sort, id`)
 	if err != nil {
 		log.Printf("handlePing tasks (server=%s): %v", id, err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	defer taskRows.Close()

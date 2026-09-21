@@ -4,6 +4,7 @@ import { Bell, Bot, Cloud, LogOut, Radar, RefreshCw, ScrollText, Server, Sliders
 import { get, post } from '../api/client'
 import type { ApiError } from '../api/client'
 import { btnGhost } from '../ui'
+import { useT, type TextKey } from '../i18n'
 import { ServersTab } from './admin/ServersTab'
 import { TasksTab } from './admin/TasksTab'
 import { NotifyTab } from './admin/NotifyTab'
@@ -17,32 +18,42 @@ type TabKey = 'servers' | 'tasks' | 'notify' | 'gcp' | 'ai' | 'audit' | 'update'
 
 // 审计单独成页，紧挨「AI 接入」：那一页里接入方式与密钥都是有限内容，
 // 只有审计随使用无限增长，挤在同一页里既看不清也翻不到。
-const tabs: Array<{ key: TabKey; label: string; icon: typeof Server }> = [
-  { key: 'servers', label: '服务器', icon: Server },
-  { key: 'tasks', label: '探测任务', icon: Radar },
-  { key: 'notify', label: '通知告警', icon: Bell },
-  { key: 'gcp', label: 'GCP 守护', icon: Cloud },
-  { key: 'ai', label: 'AI 接入', icon: Bot },
-  { key: 'audit', label: '执行审计', icon: ScrollText },
+// 标签只存 key：这张表是模块级常量，求值时还拿不到 t()
+const tabs: Array<{ key: TabKey; labelKey: TextKey; icon: typeof Server }> = [
+  { key: 'servers', labelKey: 'admin.tab.servers', icon: Server },
+  { key: 'tasks', labelKey: 'admin.tab.tasks', icon: Radar },
+  { key: 'notify', labelKey: 'admin.tab.notify', icon: Bell },
+  { key: 'gcp', labelKey: 'admin.tab.gcp', icon: Cloud },
+  { key: 'ai', labelKey: 'admin.tab.ai', icon: Bot },
+  { key: 'audit', labelKey: 'admin.tab.audit', icon: ScrollText },
   // 面板更新紧挨站点设置：都属于「这套系统本身」的维护，与前面几项的
   // 「被监控对象」不是一类东西。
-  { key: 'update', label: '面板更新', icon: RefreshCw },
-  { key: 'settings', label: '站点设置', icon: SlidersHorizontal },
+  { key: 'update', labelKey: 'admin.tab.update', icon: RefreshCw },
+  { key: 'settings', labelKey: 'admin.tab.settings', icon: SlidersHorizontal },
 ]
 
 // 定义在模块顶层：若放在 Admin 函数体内，每次 setTab 都会重建组件类型，导致按钮被卸载重挂
-function TabButton({ t, tab, setTab }: { t: (typeof tabs)[number]; tab: TabKey; setTab: (k: TabKey) => void }) {
+function TabButton({
+  item,
+  tab,
+  setTab,
+}: {
+  item: (typeof tabs)[number]
+  tab: TabKey
+  setTab: (k: TabKey) => void
+}) {
+  const { t } = useT()
   return (
     <button
-      onClick={() => setTab(t.key)}
+      onClick={() => setTab(item.key)}
       className={`press flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition ${
-        tab === t.key
+        tab === item.key
           ? 'bg-emerald-500/10 font-medium text-emerald-600 dark:text-emerald-400'
           : 'text-zinc-500 hover:bg-white/50 hover:text-zinc-800 active:bg-white/75 dark:hover:bg-white/10 dark:hover:text-zinc-200 dark:active:bg-white/15'
       }`}
     >
-      <t.icon className="h-4 w-4 shrink-0" />
-      {t.label}
+      <item.icon className="h-4 w-4 shrink-0" />
+      {t(item.labelKey)}
     </button>
   )
 }
@@ -50,6 +61,7 @@ function TabButton({ t, tab, setTab }: { t: (typeof tabs)[number]; tab: TabKey; 
 /* ---------- 主页面 ---------- */
 
 export default function Admin() {
+  const { t } = useT()
   const navigate = useNavigate()
   const [tab, setTab] = useState<TabKey>('servers')
   const [toast, setToast] = useState<string | null>(null)
@@ -85,22 +97,22 @@ export default function Admin() {
     // 桌面端做成固定外壳：标题 + 左栏不动，仅右侧内容区内部滚动；移动端仍为整页滚动
     <div className="space-y-4 md:flex md:h-[calc(100dvh-11rem)] md:flex-col md:gap-4 md:space-y-0">
       <div className="flex items-center justify-between md:shrink-0">
-        <h1 className="text-xl font-bold">管理后台</h1>
+        <h1 className="text-xl font-bold">{t('nav.admin')}</h1>
         <div className="flex items-center gap-2">
           <Link to="/" className={btnGhost}>
-            返回首页
+            {t('detail.backHome')}
           </Link>
           <button onClick={logout} className={`${btnGhost} !text-rose-500`}>
-            <LogOut className="h-4 w-4" /> 退出
+            <LogOut className="h-4 w-4" /> {t('admin.logout')}
           </button>
         </div>
       </div>
 
       {/* 移动端横向 Tab */}
       <div className="flex gap-1 overflow-x-auto md:hidden">
-        {tabs.map((t) => (
-          <div key={t.key} className="shrink-0">
-            <TabButton t={t} tab={tab} setTab={setTab} />
+        {tabs.map((item) => (
+          <div key={item.key} className="shrink-0">
+            <TabButton item={item} tab={tab} setTab={setTab} />
           </div>
         ))}
       </div>
@@ -108,8 +120,8 @@ export default function Admin() {
       <div className="flex gap-6 md:min-h-0 md:flex-1">
         {/* 桌面端侧边栏：在不滚动的外壳里，始终固定不动 */}
         <aside className="hidden w-44 shrink-0 flex-col gap-1 md:flex">
-          {tabs.map((t) => (
-            <TabButton key={t.key} t={t} tab={tab} setTab={setTab} />
+          {tabs.map((item) => (
+            <TabButton key={item.key} item={item} tab={tab} setTab={setTab} />
           ))}
         </aside>
 

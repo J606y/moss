@@ -9,8 +9,10 @@ import Flag from './Flag'
 import Ticker from './Ticker'
 import { StatusPill } from './ui'
 import { card } from '../ui'
+import { useT } from '../i18n'
 
 function ServerCard({ server }: { server: ServerMeta }) {
+  const { t } = useT()
   const st = useLiveStats(server.id)
   const memPct = pct(st.memUsed, server.memTotal)
   const diskPct = pct(st.diskUsed, server.diskTotal)
@@ -33,18 +35,18 @@ function ServerCard({ server }: { server: ServerMeta }) {
           精简后这一行才放得下完整的三段信息 */}
       <div className="mt-1.5 truncate text-xs text-zinc-500">
         {shortOS(server.os)} · {server.virtualization} · {server.arch}
-        {server.online && <> · 在线 {fmtUptime(server.uptimeSec)}</>}
+        {server.online && <> · {t('card.uptime', { t: fmtUptime(server.uptimeSec) })}</>}
       </div>
 
       <div className="mt-3 space-y-2.5">
         <ProgressBar label="CPU" right={fmtPercent(st.cpu)} pct={st.cpu} />
         <ProgressBar
-          label="内存"
+          label={t('metric.mem')}
           right={`${fmtBytes(st.memUsed)} / ${fmtBytes(server.memTotal)}`}
           pct={memPct}
         />
         <ProgressBar
-          label="硬盘"
+          label={t('metric.disk')}
           right={`${fmtBytes(st.diskUsed)} / ${fmtBytes(server.diskTotal)}`}
           pct={diskPct}
         />
@@ -52,7 +54,7 @@ function ServerCard({ server }: { server: ServerMeta }) {
 
       <div className="mt-3 grid grid-cols-2 gap-2 border-t border-zinc-500/10 pt-2.5 text-xs dark:border-white/10">
         <div>
-          <div className="text-zinc-400 dark:text-zinc-500">网速</div>
+          <div className="text-zinc-400 dark:text-zinc-500">{t('metric.speed')}</div>
           <div className="mt-0.5 space-y-0.5 tabular-nums text-zinc-600 dark:text-zinc-300">
             <div className="flex items-center gap-1">
               <ArrowUp className="h-3 w-3 text-emerald-500" />
@@ -65,7 +67,7 @@ function ServerCard({ server }: { server: ServerMeta }) {
           </div>
         </div>
         <div>
-          <div className="text-zinc-400 dark:text-zinc-500">总流量</div>
+          <div className="text-zinc-400 dark:text-zinc-500">{t('metric.traffic')}</div>
           <div className="mt-0.5 space-y-0.5 tabular-nums text-zinc-600 dark:text-zinc-300">
             <div className="flex items-center gap-1">
               <ArrowUp className="h-3 w-3 text-emerald-500" />

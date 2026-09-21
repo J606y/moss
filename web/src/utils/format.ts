@@ -1,3 +1,15 @@
+import { getLang, translate, type Lang } from '../i18n'
+
+/**
+ * 日期时间的 locale 标签。
+ *
+ * 英文取 en-GB 而不是 en-US：面板各处一律 24 小时制（hour12: false），
+ * 与 en-GB 的原生习惯一致；日期的 D/M/Y 也比 M/D/Y 覆盖更多国家的读者。
+ * 这些函数都在渲染期调用，直接读当前语言即可——调用方只要订阅了 useT()，
+ * 切换语言时自会带着它们一起重渲染。
+ */
+const localeTag: Record<Lang, string> = { zh: 'zh-CN', en: 'en-GB' }
+
 export function fmtBytes(n: number, digits = 1): string {
   if (!isFinite(n) || n <= 0) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
@@ -13,12 +25,13 @@ export const fmtSpeed = (n: number) => `${fmtBytes(n)}/s`
 
 export function fmtUptime(sec: number): string {
   if (sec <= 0) return '—'
+  const lang = getLang()
   const d = Math.floor(sec / 86400)
   const h = Math.floor((sec % 86400) / 3600)
   const m = Math.floor((sec % 3600) / 60)
-  if (d > 0) return `${d} 天 ${h} 时`
-  if (h > 0) return `${h} 时 ${m} 分`
-  return `${m} 分钟`
+  if (d > 0) return translate(lang, 'fmt.uptime.dh', { d, h })
+  if (h > 0) return translate(lang, 'fmt.uptime.hm', { h, m })
+  return translate(lang, 'fmt.uptime.m', { m })
 }
 
 export const fmtPercent = (n: number) => `${(Number.isFinite(n) ? n : 0).toFixed(1)}%`
@@ -45,15 +58,18 @@ export function shortOS(os: string): string {
 }
 
 export function fmtTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString('zh-CN', { hour12: false })
+  return new Date(ts).toLocaleTimeString(localeTag[getLang()], { hour12: false })
 }
 
 export function fmtDateTime(ts: number): string {
-  return new Date(ts).toLocaleString('zh-CN', { hour12: false })
+  return new Date(ts).toLocaleString(localeTag[getLang()], { hour12: false })
 }
 
 export function fmtAxisTime(ts: number, hours: number): string {
   const d = new Date(ts)
-  if (hours > 24) return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}时`
+  if (hours > 24) {
+    const hh = String(d.getHours()).padStart(2, '0')
+    return `${d.getMonth() + 1}/${d.getDate()} ${translate(getLang(), 'fmt.axis.hour', { h: hh })}`
+  }
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }

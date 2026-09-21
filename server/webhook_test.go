@@ -66,11 +66,13 @@ func TestWebhookDeliversEvent(t *testing.T) {
 	sink := newWebhookSink(t)
 	n := webhookTestNotifier(t, sink.srv.URL, "", true)
 
+	// 不设 Text：它由 fire 在出口按站点语言渲染（见 alert_text.go），
+	// 产生处只给结构化字段。文案本身由 TestRenderAlert 覆盖。
 	n.fire(notifyConfig{}, alertEvent{
 		Type:       evtServerOffline,
 		ServerID:   "srv1",
 		ServerName: "hk-01",
-		Text:       "🔴 服务器离线",
+		params:     map[string]string{"name": "hk-01", "sec": "60"},
 	})
 
 	ev := sink.wait(t)
@@ -96,14 +98,14 @@ func TestWebhookCarriesStructuredMetrics(t *testing.T) {
 		Type:       evtLoadAlert,
 		ServerID:   "srv1",
 		ServerName: "hk-01",
-		Text:       "⚠️ 负载告警\nhk-01 CPU 使用率 95.0%",
-		Metric:     "CPU",
+		Metric:     metricCPU,
 		Value:      95,
 		Threshold:  80,
+		params:     map[string]string{"name": "hk-01", "val": "95.0", "min": "5", "th": "80"},
 	})
 
 	ev := sink.wait(t)
-	if ev.Metric != "CPU" || ev.Value != 95 || ev.Threshold != 80 {
+	if ev.Metric != metricCPU || ev.Value != 95 || ev.Threshold != 80 {
 		t.Errorf("指标信息未结构化传递: metric=%q value=%v threshold=%v", ev.Metric, ev.Value, ev.Threshold)
 	}
 }
@@ -112,7 +114,7 @@ func TestWebhookSendsBearerSecret(t *testing.T) {
 	sink := newWebhookSink(t)
 	n := webhookTestNotifier(t, sink.srv.URL, "s3cret", true)
 
-	n.fire(notifyConfig{}, alertEvent{Type: evtServerOnline, Text: "上线"})
+	n.fire(notifyConfig{}, alertEvent{Type: evtServerOnline})
 	sink.wait(t)
 
 	select {
@@ -129,7 +131,7 @@ func TestWebhookSkippedWhenDisabled(t *testing.T) {
 	sink := newWebhookSink(t)
 	n := webhookTestNotifier(t, sink.srv.URL, "", false) // 开关关闭
 
-	n.fire(notifyConfig{}, alertEvent{Type: evtServerOffline, Text: "离线"})
+	n.fire(notifyConfig{}, alertEvent{Type: evtServerOffline})
 
 	select {
 	case ev := <-sink.recv:
@@ -142,7 +144,7 @@ func TestWebhookSkippedWhenDisabled(t *testing.T) {
 func TestWebhookSkippedWhenURLEmpty(t *testing.T) {
 	n := webhookTestNotifier(t, "", "", true)
 	// 只要不 panic 即通过：地址为空时应静默跳过，而不是构造出一个非法请求
-	n.fire(notifyConfig{}, alertEvent{Type: evtServerOffline, Text: "离线"})
+	n.fire(notifyConfig{}, alertEvent{Type: evtServerOffline})
 	time.Sleep(300 * time.Millisecond)
 }
 
@@ -154,7 +156,7 @@ func TestWebhookFailureDoesNotBlock(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		n.fire(notifyConfig{}, alertEvent{Type: evtServerOffline, Text: "离线"})
+		n.fire(notifyConfig{}, alertEvent{Type: evtServerOffline})
 		close(done)
 	}()
 
@@ -174,7 +176,7 @@ func TestWebhookReloadPicksUpConfig(t *testing.T) {
 	setSetting(db, keyWebhookOn, "1")
 	n.Reload()
 
-	n.fire(notifyConfig{}, alertEvent{Type: evtServerOnline, Text: "上线"})
+	n.fire(notifyConfig{}, alertEvent{Type: evtServerOnline})
 	if ev := sink.wait(t); ev.Type != evtServerOnline {
 		t.Errorf("Reload 后应使用新配置，实际收到 %+v", ev)
 	}

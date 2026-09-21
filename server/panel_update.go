@@ -228,8 +228,12 @@ type panelUpdateView struct {
 	// HostReady 面板所在机器当前能否执行更新：已指定、在线、且 agent 认识执行指令。
 	HostReady bool   `json:"hostReady"`
 	HostHint  string `json:"hostHint,omitempty"`
-	Stage     string `json:"stage,omitempty"`
-	StageErr  string `json:"stageErr,omitempty"`
+	// HostHintCode 上一行那句提示的错误码，供前端翻译；
+	// 认不出时前端退回显示 HostHint 的中文原文。
+	HostHintCode   string `json:"hostHintCode,omitempty"`
+	HostHintDetail string `json:"hostHintDetail,omitempty"`
+	Stage          string `json:"stage,omitempty"`
+	StageErr       string `json:"stageErr,omitempty"`
 }
 
 func (s *App) handleGetPanelUpdate(w http.ResponseWriter, r *http.Request) {
@@ -249,36 +253,43 @@ func (s *App) writePanelUpdateView(w http.ResponseWriter, force bool) {
 		view.Latest = &info
 		view.Avail = compareToCurrent(info.Version)
 	}
-	view.HostReady, view.HostHint = s.panelHostReady(cfg.HostServer)
+	ready, hint := s.panelHostReady(cfg.HostServer)
+	view.HostReady = ready
+	if hint != nil {
+		view.HostHint, view.HostHintCode, view.HostHintDetail = hint.Error(), hint.Code, hint.Detail
+	}
 	view.Stage, view.StageErr = s.panelUpd.status()
 	writeJSON(w, 200, view)
 }
 
 // panelHostReady 判断面板所在机器现在能不能执行更新。
-func (s *App) panelHostReady(id string) (bool, string) {
+// 返回 *apiErr 而不是中文串：这句提示既进界面也进错误响应，带着码前端才翻得动。
+func (s *App) panelHostReady(id string) (bool, *apiErr) {
 	if id == "" {
-		return false, "尚未指定面板所在的服务器"
+		return false, &errPanelHostUnset
 	}
 	var name, agentVer string
 	if err := s.db.QueryRow(`SELECT name, agent_version FROM servers WHERE id=?`, id).
 		Scan(&name, &agentVer); err != nil {
-		return false, "指定的服务器不存在，请重新选择"
+		return false, &errPanelHostMissing
 	}
 	if s.hub.AgentConn(id) == nil {
-		return false, fmt.Sprintf("「%s」当前离线", name)
+		e := errPanelHostOffline.with(name)
+		return false, &e
 	}
 	// 更新经由 exec 通道下发，需要该机器显式开启远程执行——
 	// 这道闸不因为「更新的是面板自己」就放开。
 	if !agentSupportsUpgrade(agentVer) {
-		return false, fmt.Sprintf("「%s」的 agent 版本过旧，请先手动升级", name)
+		e := errPanelHostOldAgent.with(name)
+		return false, &e
 	}
-	return true, ""
+	return true, nil
 }
 
 func (s *App) handlePutPanelUpdate(w http.ResponseWriter, r *http.Request) {
 	var f panelUpdateConfig
 	if err := json.NewDecoder(r.Body).Decode(&f); err != nil {
-		writeErr(w, 400, "请求格式错误")
+		writeErr(w, errBadJSON)
 		return
 	}
 	if f.Channel != channelStable && f.Channel != channelBeta {
@@ -288,7 +299,7 @@ func (s *App) handlePutPanelUpdate(w http.ResponseWriter, r *http.Request) {
 		var n int
 		s.db.QueryRow(`SELECT COUNT(*) FROM servers WHERE id=?`, f.HostServer).Scan(&n)
 		if n == 0 {
-			writeErr(w, 400, "选择的服务器不存在")
+			writeErr(w, errPanelHostNotFound)
 			return
 		}
 	}
@@ -507,7 +518,7 @@ func (s *App) handleStartPanelUpdate(w http.ResponseWriter, r *http.Request) {
 	// 先占位再干活。检查与置位之间隔着网络调用的话，两个管理员同时点更新
 	// 会各自起一份部署脚本，互相删掉对方的回滚备份——详见 claim 的注释。
 	if !s.panelUpd.claim() {
-		writeErr(w, 400, "已有更新正在进行")
+		writeErr(w, errPanelBusy)
 		return
 	}
 	// 从这里到 begin 之间的每一条失败路径都必须放回位置，
@@ -521,19 +532,19 @@ func (s *App) handleStartPanelUpdate(w http.ResponseWriter, r *http.Request) {
 
 	cfg := loadPanelUpdateConfig(s)
 	if ready, hint := s.panelHostReady(cfg.HostServer); !ready {
-		writeErr(w, 400, hint)
+		writeErr(w, *hint)
 		return
 	}
 	info, err := s.releases.fetch(cfg.Channel, false)
 	if err != nil {
-		writeErr(w, 400, "版本查询失败: "+err.Error())
+		writeErr(w, errPanelVersionCheck.with(err.Error()))
 		return
 	}
 	// 只许往前走。前端也会挡，但不能只靠前端——绕过界面直接调接口同样要被拒。
 	// 除了「往回走很怪」，更实际的原因是数据库迁移是单向的：
 	// 旧版本读不懂新版本写下的结构。
 	if a := compareToCurrent(info.Version); a.Action != "update" {
-		writeErr(w, 400, "只能更新到比当前更高的版本（当前 v"+strings.TrimPrefix(serverVersion, "v")+"）")
+		writeErr(w, errPanelNotNewer.with("v"+strings.TrimPrefix(serverVersion, "v")))
 		return
 	}
 
@@ -555,7 +566,7 @@ func (s *App) handleStartPanelUpdate(w http.ResponseWriter, r *http.Request) {
 		if msg == "" && err != nil {
 			msg = err.Error()
 		}
-		writeErr(w, 400, "下发更新脚本失败: "+msg)
+		writeErr(w, errPanelDispatch.with(msg))
 		return
 	}
 
@@ -566,7 +577,7 @@ func (s *App) handleStartPanelUpdate(w http.ResponseWriter, r *http.Request) {
 		Timeout: 60,
 	})
 	if err != nil {
-		writeErr(w, 400, "启动更新失败: "+err.Error())
+		writeErr(w, errPanelStart.with(err.Error()))
 		return
 	}
 	s.panelUpd.begin(info.Version, jobID)

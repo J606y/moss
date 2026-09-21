@@ -41,6 +41,20 @@ const (
 	evtGCPRunningNC = "gcp.running_not_connected"
 )
 
+// 指标码。与事件类型同为对外契约，一并定在这里。
+//
+// 必须是常量，因为这个字符串身兼三职：告警状态机的 key（st.highSince[metric]）、
+// webhook 载荷的 metric 字段、以及文案里 {metric} 的查表依据。写字面量时
+// 改一个字，状态机就与 clearMetricState 对不上——而编译器完全不管。
+//
+// 取值与 MCP 的 get_history 一致（historyMetricList），对端只需认一套词。
+const (
+	metricCPU  = "cpu"
+	metricMem  = "mem"
+	metricDisk = "disk"
+	metricNet  = "net"
+)
+
 // redactURLErr 把传输错误里的 URL 抹掉凭证再返回。
 //
 // net/http 的传输错误是 *url.Error，它的 Error() 里带着**完整 URL**。
@@ -72,15 +86,27 @@ func redactURLErr(err error) string {
 //
 // Text 与结构化字段并存：人看 Text，AI 看结构化字段。让 AI 去解析中文告警文案
 // 是脆弱的——文案一改，接收端就崩。
+//
+// Text 由 fire 在出口按站点语言渲染，告警产生处只填 textKey 与 params，
+// 不拼人话（见 alert_text.go）。
 type alertEvent struct {
 	Type       string  `json:"type"`
 	ServerID   string  `json:"serverId,omitempty"`
 	ServerName string  `json:"serverName,omitempty"`
 	Text       string  `json:"text"`
-	Metric     string  `json:"metric,omitempty"`    // CPU / 内存 / 硬盘 / net
+	Metric     string  `json:"metric,omitempty"`    // metricCPU / metricMem / metricDisk / metricNet
 	Value      float64 `json:"value,omitempty"`     // 触发时的实测值
 	Threshold  float64 `json:"threshold,omitempty"` // 配置的阈值
 	Timestamp  int64   `json:"timestamp"`           // 秒级
+
+	// textKey 选用哪条文案。为空即取 Type；同一 Type 下需要分措辞时才填
+	// （见 alert_text.go 的 txt* 常量）。
+	//
+	// textKey 与 params 都不导出，因此不进 JSON——接收端该读的是上面那些
+	// 结构化字段，模板参数是渲染的内部细节，暴露出去只会变成新的隐式契约。
+	textKey string
+	// params 渲染 Text 用的参数，语言中立：机器名、数字、时长、错误原文。
+	params map[string]string
 }
 
 // webhookConfig 独立于 notifyConfig：webhook 与 Telegram 是两条可各自开关的通道。
@@ -162,21 +188,21 @@ func (s *App) handlePutWebhook(w http.ResponseWriter, r *http.Request) {
 		ClearSecret bool `json:"clearSecret"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&f); err != nil {
-		writeErr(w, 400, "参数错误")
+		writeErr(w, errBadParams)
 		return
 	}
 	url := strings.TrimSpace(f.URL)
 	if f.On && url == "" {
-		writeErr(w, 400, "启用 webhook 需要填写地址")
+		writeErr(w, errWebhookURLRequired)
 		return
 	}
 	if url != "" && !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-		writeErr(w, 400, "地址需以 http:// 或 https:// 开头")
+		writeErr(w, errWebhookBadScheme)
 		return
 	}
 	if err := setSetting(s.db, keyWebhookURL, url); err != nil {
 		log.Printf("保存 webhook 地址失败: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	// 留空表示不改动已有密钥，避免前端因不回传明文而在保存时意外清空
@@ -187,7 +213,7 @@ func (s *App) handlePutWebhook(w http.ResponseWriter, r *http.Request) {
 		enc, err := encryptSecret(sec)
 		if err != nil {
 			log.Printf("加密 webhook 密钥失败: %v", err)
-			writeErr(w, 500, "密钥加密失败，未保存，请检查服务器状态后重试")
+			writeErr(w, errWebhookEncrypt)
 			return
 		}
 		setSetting(s.db, keyWebhookSecret, enc)
@@ -198,7 +224,7 @@ func (s *App) handlePutWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := setSetting(s.db, keyWebhookOn, on); err != nil {
 		log.Printf("保存 webhook 开关失败: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	s.notifier.Reload()
@@ -209,7 +235,7 @@ func (s *App) handlePutWebhook(w http.ResponseWriter, r *http.Request) {
 func (s *App) handleTestWebhook(w http.ResponseWriter, r *http.Request) {
 	cfg := loadWebhookConfig(s.db)
 	if strings.TrimSpace(cfg.URL) == "" {
-		writeErr(w, 400, "请先填写并保存 webhook 地址")
+		writeErr(w, errWebhookNotConfigured)
 		return
 	}
 	// 测试推送忽略开关：用户点「测试」时就是想验证连通性，

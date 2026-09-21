@@ -153,7 +153,7 @@ func TestOfflineAlertDefersToHubState(t *testing.T) {
 // TestReloadClearsStaleAlertState 改配置必须清掉受影响指标的告警态。
 //
 // 不清的话会留下一个 stale 的 highAlerted：网速告警已触发 → 用户关掉网速告警
-// → 过一阵再打开，此时 highAlerted["net"] 仍是 true，**新的超阈值不会再告警**；
+// → 过一阵再打开，此时 highAlerted[metricNet] 仍是 true，**新的超阈值不会再告警**；
 // 而等网速跌破回差线并满 RecoverSec，又会凭空发出一条「✅ 网速恢复」
 // ——对应的告警用户从未收到过。改阈值同理：留下的告警态是按旧阈值算的。
 func TestReloadClearsStaleAlertState(t *testing.T) {
@@ -167,8 +167,8 @@ func TestReloadClearsStaleAlertState(t *testing.T) {
 	// 造出「已经告警过」的状态
 	n.mu.Lock()
 	st := n.state("s1")
-	st.highAlerted["net"] = true
-	st.highAlerted["CPU"] = true
+	st.highAlerted[metricNet] = true
+	st.highAlerted[metricCPU] = true
 	n.mu.Unlock()
 
 	// 关掉网速告警再重载
@@ -176,8 +176,8 @@ func TestReloadClearsStaleAlertState(t *testing.T) {
 	n.Reload()
 
 	n.mu.Lock()
-	netStale := n.states["s1"].highAlerted["net"]
-	cpuKept := n.states["s1"].highAlerted["CPU"]
+	netStale := n.states["s1"].highAlerted[metricNet]
+	cpuKept := n.states["s1"].highAlerted[metricCPU]
 	n.mu.Unlock()
 	if netStale {
 		t.Error("关掉网速告警后应清掉它的告警态，否则重新打开时新的超阈值不会告警")
@@ -190,7 +190,7 @@ func TestReloadClearsStaleAlertState(t *testing.T) {
 	setSetting(db, keyNotifyCPU, "70")
 	n.Reload()
 	n.mu.Lock()
-	cpuStale := n.states["s1"].highAlerted["CPU"]
+	cpuStale := n.states["s1"].highAlerted[metricCPU]
 	n.mu.Unlock()
 	if cpuStale {
 		t.Error("阈值改动后应清掉告警态：旧状态是按旧阈值算出来的")

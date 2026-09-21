@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import { fmtDateTime } from '../utils/format'
 import { card } from '../ui'
 import { axisStroke } from '../tokens'
+import { useT } from '../i18n'
 
 // 色板与网格色统一收敛到 tokens.ts，这里透传给既有消费方（ServerDetail 等）
 export { gridStroke, palette } from '../tokens'
@@ -18,6 +19,7 @@ export function ChartTip({
   label?: number | string
   fmt?: (value: number, key: string) => string
 }) {
+  const { t } = useT()
   if (!active || !payload || payload.length === 0) return null
   return (
     <div className="rounded-xl border border-white/50 bg-white/75 px-3 py-2 text-xs shadow-lg backdrop-blur-xl dark:border-white/10 dark:bg-zinc-900/75">
@@ -27,7 +29,7 @@ export function ChartTip({
           <span className="inline-block h-2 w-2 rounded-full" style={{ background: p.color ?? p.stroke }} />
           <span className="text-zinc-500">{p.name ?? p.dataKey}</span>
           <span className="ml-auto pl-4 font-medium tabular-nums text-zinc-800 dark:text-zinc-100">
-            {p.value == null ? '丢包' : fmt ? fmt(p.value, p.dataKey) : p.value}
+            {p.value == null ? t('chart.packetLoss') : fmt ? fmt(p.value, p.dataKey) : p.value}
           </span>
         </div>
       ))}

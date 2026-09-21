@@ -50,7 +50,7 @@ func TestLoadRecoverRequiresSustainedLow(t *testing.T) {
 
 	// 先制造一次告警：超阈值并已持续满 5 分钟
 	n.OnReport("srv1", 95, 0, 0, 0, 0)
-	backdate(n, "srv1", "CPU", 6*time.Minute, 0)
+	backdate(n, "srv1", metricCPU, 6*time.Minute, 0)
 	n.OnReport("srv1", 95, 0, 0, 0, 0)
 	if ev := sink.wait(t); ev.Type != evtLoadAlert {
 		t.Fatalf("应先触发负载告警，实际 %q", ev.Type)
@@ -63,14 +63,14 @@ func TestLoadRecoverRequiresSustainedLow(t *testing.T) {
 		t.Fatalf("低于回差线不足确认时长就发了恢复: %+v", ev)
 	case <-time.After(300 * time.Millisecond):
 	}
-	if !alerted(n, "srv1", "CPU") {
+	if !alerted(n, "srv1", metricCPU) {
 		t.Error("确认时长未满，告警状态不该被清除")
 	}
 
 	// 又冲回高位：低位计时必须清零，否则下次一掉下来就会立刻恢复
 	n.OnReport("srv1", 95, 0, 0, 0, 0)
 	n.mu.Lock()
-	_, stillLow := n.state("srv1").lowSince["CPU"]
+	_, stillLow := n.state("srv1").lowSince[metricCPU]
 	n.mu.Unlock()
 	if stillLow {
 		t.Error("重回高位后低位计时应清零")
@@ -78,14 +78,14 @@ func TestLoadRecoverRequiresSustainedLow(t *testing.T) {
 
 	// 这次踏踏实实低了 60 秒以上
 	n.OnReport("srv1", 75, 0, 0, 0, 0)
-	backdate(n, "srv1", "CPU", 0, 90*time.Second)
+	backdate(n, "srv1", metricCPU, 0, 90*time.Second)
 	n.OnReport("srv1", 75, 0, 0, 0, 0)
 
 	ev := sink.wait(t)
 	if ev.Type != evtLoadRecovered {
 		t.Fatalf("持续低于回差线后应发恢复，实际 %q", ev.Type)
 	}
-	if alerted(n, "srv1", "CPU") {
+	if alerted(n, "srv1", metricCPU) {
 		t.Error("恢复后告警状态应被清除")
 	}
 }
@@ -98,15 +98,15 @@ func TestHysteresisBandFreezesBothTimers(t *testing.T) {
 
 	n.OnReport("srv1", 95, 0, 0, 0, 0) // 进入高位，highSince 起算
 	n.mu.Lock()
-	highBefore := n.state("srv1").highSince["CPU"]
+	highBefore := n.state("srv1").highSince[metricCPU]
 	n.mu.Unlock()
 
 	n.OnReport("srv1", 85, 0, 0, 0, 0) // 落进回差带
 
 	n.mu.Lock()
 	st := n.state("srv1")
-	highAfter := st.highSince["CPU"]
-	_, hasLow := st.lowSince["CPU"]
+	highAfter := st.highSince[metricCPU]
+	_, hasLow := st.lowSince[metricCPU]
 	n.mu.Unlock()
 
 	if !highAfter.Equal(highBefore) {
@@ -132,7 +132,7 @@ func TestNetRecoverRequiresSustainedLow(t *testing.T) {
 
 	const mb = 1024 * 1024
 	n.OnReport("srv1", 0, 0, 0, 80*mb, 0)
-	backdate(n, "srv1", "net", 90*time.Second, 0)
+	backdate(n, "srv1", metricNet, 90*time.Second, 0)
 	n.OnReport("srv1", 0, 0, 0, 80*mb, 0)
 	if ev := sink.wait(t); ev.Type != evtNetAlert {
 		t.Fatalf("应先触发网速告警，实际 %q", ev.Type)
@@ -146,7 +146,7 @@ func TestNetRecoverRequiresSustainedLow(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 	}
 
-	backdate(n, "srv1", "net", 0, 90*time.Second)
+	backdate(n, "srv1", metricNet, 0, 90*time.Second)
 	n.OnReport("srv1", 0, 0, 0, 10*mb, 0)
 	if ev := sink.wait(t); ev.Type != evtNetRecovered {
 		t.Fatalf("持续低速后应发恢复，实际 %q", ev.Type)

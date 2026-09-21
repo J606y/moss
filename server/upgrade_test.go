@@ -66,6 +66,17 @@ func TestCompareSemver(t *testing.T) {
 	}
 }
 
+// hintCode 取出提示的错误码，无提示时为空串。
+//
+// 这些测试一律断言码而不是中文措辞：措辞是给人看的、随时会改，
+// 码才是契约（见 apierr.go）。顺带也免去对 nil 提示调 Error() 的空指针。
+func hintCode(e *codedError) string {
+	if e == nil {
+		return ""
+	}
+	return e.Code
+}
+
 func TestUpgradeAvailability(t *testing.T) {
 	old := serverVersion
 	t.Cleanup(func() { serverVersion = old })
@@ -78,49 +89,49 @@ func TestUpgradeAvailability(t *testing.T) {
 	if ok {
 		t.Error("v1.4.0 不认识升级指令，不该允许一键升级")
 	}
-	if !strings.Contains(hint, "手动") {
-		t.Errorf("提示应说明需手动升级一次，实际: %q", hint)
+	if got := hintCode(hint); got != errUpgradeAgentTooOld.Code {
+		t.Errorf("提示应说明需手动升级一次，实际: %q", got)
 	}
 
 	// beta.1 的主版本也是 2，但 upgrade 消息是 beta.2 才加的，它同样收不到。
 	// 这条曾经判反过：按钮显示为可点，点下去只会静默丢弃、干等超时。
-	if ok, hint := upgradeAvailability("2.0.0-beta.1", linux, true); ok || !strings.Contains(hint, "手动") {
-		t.Errorf("beta.1 不认识升级指令，应提示手动升级，实际 ok=%v hint=%q", ok, hint)
+	if ok, hint := upgradeAvailability("2.0.0-beta.1", linux, true); ok || hintCode(hint) != errUpgradeAgentTooOld.Code {
+		t.Errorf("beta.1 不认识升级指令，应提示手动升级，实际 ok=%v code=%q", ok, hintCode(hint))
 	}
 
 	// 已是目标版本：不可升级，且不该有提示——没什么好提示的。
-	if ok, hint := upgradeAvailability("2.0.0-beta.3", linux, true); ok || hint != "" {
-		t.Errorf("已是最新时应无提示，实际 ok=%v hint=%q", ok, hint)
+	if ok, hint := upgradeAvailability("2.0.0-beta.3", linux, true); ok || hint != nil {
+		t.Errorf("已是最新时应无提示，实际 ok=%v code=%q", ok, hintCode(hint))
 	}
 
 	// 已是最新的 Windows / macOS 机器同样不该有提示：平台判定排在版本判定之后，
 	// 否则一台早已跟上版本的机器会常年挂着「不支持自动升级」的提示。
 	for _, osName := range []string{"Microsoft Windows Server 2022 Datacenter", "Darwin 15"} {
-		if ok, hint := upgradeAvailability("2.0.0-beta.3", osName, true); ok || hint != "" {
-			t.Errorf("%q 已是最新时不该有提示，实际 ok=%v hint=%q", osName, ok, hint)
+		if ok, hint := upgradeAvailability("2.0.0-beta.3", osName, true); ok || hint != nil {
+			t.Errorf("%q 已是最新时不该有提示，实际 ok=%v code=%q", osName, ok, hintCode(hint))
 		}
 	}
 
 	// 离线机器下发不出去。
-	if ok, hint := upgradeAvailability("2.0.0-beta.2", linux, false); ok || !strings.Contains(hint, "离线") {
-		t.Errorf("离线应被拦下，实际 ok=%v hint=%q", ok, hint)
+	if ok, hint := upgradeAvailability("2.0.0-beta.2", linux, false); ok || hintCode(hint) != errUpgradeOffline.Code {
+		t.Errorf("离线应被拦下，实际 ok=%v code=%q", ok, hintCode(hint))
 	}
 
 	// 正常可升级：agent 认识升级指令、在线、且版本落后。
-	if ok, hint := upgradeAvailability("2.0.0-beta.2", linux, true); !ok || hint != "" {
-		t.Errorf("应允许升级，实际 ok=%v hint=%q", ok, hint)
+	if ok, hint := upgradeAvailability("2.0.0-beta.2", linux, true); !ok || hint != nil {
+		t.Errorf("应允许升级，实际 ok=%v code=%q", ok, hintCode(hint))
 	}
 
 	// 系统名从未上报（旧 agent / 刚建档）：不该替用户下结论说不支持，
 	// 交给版本与在线判定，此处应正常放行。
-	if ok, hint := upgradeAvailability("2.0.0-beta.2", "", true); !ok || hint != "" {
-		t.Errorf("系统名未知不该拦，实际 ok=%v hint=%q", ok, hint)
+	if ok, hint := upgradeAvailability("2.0.0-beta.2", "", true); !ok || hint != nil {
+		t.Errorf("系统名未知不该拦，实际 ok=%v code=%q", ok, hintCode(hint))
 	}
 
 	// 开发态 server 没有对应的 release，钉上去只会 404。
 	serverVersion = "dev"
-	if ok, hint := upgradeAvailability("2.0.0-beta.2", linux, true); ok || !strings.Contains(hint, "开发版本") {
-		t.Errorf("开发态应拒绝，实际 ok=%v hint=%q", ok, hint)
+	if ok, hint := upgradeAvailability("2.0.0-beta.2", linux, true); ok || hintCode(hint) != errUpgradeNoRelease.Code {
+		t.Errorf("开发态应拒绝，实际 ok=%v code=%q", ok, hintCode(hint))
 	}
 }
 
@@ -149,16 +160,16 @@ func TestUpgradeAvailabilityUnsupportedOS(t *testing.T) {
 		if ok {
 			t.Errorf("%q 应被判为不可自动升级", osName)
 		}
-		if hint != upgradeOSUnsupportedHint {
-			t.Errorf("%q 的提示应为统一文案，实际: %q", osName, hint)
+		if got := hintCode(hint); got != errUpgradeOSUnsupported.Code {
+			t.Errorf("%q 的提示应为统一文案，实际: %q", osName, got)
 		}
 	}
 
 	// 平台判定必须排在在线判定之前：这类机器等它上线也没用，
 	// 显示「机器离线」会让用户白等一场，再点一次仍然失败。
 	for _, osName := range []string{"Windows 11 Pro", "Darwin 15"} {
-		if _, hint := upgradeAvailability("2.0.0-beta.2", osName, false); hint != upgradeOSUnsupportedHint {
-			t.Errorf("离线的 %q 应先报平台不支持，实际: %q", osName, hint)
+		if _, hint := upgradeAvailability("2.0.0-beta.2", osName, false); hintCode(hint) != errUpgradeOSUnsupported.Code {
+			t.Errorf("离线的 %q 应先报平台不支持，实际: %q", osName, hintCode(hint))
 		}
 	}
 

@@ -338,7 +338,7 @@ func (s *App) handleGetGCP(w http.ResponseWriter, r *http.Request) {
 	creds, err := listGCPCredentials(s.db)
 	if err != nil {
 		log.Printf("列出 GCP 凭证失败: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	for _, c := range creds {
@@ -366,14 +366,14 @@ func (s *App) handlePutGCP(w http.ResponseWriter, r *http.Request) {
 		MaxTries int    `json:"maxTries"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&f); err != nil {
-		writeErr(w, 400, "请求格式错误")
+		writeErr(w, errBadJSON)
 		return
 	}
 	// 凭证已改为多份，由 /api/admin/gcp/credentials 管理。这里必须显式报错：
 	// 悄悄忽略一次私钥写入，调用方（缓存的旧页面、别人的脚本）会拿着 200 以为存好了，
 	// 而实际上凭证从未落库——静默吞掉写密钥是最坏的一种「兼容」。
 	if strings.TrimSpace(f.SaJSON) != "" || f.ClearSa {
-		writeErr(w, 400, "凭证管理已迁移至 /api/admin/gcp/credentials（面板支持多份凭证），请刷新页面后重试")
+		writeErr(w, errGCPLegacyEndpoint)
 		return
 	}
 	on := "0"
@@ -394,38 +394,38 @@ func (s *App) handleAddGCPCredential(w http.ResponseWriter, r *http.Request) {
 		SaJSON string `json:"saJson"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&f); err != nil {
-		writeErr(w, 400, "请求格式错误")
+		writeErr(w, errBadJSON)
 		return
 	}
 	raw := strings.TrimSpace(f.SaJSON)
 	if raw == "" {
-		writeErr(w, 400, "请粘贴 Service Account JSON 密钥")
+		writeErr(w, errGCPJSONRequired)
 		return
 	}
 	sa, _, err := parseGCPSA(raw)
 	if err != nil {
-		writeErr(w, 400, "凭证无效: "+err.Error())
+		writeErr(w, errGCPCredInvalid.with(err.Error()))
 		return
 	}
 	// 先按邮箱查重，别等唯一索引把 "UNIQUE constraint failed" 甩到用户脸上。
 	var dup string
 	if err := s.db.QueryRow(
 		`SELECT id FROM gcp_credentials WHERE client_email = ?`, sa.ClientEmail).Scan(&dup); err == nil {
-		writeErr(w, 409, fmt.Sprintf("该 Service Account（%s）已在凭证列表中；如需更换密钥，请先删除旧凭证再添加", sa.ClientEmail))
+		writeErr(w, errGCPCredDuplicate.with(sa.ClientEmail))
 		return
 	}
 	enc, err := encryptSecret(raw)
 	if err != nil {
 		// 加密不成就不落库：明文入库看不出异常，只会让私钥悄悄裸奔在数据库里。
 		log.Printf("加密 GCP 凭证失败: %v", err)
-		writeErr(w, 500, "凭证加密失败，未保存，请检查服务器状态后重试")
+		writeErr(w, errGCPEncrypt)
 		return
 	}
 
 	tx, err := s.db.Begin()
 	if err != nil {
 		log.Printf("handleAddGCPCredential begin: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	defer tx.Rollback()
@@ -440,13 +440,13 @@ func (s *App) handleAddGCPCredential(w http.ResponseWriter, r *http.Request) {
 	var only string
 	if err := tx.QueryRow(`SELECT COUNT(*), COALESCE(MIN(id), '') FROM gcp_credentials`).Scan(&n, &only); err != nil {
 		log.Printf("handleAddGCPCredential count: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	if n == 1 {
 		if _, err := tx.Exec(`UPDATE servers SET gcp_cred_id = ? WHERE gcp_cred_id = ''`, only); err != nil {
 			log.Printf("handleAddGCPCredential 回填绑定: %v", err)
-			writeErr(w, 500, "内部错误")
+			writeErr(w, errInternal)
 			return
 		}
 	}
@@ -456,16 +456,16 @@ func (s *App) handleAddGCPCredential(w http.ResponseWriter, r *http.Request) {
 		id, sa.ProjectID, sa.ClientEmail, enc, time.Now().Unix()); err != nil {
 		// 查重与插入之间被另一个请求抢先时唯一索引兜底，仍给人话。
 		if strings.Contains(err.Error(), "UNIQUE") {
-			writeErr(w, 409, fmt.Sprintf("该 Service Account（%s）已在凭证列表中", sa.ClientEmail))
+			writeErr(w, errGCPCredDuplicate.with(sa.ClientEmail))
 			return
 		}
 		log.Printf("handleAddGCPCredential insert: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	if err := tx.Commit(); err != nil {
 		log.Printf("handleAddGCPCredential commit: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	s.notifier.Reload()
@@ -482,14 +482,14 @@ func (s *App) handleDeleteGCPCredential(w http.ResponseWriter, r *http.Request) 
 	id := r.PathValue("id")
 	cred, err := loadGCPCredential(s.db, id)
 	if err != nil {
-		writeErr(w, 404, "凭证不存在")
+		writeErr(w, errCredNotFound)
 		return
 	}
 	rows, err := s.db.Query(
 		`SELECT name FROM servers WHERE gcp_cred_id = ? AND gcp_enabled = 1 ORDER BY sort, created_at`, id)
 	if err != nil {
 		log.Printf("handleDeleteGCPCredential query: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	var names []string
@@ -506,33 +506,35 @@ func (s *App) handleDeleteGCPCredential(w http.ResponseWriter, r *http.Request) 
 		if len(shown) > 5 {
 			shown, suffix = shown[:5], fmt.Sprintf(" 等 %d 台", len(names))
 		}
-		writeErr(w, 409, fmt.Sprintf("%s 正在被 %d 台节点使用（%s%s），请先把它们改绑到其他凭证，或关闭这些节点的 GCP 自动开机",
-			cred.ClientEmail, len(names), strings.Join(shown, "、"), suffix))
+		// 被哪几台占用是排查的关键信息，整段进 Detail 原样带给前端；
+		// 机器名本身不翻译，句子结构由前端文案决定。
+		writeErr(w, errGCPCredInUse.with(fmt.Sprintf("%s（%d 台：%s%s）",
+			cred.ClientEmail, len(names), strings.Join(shown, "、"), suffix)))
 		return
 	}
 
 	tx, err := s.db.Begin()
 	if err != nil {
 		log.Printf("handleDeleteGCPCredential begin: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	defer tx.Rollback()
 	if _, err := tx.Exec(`DELETE FROM gcp_credentials WHERE id = ?`, id); err != nil {
 		log.Printf("handleDeleteGCPCredential delete: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	// 关着开关但绑着它的节点在这里解绑，不留悬空引用——
 	// 悬空 id 在 resolveGCPCredID 那边是硬错误，留着只会让用户下次打开开关时莫名其妙。
 	if _, err := tx.Exec(`UPDATE servers SET gcp_cred_id = '' WHERE gcp_cred_id = ?`, id); err != nil {
 		log.Printf("handleDeleteGCPCredential 解绑: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	if err := tx.Commit(); err != nil {
 		log.Printf("handleDeleteGCPCredential commit: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	s.notifier.Reload()
@@ -546,29 +548,29 @@ func (s *App) handleDeleteGCPCredential(w http.ResponseWriter, r *http.Request) 
 func (s *App) handleTestGCPCredential(w http.ResponseWriter, r *http.Request) {
 	cred, err := loadGCPCredential(s.db, r.PathValue("id"))
 	if err != nil {
-		writeErr(w, 404, "凭证不存在")
+		writeErr(w, errCredNotFound)
 		return
 	}
 	raw, err := decryptSecretValue(cred.SaJSON)
 	if err != nil {
 		// 「测试」正是运维用来定位问题的入口，这里必须说出真实原因，
 		// 而不是把解不开伪装成没填、让人去重填一遍。
-		writeErr(w, 500, "该凭证无法解密，主密钥可能已变更；请恢复原 MOSS_SECRET_KEY 或 secret.key，或删除后重新添加")
+		writeErr(w, errGCPCredUndecryptable)
 		return
 	}
 	if strings.TrimSpace(raw) == "" {
-		writeErr(w, 400, "凭证内容为空，请删除后重新添加")
+		writeErr(w, errGCPCredEmpty)
 		return
 	}
 	cli, err := newGCPClient(raw)
 	if err != nil {
-		writeErr(w, 400, "凭证无效: "+err.Error())
+		writeErr(w, errGCPCredInvalid.with(err.Error()))
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 	if _, err := cli.accessToken(ctx); err != nil {
-		writeErr(w, 502, "换取访问令牌失败: "+err.Error())
+		writeErr(w, errGCPTokenFailed.with(err.Error()))
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "clientEmail": cli.sa.ClientEmail, "projectId": cli.sa.ProjectID})
@@ -581,20 +583,20 @@ func (s *App) handleGCPManualStart(w http.ResponseWriter, r *http.Request) {
 	if err := s.db.QueryRow(
 		`SELECT name, gcp_enabled, gcp_cred_id, gcp_project, gcp_zone, gcp_instance FROM servers WHERE id = ?`, t.id).
 		Scan(&t.name, &enabled, &t.credID, &t.project, &t.zone, &t.instance); err != nil {
-		writeErr(w, 404, "服务器不存在")
+		writeErr(w, errServerNotFound)
 		return
 	}
 	if !enabled || t.zone == "" || t.instance == "" {
-		writeErr(w, 400, "该服务器未启用 GCP 自动开机或未填写 zone/实例名")
+		writeErr(w, errGCPNotEnabled)
 		return
 	}
 	status, started, err := s.notifier.ManualStartGCP(t)
 	if errors.Is(err, errGCPBusy) {
-		writeErr(w, 409, err.Error())
+		writeErrFrom(w, 409, err, errInternal)
 		return
 	}
 	if err != nil {
-		writeErr(w, 502, err.Error())
+		writeErrFrom(w, 502, err, errInternal)
 		return
 	}
 	msg := fmt.Sprintf("实例当前状态 %s，未执行开机", status)

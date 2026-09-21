@@ -29,18 +29,19 @@ func (s *App) handleUpgradeAgent(w http.ResponseWriter, r *http.Request) {
 	var agentVersion, agentOS string
 	err := s.db.QueryRow(`SELECT agent_version, os FROM servers WHERE id=?`, id).Scan(&agentVersion, &agentOS)
 	if errors.Is(err, sql.ErrNoRows) {
-		writeErr(w, 404, "服务器不存在")
+		writeErr(w, errServerNotFound)
 		return
 	}
 	if err != nil {
 		log.Printf("handleUpgradeAgent query: %v", err)
-		writeErr(w, 500, "内部错误")
+		writeErr(w, errInternal)
 		return
 	}
 	if err := s.upgrade.Start(s.hub, id, agentVersion, agentOS); err != nil {
 		// 校验不通过属于用户可理解、可纠正的情况（版本过旧、已是最新、机器离线），
 		// 原因原样回给前端，而不是笼统的「操作失败」。
-		writeErr(w, 400, err.Error())
+		// writeErrFrom 会把 Start 返回的错误码一并带出去，英文界面才翻得动。
+		writeErrFrom(w, 400, err, errBadParams)
 		return
 	}
 	writeJSON(w, 200, map[string]string{
@@ -225,14 +226,18 @@ func upgradeTarget() string {
 // upgradeAvailability 给出某台机器的可升级性结论。
 // 判定规则集中在这里一处，前端只消费结论，不自己比较版本。
 //
-// 返回 (可否一键升级, 提示语)。提示语在不可升级时说明原因，可升级时为空。
-func upgradeAvailability(agentVersion, agentOS string, online bool) (bool, string) {
+// 返回 (可否一键升级, 原因)。原因在不可升级时说明为什么，可升级、
+// 或「已是最新」这种没什么可说的情况下为 nil。
+//
+// 返回 *codedError 而不是中文串：这句提示会流到界面上（按钮 title），
+// 带着码前端才翻得动。
+func upgradeAvailability(agentVersion, agentOS string, online bool) (bool, *codedError) {
 	target := upgradeTarget()
 	if target == "" {
-		return false, "服务端为开发版本，没有对应的 release 可供安装"
+		return false, &errUpgradeNoRelease
 	}
 	if sameVersion(agentVersion, target) {
-		return false, ""
+		return false, nil
 	}
 	// 平台判定放在版本之后、在线之前：这类系统无论版本多新、是否在线都升不了，
 	// 是最确定的一条，早点告诉用户比让他点一次再看错误强。
@@ -244,18 +249,19 @@ func upgradeAvailability(agentVersion, agentOS string, online bool) (bool, strin
 	// 拼下载地址，那种精确用途必须由 agent 自己用 runtime 值来做
 	//（见 protocol.UpgradeTask.BaseURL 的注释）。
 	if upgradeOSUnsupported(agentOS) {
-		return false, upgradeOSUnsupportedHint
+		return false, &errUpgradeOSUnsupported
 	}
 	// 版本判定排在在线判定之前：离线是会自行恢复的临时状态，
 	// 而版本过旧决定了「必须换一种方式升级」，是更根本、需要用户采取不同行动的原因。
 	// 若反过来，一台离线的旧 agent 只会显示「机器离线」，等它上线后用户点了还是失败。
 	if !agentSupportsUpgrade(agentVersion) {
-		return false, fmt.Sprintf("agent %s 过旧，不认识升级指令，需用安装命令手动升级一次", displayVersion(agentVersion))
+		e := errUpgradeAgentTooOld.with(displayVersion(agentVersion))
+		return false, &e
 	}
 	if !online {
-		return false, "机器离线"
+		return false, &errUpgradeOffline
 	}
-	return true, ""
+	return true, nil
 }
 
 // upgradeOSUnsupportedHint 平台不支持自升级时的统一提示。
@@ -299,7 +305,18 @@ func displayVersion(v string) string {
 
 /* ---------- 下发 ---------- */
 
-var errUpgradeBusy = errors.New("该机器已有升级任务在进行")
+// 升级相关的错误。挂码是为了让界面能翻译——Error() 仍返回中文，
+// 日志与审计里的文本一个字都没变。
+var (
+	errUpgradeBusy      = codedError{Code: "upgrade.busy", Msg: "该机器已有升级任务在进行"}
+	errUpgradeOffline   = codedError{Code: "upgrade.offline", Msg: "机器离线"}
+	errUpgradeNoRelease = codedError{Code: "upgrade.no_release", Msg: "服务端为开发版本，没有对应的 release 可供安装"}
+	errUpgradeDispatch  = codedError{Code: "upgrade.dispatch_failed", Msg: "下发失败："}
+	errUpgradeLatest    = codedError{Code: "upgrade.already_latest", Msg: "已是最新版本："}
+	// 版本号走 Detail 放末尾，原文里它在句中（"agent v1.0 过旧"）。
+	errUpgradeAgentTooOld   = codedError{Code: "upgrade.agent_too_old", Msg: "agent 过旧，不认识升级指令，需用安装命令手动升级一次，当前 "}
+	errUpgradeOSUnsupported = codedError{Code: "upgrade.os_unsupported", Msg: upgradeOSUnsupportedHint}
+)
 
 // Start 校验并下发升级任务。校验不通过时不下发，直接返回原因。
 func (m *upgradeManager) Start(hub *Hub, serverID, agentVersion, agentOS string) error {
@@ -313,10 +330,10 @@ func (m *upgradeManager) Start(hub *Hub, serverID, agentVersion, agentOS string)
 	target := upgradeTarget()
 	online := hub.AgentConn(serverID) != nil
 	if ok, why := upgradeAvailability(agentVersion, agentOS, online); !ok {
-		if why == "" {
-			return fmt.Errorf("已是最新版本 %s", displayVersion(target))
+		if why == nil {
+			return errUpgradeLatest.with(displayVersion(target))
 		}
-		return errors.New(why)
+		return *why
 	}
 
 	m.mu.Lock()
@@ -339,8 +356,8 @@ func (m *upgradeManager) Start(hub *Hub, serverID, agentVersion, agentOS string)
 
 	conn := hub.AgentConn(serverID)
 	if conn == nil {
-		m.failBeforeStart(serverID, job.ID, "机器已离线")
-		return errors.New("机器已离线")
+		m.failBeforeStart(serverID, job.ID, errUpgradeOffline.Msg)
+		return errUpgradeOffline
 	}
 	task := protocol.UpgradeTask{
 		ID:       job.ID,
@@ -349,8 +366,8 @@ func (m *upgradeManager) Start(hub *Hub, serverID, agentVersion, agentOS string)
 		GraceSec: job.graceSec,
 	}
 	if err := conn.send(protocol.ServerMsg{Type: "upgrade", Upgrade: &task}); err != nil {
-		m.failBeforeStart(serverID, job.ID, "下发失败: "+err.Error())
-		return fmt.Errorf("下发失败: %w", err)
+		m.failBeforeStart(serverID, job.ID, errUpgradeDispatch.Msg+err.Error())
+		return errUpgradeDispatch.with(err.Error())
 	}
 	log.Printf("已向 %s 下发升级任务 %s → %s", serverID, job.ID, target)
 	return nil
