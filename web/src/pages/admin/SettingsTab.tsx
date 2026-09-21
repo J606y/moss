@@ -75,6 +75,9 @@ export function SettingsTab({ toast }: { toast: Toast }) {
 
   return (
     <div className="mx-auto max-w-xl space-y-4">
+      {/* 站点信息与数据采集合并为一张卡片：save() 本就整份提交 s，
+          两者共用同一个保存按钮。拆成两张卡时按钮只长在下半张里，
+          改完站点名称要跨卡去点保存，归属不明。 */}
       <div className={`${card} space-y-3 p-4`}>
         <h3 className="text-sm font-semibold">{t('settings.siteInfo')}</h3>
         <div>
@@ -94,41 +97,42 @@ export function SettingsTab({ toast }: { toast: Toast }) {
           <Select value={s.lang} options={langOptions} onChange={(lang) => setS({ ...s, lang })} />
           <p className="mt-1 text-xs text-zinc-400">{t('settings.lang.hint')}</p>
         </div>
-      </div>
 
-      <div className={`${card} space-y-3 p-4`}>
-        <h3 className="text-sm font-semibold">{t('settings.collect')}</h3>
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className={formLabel}>{t('settings.reportInterval')}</label>
-            <NumberInput min={1} value={s.reportInterval} onChange={num('reportInterval')} />
-          </div>
-          <div>
-            <label className={formLabel}>{t('settings.sampleInterval')}</label>
-            <NumberInput min={5} value={s.sampleInterval} onChange={num('sampleInterval')} />
-          </div>
-          <div>
-            <label className={formLabel}>{t('settings.historyDays')}</label>
-            <NumberInput min={1} value={s.historyDays} onChange={num('historyDays')} />
-          </div>
-          <div>
-            <label className={formLabel}>{t('settings.pingDays')}</label>
-            <NumberInput min={1} value={s.pingDays} onChange={num('pingDays')} />
-          </div>
-          <div>
-            <label className={formLabel}>{t('settings.execAuditDays')}</label>
-            <NumberInput min={7} max={90} value={s.execAuditDays} onChange={num('execAuditDays')} />
-            {/* 下限 7 天不是随手定的：少于一周，周末发生的事周一就查不到了，
-                而周末恰恰是无人值守、AI 自主处置最多的时候。 */}
-            <p className="mt-1 text-xs text-zinc-400">{t('settings.execAuditDays.hint')}</p>
-          </div>
-          <div>
-            <label className={formLabel}>{t('settings.execAuditMaxRows')}</label>
-            <NumberInput min={100} max={5000} value={s.execAuditMaxRows} onChange={num('execAuditMaxRows')} />
-            <p className="mt-1 text-xs text-zinc-400">{t('settings.execAuditMaxRows.hint')}</p>
+        <div className="space-y-3 border-t border-zinc-500/10 pt-3 dark:border-white/5">
+          <h3 className="text-sm font-semibold">{t('settings.collect')}</h3>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className={formLabel}>{t('settings.reportInterval')}</label>
+              <NumberInput min={1} value={s.reportInterval} onChange={num('reportInterval')} />
+            </div>
+            <div>
+              <label className={formLabel}>{t('settings.sampleInterval')}</label>
+              <NumberInput min={5} value={s.sampleInterval} onChange={num('sampleInterval')} />
+            </div>
+            <div>
+              <label className={formLabel}>{t('settings.historyDays')}</label>
+              <NumberInput min={1} value={s.historyDays} onChange={num('historyDays')} />
+            </div>
+            <div>
+              <label className={formLabel}>{t('settings.pingDays')}</label>
+              <NumberInput min={1} value={s.pingDays} onChange={num('pingDays')} />
+            </div>
+            <div>
+              <label className={formLabel}>{t('settings.execAuditDays')}</label>
+              <NumberInput min={7} max={90} value={s.execAuditDays} onChange={num('execAuditDays')} />
+              {/* 下限 7 天不是随手定的：少于一周，周末发生的事周一就查不到了，
+                  而周末恰恰是无人值守、AI 自主处置最多的时候。 */}
+              <p className="mt-1 text-xs text-zinc-400">{t('settings.execAuditDays.hint')}</p>
+            </div>
+            <div>
+              <label className={formLabel}>{t('settings.execAuditMaxRows')}</label>
+              <NumberInput min={100} max={5000} value={s.execAuditMaxRows} onChange={num('execAuditMaxRows')} />
+              <p className="mt-1 text-xs text-zinc-400">{t('settings.execAuditMaxRows.hint')}</p>
+            </div>
           </div>
         </div>
-        <div className="flex justify-end">
+
+        <div className="flex justify-end border-t border-zinc-500/10 pt-3 dark:border-white/5">
           <button className={btnPrimary} onClick={save} disabled={saving}>
             {saving ? t('common.saving') : t('settings.save')}
           </button>
