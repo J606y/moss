@@ -2,6 +2,7 @@
 # 用法：
 #   cd deploy
 #   echo 'MOSS_ADMIN_PASSWORD=你的强密码' > .env   # 仅首次初始化生效
+#   echo 'MOSS_LANG=en' >> .env                    # 可选，界面语言 auto/zh/en，同样仅首次生效
 #   docker compose up -d            # 拉取 GHCR 镜像启动
 #   docker compose up -d --build    # 或本地从源码构建启动
 services:
@@ -16,6 +17,9 @@ services:
       - "8787:8787" # 直连模式。接反向代理后改为仅绑回环： "127.0.0.1:8787:8787"
     environment:
       MOSS_ADMIN_PASSWORD: "${MOSS_ADMIN_PASSWORD:-}" # 仅首次（库无密码）生效，之后忽略
+      # 界面语言：auto（跟随访客浏览器，默认）/ zh / en。同样仅首次生效——
+      # 之后改这里不会覆盖管理员在「站点设置」里选的档位。
+      MOSS_LANG: "${MOSS_LANG:-}"
       # 应用层限流（按真实访客 IP，默认开启；设 0 关闭对应层）：
       MOSS_RATELIMIT_PER_MIN: "${MOSS_RATELIMIT_PER_MIN:-600}"          # 全局 /api 每 IP 每分钟
       MOSS_RATELIMIT_AUTH_PER_MIN: "${MOSS_RATELIMIT_AUTH_PER_MIN:-10}" # 登录等敏感端点 每 IP 每分钟

@@ -157,3 +157,53 @@ func TestLangDefaultsToAutoOnUpgrade(t *testing.T) {
 		t.Errorf("未设置过语言时应为 auto，实际 %q", got)
 	}
 }
+
+// MOSS_LANG 是部署脚本填的，写法宽容些：大小写、空格、区域后缀都认。
+// normLang 那端保持严格——它挡的是构造的请求体，不是人手填的环境变量。
+func TestParseEnvLang(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"en", "en"},
+		{"EN", "en"},
+		{"  zh  ", "zh"},
+		{"zh-CN", "zh"},
+		{"en_US", "en"},
+		{"auto", "auto"},
+		{"", ""},
+		{"fr", "fr"}, // 归一化不负责挡非法值，那是 normLang 的事
+	}
+	for _, c := range cases {
+		if got := parseEnvLang(c.in); got != c.want {
+			t.Errorf("parseEnvLang(%q) = %q，期望 %q", c.in, got, c.want)
+		}
+	}
+}
+
+// ensureLang 只在首次生效，且无论如何都要落一行——那一行就是「已经定过」的标记。
+//
+// 不落行的话每次启动都会重新走这段：老库升级上来时，一个后来才加进
+// docker-compose 的 MOSS_LANG 会把管理员在后台选好的语言悄悄改掉。
+func TestEnsureLang(t *testing.T) {
+	cases := []struct {
+		env, pre, want, why string
+	}{
+		{env: "", pre: "", want: "auto", why: "没设 MOSS_LANG：落一行 auto，行为与改造前一致"},
+		{env: "en", pre: "", want: "en", why: "首次按 MOSS_LANG 设定"},
+		{env: "zh-CN", pre: "", want: "zh", why: "区域后缀也认"},
+		{env: "klingon", pre: "", want: "auto", why: "认不出的值回落 auto（并打日志，不静默）"},
+		{env: "en", pre: "zh", want: "zh", why: "已设过就不再理会 MOSS_LANG——后台改的不该被部署变量覆盖"},
+		{env: "en", pre: "auto", want: "auto", why: "显式设过 auto 同样算已定过"},
+	}
+	for _, c := range cases {
+		app := mcpTestApp(t)
+		if c.pre != "" {
+			if err := setSetting(app.db, keyLang, c.pre); err != nil {
+				t.Fatalf("预置语言失败: %v", err)
+			}
+		}
+		t.Setenv("MOSS_LANG", c.env)
+		app.ensureLang()
+		if got := getSetting(app.db, keyLang, ""); got != c.want {
+			t.Errorf("%s：MOSS_LANG=%q 预置=%q 得到 %q，期望 %q", c.why, c.env, c.pre, got, c.want)
+		}
+	}
+}

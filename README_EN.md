@@ -58,6 +58,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/J606y/moss/main/deploy/moss.
 
 Then open `http://<server-ip>:8787`. The script also installs a global `moss` command — from then on just type `moss` on the server to reopen the management menu (install / update / uninstall / status & password / logs / switch listen address), no need to remember the curl line.
 
+> On a **first** install the script asks which interface language you want: follow the visitor's browser (default), 中文, or English. You can change it any time under Admin → Site settings. Reusing an existing data volume skips the question — the language is already set, and the database wins.
+
 Equivalent manual options:
 
 ```bash
@@ -65,6 +67,7 @@ Equivalent manual options:
 mkdir -p moss && cd moss
 curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/J606y/moss/main/deploy/docker-compose.yml
 echo 'MOSS_ADMIN_PASSWORD=your-strong-password' > .env   # only used on first init
+echo 'MOSS_LANG=en' >> .env                              # optional: auto/zh/en, also first-init only
 docker compose up -d
 
 # Option B: build from source
@@ -78,9 +81,12 @@ Or a single `docker run`:
 ```bash
 docker run -d --name moss -p 8787:8787 \
   -e MOSS_ADMIN_PASSWORD=your-strong-password \
+  -e MOSS_LANG=en \
   -v moss-data:/app/data \
   ghcr.io/j606y/moss:latest
 ```
+
+> `MOSS_LANG` takes `auto` (follow the visitor's browser, default), `zh` or `en`. Like `MOSS_ADMIN_PASSWORD` it **only applies on first init** — changing it later will not override what the admin picked under Site settings.
 
 The database lives in the named volume `moss-data` (`/app/data` is owned by nonroot inside the image, no manual chown needed). Open `http://<server-ip>:8787`.
 

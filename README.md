@@ -75,6 +75,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/J606y/moss/main/deploy/moss.
 
 装完即可用 `http://<服务器IP>:8787` 直接访问。脚本还会注册全局命令 **`moss`** —— 以后在服务器上直接输入 `moss` 就能重开管理菜单(安装 / 更新 / 卸载 / 查看状态密码 / 日志 / 切换监听地址),不必再记那串 curl。
 
+> 首次安装时会问一句**界面语言**:跟随访客浏览器(默认)/ 中文 / English。装完随时可在 管理后台 → 站点设置 里改。复用已有数据卷时不会问——那时语言已经定过,以库里的为准。
+>
 > 安装时会询问**是否在反向代理(Nginx)后面运行**:选「是」则自动以 `--trust-proxy` 启动并仅绑回环 `127.0.0.1`,让应用层限流按**真实访客 IP**生效;选「否」为直连模式(限流按 socket 来源 IP)。直连模式还会再问**监听地址**:默认 `0.0.0.0`(公网可直接访问),也可选 `127.0.0.1` 仅本机可达(内网/SSH 隧道场景,不暴露公网端口、不放行防火墙)。这些选择会被记住,`moss` 更新时自动沿用。多层反代(边缘→回源)还需手动补 `--trusted-proxies`,详见下方[反向代理小节](#反向代理--tlsnginx可选但生产推荐)。
 
 以下为等价的手动方式:
@@ -84,6 +86,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/J606y/moss/main/deploy/moss.
 mkdir -p moss && cd moss
 curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/J606y/moss/main/deploy/docker-compose.yml
 echo 'MOSS_ADMIN_PASSWORD=你的强密码' > .env   # 仅首次初始化生效,之后忽略
+echo 'MOSS_LANG=en' >> .env                    # 可选,界面语言 auto/zh/en,同样仅首次生效
 docker compose up -d
 
 # 方式二:克隆源码本地构建
@@ -97,9 +100,12 @@ docker compose up -d --build
 ```bash
 docker run -d --name moss -p 8787:8787 \
   -e MOSS_ADMIN_PASSWORD=你的强密码 \
+  -e MOSS_LANG=auto \
   -v moss-data:/app/data \
   ghcr.io/j606y/moss:latest
 ```
+
+> `MOSS_LANG` 取 `auto`(跟随访客浏览器,默认)/ `zh` / `en`,与 `MOSS_ADMIN_PASSWORD` 一样**只在首次初始化生效**——之后改它不会覆盖管理员在「站点设置」里选的档位。
 
 数据库存于命名卷 `moss-data`(镜像内 `/app/data` 已归属 nonroot,无需手动 chown)。浏览器访问 `http://<服务器IP>:8787`。
 

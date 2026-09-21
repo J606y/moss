@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -114,6 +115,47 @@ const (
 	langZH   = "zh"
 	langEN   = "en"
 )
+
+// ensureLang 首次启动时落定站点语言档位，取值来自 MOSS_LANG。
+//
+// 与 ensurePassword 同样的语义：只在 settings 里还没有这一行时生效。之后再改
+// MOSS_LANG 一律忽略——语言是管理员在后台改的东西，不该被一个部署期的环境变量
+// 在每次重启时悄悄覆盖回去。
+//
+// 没设 MOSS_LANG 也要写一行 auto：写进去这一行就成了「已经定过」的标记，
+// 否则每次启动都会重新走这段，老库升级上来时反而会被后填的环境变量改掉。
+func (s *App) ensureLang() {
+	if getSetting(s.db, keyLang, "") != "" {
+		return
+	}
+	raw := os.Getenv("MOSS_LANG")
+	lang := normLang(parseEnvLang(raw))
+	if err := setSetting(s.db, keyLang, lang); err != nil {
+		log.Printf("保存站点语言失败: %v", err)
+		return
+	}
+	switch {
+	case strings.TrimSpace(raw) == "":
+		// 没设就没什么可说的，默认 auto 与改造前的行为一致
+	case lang == langAuto && parseEnvLang(raw) != langAuto:
+		// 设了却没认出来，必须说：静默回落会让人以为已经生效
+		log.Printf("MOSS_LANG=%q 无法识别（可用 auto / zh / en），站点语言按 auto 处理", raw)
+	default:
+		log.Printf("已按 MOSS_LANG 将站点语言设为 %s", lang)
+	}
+}
+
+// parseEnvLang 把环境变量里的写法归一化。
+//
+// 比 normLang 宽容：这是给人在部署脚本里填的，不是 API 入参。
+// 大小写、前后空格、zh-CN / en_US 这类区域后缀都认。
+func parseEnvLang(v string) string {
+	v = strings.ToLower(strings.TrimSpace(v))
+	if i := strings.IndexAny(v, "-_"); i > 0 {
+		v = v[:i]
+	}
+	return v
+}
 
 func (s *App) handleSite(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{

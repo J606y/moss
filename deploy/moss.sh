@@ -217,6 +217,22 @@ do_install(){
   local pass=""
   [ "$fresh" = 1 ] && pass="$(gen_password)"
 
+  # 界面语言。只有首次才问：MOSS_LANG 和密码一样只在库为空时生效，
+  # 复用旧卷时问了也不会生效，那种「问了却没用」比不问更糟。
+  # 装完随时可在 管理后台 → 站点设置 里改，所以这里不必纠结。
+  local lang=""
+  if [ "$fresh" = 1 ]; then
+    echo "  1) 跟随访客浏览器 —— 每位访客各看各的语言（默认）"
+    echo "  2) 中文"
+    echo "  3) English"
+    read -rp "界面语言 (1/2/3) [默认 1]: " lsel
+    case "${lsel:-1}" in
+      2) lang="zh";;
+      3) lang="en";;
+      *) lang="auto";;
+    esac
+  fi
+
   info "拉取镜像 $IMAGE ..."
   docker pull "$IMAGE" || { err "拉取镜像失败（检查网络）"; pause; return; }
 
@@ -224,7 +240,7 @@ do_install(){
   [ "$recreate" = 1 ] && docker rm -f "$CONTAINER" >/dev/null 2>&1
 
   local extra=()
-  [ "$fresh" = 1 ] && extra+=( -e "MOSS_ADMIN_PASSWORD=$pass" )
+  [ "$fresh" = 1 ] && extra+=( -e "MOSS_ADMIN_PASSWORD=$pass" -e "MOSS_LANG=$lang" )
   start_container "$port" "$trust" "$proxies" "$bind" "${extra[@]}" >/dev/null || { err "启动容器失败"; pause; return; }
 
   printf 'PORT=%s\nTRUST_PROXY=%s\nTRUSTED_PROXIES=%q\nBIND=%s\n' "$port" "$trust" "$proxies" "$bind" > "$CONF"
@@ -265,6 +281,15 @@ do_install(){
     echo "  访问地址:   http://${ip}:${port}"
   fi
   echo "  管理员用户名: admin（可登录后在「站点设置」修改）"
+  # 语言与密码判的是同一个 fresh，但分开写：密码那块还要处理「旧卷其实是空库」
+  # 的分支，语言没有那回事，混进去只会让那段更难读。
+  if [ "$fresh" = 1 ]; then
+    case "$lang" in
+      zh) echo "  界面语言:   中文（可在「站点设置」改）";;
+      en) echo "  界面语言:   English（可在「站点设置」改）";;
+      *)  echo "  界面语言:   跟随访客浏览器（可在「站点设置」改）";;
+    esac
+  fi
   if [ "$fresh" = 1 ]; then
     printf '%s\n' "$pass" > "$CRED"; chmod 600 "$CRED" 2>/dev/null
     echo "  管理员密码: ${pass}"
