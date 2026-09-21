@@ -108,6 +108,16 @@ func (s *App) handleExecAudit(w http.ResponseWriter, r *http.Request) {
 		conds = append(conds, "a.error LIKE ?")
 		filterArgs = append(filterArgs, execBlockedPrefix+"%")
 	}
+	// 按接入密钥筛选。caller 落库格式见 callerLabel：`key:{id}({name})`。
+	// 这里按 id 前缀匹配而非名字——密钥改名后历史记录里留的仍是旧名字，
+	// 只有 id 一直稳定，按名字筛会把改名前的记录整段漏掉。
+	// 先过一遍 Atoi：既挡住非法输入，也保证拼进 LIKE 的是纯数字。
+	if kid := r.URL.Query().Get("key"); kid != "" {
+		if n, err := strconv.Atoi(kid); err == nil && n > 0 {
+			conds = append(conds, "a.caller LIKE ?")
+			filterArgs = append(filterArgs, "key:"+strconv.Itoa(n)+"(%")
+		}
+	}
 	where := ""
 	if len(conds) > 0 {
 		where = " WHERE " + strings.Join(conds, " AND ")

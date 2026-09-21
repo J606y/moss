@@ -122,6 +122,7 @@ export const en: Dict = {
 
   'audit.onlyBlocked': 'Blocked only',
   'audit.allServers': 'All servers',
+  'audit.allKeys': 'All keys',
   'audit.empty.blocked': 'No blocked commands.',
   'audit.empty': 'No records yet. Every command the AI runs shows up here.',
   'audit.col.time': 'Time',

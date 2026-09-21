@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -112,6 +113,68 @@ func TestExecAuditFiltersCombine(t *testing.T) {
 	// i 为偶数落 s1、i%3==0 为拦截 → 0/6 两条同时满足
 	if len(got) != 2 {
 		t.Fatalf("s1 上的拦截记录应为 2 条，实际 %d", len(got))
+	}
+}
+
+// 按接入密钥筛选。caller 落库格式是 callerLabel 产出的 `key:{id}({name})`，
+// 筛选按 id 前缀匹配而不是名字，这里把两个易碎点钉死：
+//
+//   - 改名：密钥改名后，历史记录里留的仍是旧名字。按名字筛会把改名前的
+//     整段记录漏掉，按 id 才能连起来。
+//   - 前缀混淆：`key=1` 绝不能把 `key:11(...)` 也捞出来。挡住它的是模式里
+//     那个字面量左括号（`key:1(%`），一旦有人「顺手」把它去掉就会静默串号。
+func TestExecAuditFilterByKey(t *testing.T) {
+	app := mcpTestApp(t)
+	if _, err := app.db.Exec(
+		`INSERT INTO servers(id, token, name, grp, created_at) VALUES('s1','t1','A','默认',0)`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UnixMilli()
+	callers := []string{
+		"key:1(Hermes)",
+		"key:1(Hermes-renamed)", // 同一密钥改名之后
+		"key:2(claude)",
+		"key:11(other)", // 前缀易混：不该被 key=1 匹配
+		"admin",         // 后台手动执行
+		"panel-update",  // 面板自更新
+	}
+	for i, c := range callers {
+		started := base + int64(i)
+		if _, err := app.db.Exec(
+			`INSERT INTO exec_audit(job_id, server_id, caller, cmd, started_at, finished_at)
+			 VALUES(?, 's1', ?, 'c', ?, ?)`,
+			jobIDFor(i), c, started, started+1,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := auditQuery(t, app, "limit=100&key=1")
+	if len(got) != 2 {
+		t.Fatalf("密钥 1 应有 2 条（含改名后那条），实际 %d", len(got))
+	}
+	for _, r := range got {
+		if !strings.HasPrefix(r.Caller, "key:1(") {
+			t.Errorf("密钥筛选返回了别的调用方: %+v", r)
+		}
+	}
+
+	if got := auditQuery(t, app, "limit=100&key=11"); len(got) != 1 {
+		t.Fatalf("密钥 11 应有 1 条，实际 %d —— key=1 与 key=11 串号了", len(got))
+	}
+
+	// 非法值一律忽略，等同于不筛选：既不该报错，也不该返回空表。
+	// （注入不在这里试：值经 Atoi 过滤后才拼进 LIKE，且始终走参数化占位符。）
+	for _, bad := range []string{"abc", "0", "-1", "1abc"} {
+		if got := auditQuery(t, app, "limit=100&key="+bad); len(got) != len(callers) {
+			t.Errorf("非法 key=%q 应被忽略并返回全部 %d 条，实际 %d", bad, len(callers), len(got))
+		}
+	}
+
+	// 合法但没有记录的密钥：返回空表，而不是退化成「不筛选」。
+	if got := auditQuery(t, app, "limit=100&key=999"); len(got) != 0 {
+		t.Errorf("不存在的密钥应返回 0 条，实际 %d", len(got))
 	}
 }
 

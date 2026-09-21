@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type React from 'react'
 import { ChevronLeft, ChevronRight, ScrollText, ShieldAlert } from 'lucide-react'
 import { get } from '../../api/client'
-import type { AdminServer, ExecAudit, ExecAuditDetail } from '../../types'
+import type { AdminServer, ApiKey, ExecAudit, ExecAuditDetail } from '../../types'
 import { Modal, Select } from '../../components/ui'
 import { errMsg } from '../../utils/admin'
 import { btnGhost, card, formLabel, td, th } from '../../ui'
@@ -43,6 +43,8 @@ export function AuditTab({ toast }: { toast: Toast }) {
   const [detail, setDetail] = useState<ExecAuditDetail | null>(null)
   const [servers, setServers] = useState<AdminServer[]>([])
   const [serverId, setServerId] = useState('')
+  const [keys, setKeys] = useState<ApiKey[]>([])
+  const [keyId, setKeyId] = useState('')
   const [onlyBlocked, setOnlyBlocked] = useState(false)
   const [loading, setLoading] = useState(false)
   const [page, setPage] = useState(1)
@@ -53,6 +55,14 @@ export function AuditTab({ toast }: { toast: Toast }) {
       .then(setServers)
       .catch(() => {
         /* 机器列表只用于填筛选下拉，取不到不影响看审计本身 */
+      })
+    // 密钥列表同理，只用于填下拉。已停用的密钥也要列出来：
+    // 停用只是不再放行新调用，它此前执行过的记录仍在审计里，
+    // 排掉的话恰恰查不了「这个被我停掉的密钥当时都干了什么」。
+    get<ApiKey[]>('/api/admin/keys')
+      .then(setKeys)
+      .catch(() => {
+        /* 同上，取不到只是少一个筛选维度 */
       })
   }, [])
 
@@ -66,6 +76,7 @@ export function AuditTab({ toast }: { toast: Toast }) {
     setLoading(true)
     const p = new URLSearchParams({ limit: String(PAGE), offset: String((page - 1) * PAGE) })
     if (serverId) p.set('server', serverId)
+    if (keyId) p.set('key', keyId)
     if (onlyBlocked) p.set('blocked', '1')
     get<{ items: ExecAudit[]; total: number }>(`/api/admin/exec-audit?${p}`)
       .then((res) => {
@@ -81,7 +92,7 @@ export function AuditTab({ toast }: { toast: Toast }) {
         // 已有更新的请求在途时不复位 loading，交给它自己收尾
         if (seq === seqRef.current) setLoading(false)
       })
-  }, [page, serverId, onlyBlocked, toast])
+  }, [page, serverId, keyId, onlyBlocked, toast])
 
   useEffect(load, [load])
 
@@ -129,6 +140,16 @@ export function AuditTab({ toast }: { toast: Toast }) {
               options={[
                 { value: '', label: t('audit.allServers') },
                 ...servers.map((s) => ({ value: s.id, label: s.name })),
+              ]}
+            />
+          </div>
+          <div className="w-40">
+            <Select
+              value={keyId}
+              onChange={(v) => changeFilter(() => setKeyId(v))}
+              options={[
+                { value: '', label: t('audit.allKeys') },
+                ...keys.map((k) => ({ value: String(k.id), label: k.name })),
               ]}
             />
           </div>

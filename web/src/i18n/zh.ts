@@ -131,6 +131,7 @@ export const zh = {
 
   'audit.onlyBlocked': '仅看拦截',
   'audit.allServers': '全部机器',
+  'audit.allKeys': '全部密钥',
   'audit.empty.blocked': '没有被拦截的记录。',
   'audit.empty': '暂无记录。AI 执行的每一条命令都会出现在这里。',
   'audit.col.time': '时间',
