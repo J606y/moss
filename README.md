@@ -1,14 +1,11 @@
 # Moss
 
 > **看清每一台服务器。需要动手时,交给 AI。**
->
-> 自托管,单文件,五分钟装好。
 
 <p>
   <a href="https://github.com/J606y/moss/stargazers"><img src="https://img.shields.io/github/stars/J606y/moss?style=flat&logo=github" alt="Stars"></a>
   <a href="https://github.com/J606y/moss/releases"><img src="https://img.shields.io/github/v/release/J606y/moss?logo=github" alt="Release"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/github/license/J606y/moss" alt="License"></a>
-  <img src="https://img.shields.io/github/go-mod/go-version/J606y/moss?logo=go" alt="Go">
   <a href="https://ghcr.io/j606y/moss"><img src="https://img.shields.io/badge/ghcr.io-moss-2496ED?logo=docker&logoColor=white" alt="Docker"></a>
 </p>
 
@@ -16,259 +13,41 @@
 
 ![Moss 首页](docs/home.png)
 
----
+Moss 是一个装在你自己服务器上的监控面板。几台还是几十台机器,状态都在一个页面里;需要处理时,交给 AI 替你动手。
 
-## ✨ 能做什么
+## 🚀 如何使用
 
-**看清状态。**
-CPU、内存、硬盘、实时网速、流量,每两秒刷新一次。曲线随之滚动,数字逐位跳动。一小时到数天的历史,随时回看。ICMP / TCP / HTTP 三种延迟探测,曲线与丢包率一并呈现。
-
-**替你盯着。**
-离线、负载超标、网速异常、服务器到期,该说的时候会说,恢复了也会告诉你。Telegram 推送,也可以推给你自己的服务。GCP Spot 被抢占关机后,面板会自动把它开回来。
-
-**让 AI 动手。**
-接入支持 MCP 的 AI 助手,它就能查指标、翻历史、跑命令、改配置文件。权限按机器和能力细分——一把只用来值守的密钥,不必给它执行权限。
-
-**该拦的一定拦住。**
-删根目录、格式化磁盘、改防火墙规则、动 SSH 配置——凡是会让你失去补救机会的操作,一律拒绝,没有"确认后放行"的入口。其余的照常执行,但每一步都记下来:完整命令、输出、退出码、谁下的令。
-
-**中文,也可以是英文。**
-站点设置里选一档:跟随访客浏览器、中文、English。选"跟随"时每位访客各看各的——你看中文,国外同事看英文,同一个面板。报错和告警推送也跟着走。
-
-**装起来很简单。**
-server 和 agent 各是一个二进制,前端已经内嵌进去。Linux、macOS、Windows 通用。
-
-> 不做的事:多用户与 OAuth、主题市场。
->
-> **也不做 WebSSH。** 这不是图省事——终端是字符流,不是命令流。`rm -rf /` 可以拆成任意分片输入、用 tab 补全拼出、从历史记录里调出来,拦不住。做了它,上面那道防线和审计就全部作废。要交互式终端,请直接用 SSH。
-
-## 📸 截图
-
-| 负载监控 · 实时指标与历史曲线 | 延迟探测 · ICMP/TCP/HTTP |
-| :---: | :---: |
-| ![服务器详情](docs/detail.png) | ![延迟探测](docs/probe.png) |
-
-## 🤔 为什么是 Moss?
-
-自托管监控不缺好方案。Moss 的不同在于取舍。
-
-**一个文件,一个进程。**
-Go 写的后端,纯 Go 的 SQLite 驱动,落库就是一个文件。不装 MySQL,不装 Redis,1C512M 的小鸡也带得动。前端构建产物直接内嵌进二进制,`./moss-server` 就能跑。
-
-**给 AI 一双有约束的手。**
-AI 有脑子,没有手。给它一把 SSH 私钥,它就有了手,但没有边界——模型会非常自信地在 `/` 下面执行本该在项目目录里跑的清理命令。Moss 同时给出手、边界,和每一次操作的完整痕迹。
-
-**不做的事,和做的事一样重要。**
-每加一个功能,都多一份出错的可能。所以这里没有多用户,没有插件市场,也没有 WebSSH。少即是多不是口号,是每次砍掉一个想法之后剩下的东西。
-
-适合有几台到十几台机器、想把它们看清楚、偶尔还想让 AI 帮忙搭把手的人。
-
-## 🚀 快速开始
-
-### server(Docker,推荐)
-
-**最简单 —— 一键脚本**(菜单式:安装 / 更新 / 卸载,自动生成并打印管理员密码):
+在一台服务器上运行:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/J606y/moss/main/deploy/moss.sh)
 ```
 
-装完即可用 `http://<服务器IP>:8787` 直接访问。脚本还会注册全局命令 **`moss`** —— 以后在服务器上直接输入 `moss` 就能重开管理菜单(安装 / 更新 / 卸载 / 查看状态密码 / 日志 / 切换监听地址),不必再记那串 curl。
+装好后打开 `http://<服务器IP>:8787`,在后台「添加服务器」,把生成的命令复制到要监控的机器上运行。
 
-> 首次安装时会问一句**界面语言**:跟随访客浏览器(默认)/ 中文 / English。装完随时可在 管理后台 → 站点设置 里改。复用已有数据卷时不会问——那时语言已经定过,以库里的为准。
->
-> 安装时会询问**是否在反向代理(Nginx)后面运行**:选「是」则自动以 `--trust-proxy` 启动并仅绑回环 `127.0.0.1`,让应用层限流按**真实访客 IP**生效;选「否」为直连模式(限流按 socket 来源 IP)。直连模式还会再问**监听地址**:默认 `0.0.0.0`(公网可直接访问),也可选 `127.0.0.1` 仅本机可达(内网/SSH 隧道场景,不暴露公网端口、不放行防火墙)。这些选择会被记住,`moss` 更新时自动沿用。多层反代(边缘→回源)还需手动补 `--trusted-proxies`,详见下方[反向代理小节](#反向代理--tlsnginx可选但生产推荐)。
+想用 HTTPS?安装时选择「反代模式」,再用我们的 [nginx-rp](https://github.com/J606y/nginx-rp) 脚本,几分钟配好域名与证书。
 
-以下为等价的手动方式:
+## ✨ 特色
 
-```bash
-# 方式一:用预构建镜像(GitHub Release / GHCR 发布后可用)
-mkdir -p moss && cd moss
-curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/J606y/moss/main/deploy/docker-compose.yml
-echo 'MOSS_ADMIN_PASSWORD=你的强密码' > .env   # 仅首次初始化生效,之后忽略
-echo 'MOSS_LANG=en' >> .env                    # 可选,界面语言 auto/zh/en,同样仅首次生效
-docker compose up -d
+**简洁优美的界面**
+CPU、内存、硬盘、网速,一屏看清。每两秒刷新,曲线平滑滚动,数字逐位跳动。
 
-# 方式二:克隆源码本地构建
-git clone https://github.com/J606y/moss.git && cd moss/deploy
-echo 'MOSS_ADMIN_PASSWORD=你的强密码' > .env
-docker compose up -d --build
-```
+**异常及时推送**
+离线、负载过高、网速异常、服务器到期,第一时间推送到 Telegram。恢复了,也会告诉你。
 
-或单条 `docker run`:
+**GCP Spot 自动拉起**
+Spot 实例被抢占关机后,Moss 自动把它开回来。不用半夜爬起来手动开机。
 
-```bash
-docker run -d --name moss -p 8787:8787 \
-  -e MOSS_ADMIN_PASSWORD=你的强密码 \
-  -e MOSS_LANG=auto \
-  -v moss-data:/app/data \
-  ghcr.io/j606y/moss:latest
-```
+**AI 智控**
+接入 AI 助手,让它查状态、跑命令、改配置。危险操作一律拦下,每一步都有记录。
 
-> `MOSS_LANG` 取 `auto`(跟随访客浏览器,默认)/ `zh` / `en`,与 `MOSS_ADMIN_PASSWORD` 一样**只在首次初始化生效**——之后改它不会覆盖管理员在「站点设置」里选的档位。
+**中英双语**
+界面、报错、告警推送都有中文与英文。每位访客按自己的浏览器语言显示。
 
-数据库存于命名卷 `moss-data`(镜像内 `/app/data` 已归属 nonroot,无需手动 chown)。浏览器访问 `http://<服务器IP>:8787`。
+**一键更新**
+面板和 agent,在后台点一下就能升级。新版本出了问题,自动退回原来的版本。
 
-> Release 同时提供自包含的 `moss-server-*` 二进制(已内嵌前端),可不依赖 Docker 直接 `./moss-server-linux-amd64 --data ./data` 裸跑。
-
-### 反向代理 + TLS(Nginx,可选但生产推荐)
-
-前面挂一层 Nginx 终止 TLS、对外提供 HTTPS / wss。先让 Moss 容器**仅绑回环并开启 `--trust-proxy`**(`-p 127.0.0.1:8787:8787` + 启动参数加 `--trust-proxy`,用于读取真实来源 IP、在 HTTPS 下启用 Secure cookie),再用 Nginx 反代到 `http://127.0.0.1:8787`。用一键脚本安装时选「反代模式」即自动完成这两步。
-
-> **应用层限流 + 登录锁定(默认开启)**:Moss 按真实访客 IP 对 `/api` 限流(默认 **600** 次/IP/分钟)、对登录等敏感端点更严(默认 **10** 次/IP/分钟,并对失败登录按 IP 锁定),超限返回 `429`。阈值用环境变量 `MOSS_RATELIMIT_PER_MIN` / `MOSS_RATELIMIT_AUTH_PER_MIN` 调整,设 `0` 关闭对应层。
->
-> **如何识别真实访客 IP(安全要点)**:须开启 `--trust-proxy` 才会读取 `X-Forwarded-For`(否则按 socket 来源 IP——多层反代下那会是回源 Nginx 的 IP,所有访客共用一个限流桶)。各层 Nginx 用 `$proxy_add_x_forwarded_for`**追加**转发,Moss **不再信任 XFF 最左段**(那段客户端可任意伪造,会绕过限流/登录锁定),而是按**可信代理名单从右往左**取第一个非可信地址作为真实访客:
-> - **单层**(仅一台 Nginx 直连 Moss):无需额外配置,Moss 默认取 XFF 最右段(＝该 Nginx 追加的对端 IP,客户端伪造不到)。
-> - **多层**(访客 → 边缘 Nginx → 回源 Nginx → Moss):用 `--trusted-proxies` 列出你自己的边缘节点公网 IP(逗号分隔的 CIDR 或裸 IP,如 `--trusted-proxies 203.0.113.10,198.51.100.0/24`)。Moss 从 XFF 最右往左跳过名单内地址与环回地址,取到的第一个非可信地址即真实访客;攻击者伪造的最左段够不到该位置,无法绕过。
-
-**省事 —— 一键反代脚本 [`nginx-rp`](https://github.com/J606y/nginx-rp)**(自动装 Nginx + acme.sh 签发并续期证书,支持 HTTP-01 / DNS API / 泛域名):
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/J606y/nginx-rp/main/nginx-rp.sh)
-```
-
-按提示:**反代目标**填 `http://127.0.0.1:8787`,**缓存模式务必选「无缓存 none」**(Moss 源站自管缓存,选普通/分片缓存会导致发版后卡旧版),域名与证书方式按引导走即可。脚本生成的配置已自带 WebSocket 升级头,`/api/ws`、`/api/agent/ws`(实时曲线 + agent 上报)开箱即用。
-
-**想手工配** → 见 [`deploy/nginx.example.conf`](deploy/nginx.example.conf):一份 Moss 定制的完整示例,核心是 `location /` 带 WebSocket 升级头、传 `X-Forwarded-Proto`、并**切勿对 HTML 加缓存**。
-
-### agent(install 脚本)
-
-在每台被监控主机上,用后台「添加服务器」拿到的 `mk_` token 安装探针:
-
-```bash
-# Linux / macOS
-curl -fsSL https://<你的moss>/install.sh | bash -s -- --endpoint https://<你的moss> --token mk_xxx
-```
-
-```powershell
-# Windows(管理员 PowerShell)
-powershell -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((iwr -useb https://<你的moss>/install.ps1))) -Endpoint 'https://<你的moss>' -Token 'mk_xxx'"
-```
-
-脚本会从 GitHub Release(`J606y/moss`)下载对应平台的 agent 二进制,并注册为开机自启服务(systemd / launchd / 计划任务)。
-
-> ICMP 探测在 Windows 下需要管理员权限、Linux 下需要 root 或 `CAP_NET_RAW`;TCP / HTTP 探测无此要求。
-
-### GCP Spot 自动开机(可选)
-
-GCP 的 Spot 实例便宜但随时可能被抢占(实例变为 `TERMINATED`,数据不丢)。Moss 可以充当看门狗:节点确认离线后自动调用 Compute Engine API `instances.start` 把它拉起来,成功 / 失败 / 放弃都会走 Telegram 通知。
-
-> 📖 手把手教程(逐步操作 + 多台/跨项目 + FAQ + 故障排查):[docs/gcp-guard.md](./docs/gcp-guard.md)
-
-**1. 创建最小权限的 Service Account**(推荐,只给「查状态 + 开机」两个权限):
-
-```bash
-PROJECT=你的项目ID
-gcloud iam service-accounts create moss-starter --project=$PROJECT
-gcloud iam roles create mossSpotStarter --project=$PROJECT \
-  --permissions=compute.instances.get,compute.instances.start
-gcloud projects add-iam-policy-binding $PROJECT \
-  --member="serviceAccount:moss-starter@$PROJECT.iam.gserviceaccount.com" \
-  --role="projects/$PROJECT/roles/mossSpotStarter"
-gcloud iam service-accounts keys create moss-sa.json \
-  --iam-account=moss-starter@$PROJECT.iam.gserviceaccount.com
-```
-
-(偷懒可以直接用预定义角色 `roles/compute.instanceAdmin.v1`,但权限过宽,不推荐。)
-
-**2. 面板配置**:后台「GCP 守护」页点「添加凭证」,粘贴 `moss-sa.json` 内容保存 → 点「测试」确认可用 → 打开自动开机总开关;再到「服务器」页编辑对应节点,开启「GCP 自动开机」,选择凭证并填写 zone(如 `us-central1-a`)与实例名。节点行会出现 ▶ 按钮,可随时手动立即开机。
-
-多个 GCP 账号各添加一份凭证即可,凭证并存,每台节点单独选用。
-
-**工作方式**:节点离线超过「确认延迟」(默认 120s)后查询实例状态——仅 `TERMINATED` 才开机;`RUNNING` 但离线说明是 agent / 网络问题,只提醒不动实例。开机失败(如 Spot 容量不足)按「冷却」(默认 300s)自动重试,达到「最大尝试次数」(默认 3 次)后停止并通知,节点重新上线自动复位计数。
-
-**注意事项**:
-
-- **面板不要部署在被守护的 Spot 实例上**——面板和实例一起被抢占就没人拉起了。
-- **人为关机前先关掉该节点的自动开机开关**(或总开关),否则会被自动拉起。
-- Spot 实例的「终止操作」需保持默认的 **停止(STOP)**;若设为「删除(DELETE)」,被抢占后实例直接消失,无法拉起。
-- 凭证私钥加密存于面板数据库(主密钥取自 `MOSS_SECRET_KEY`,未设置则用数据目录下自动生成的 `secret.key`),备份数据库时记得一并备份主密钥。仍请只授予上述两个最小权限、只绑定必要项目。
-- 实例 `SUSPENDED`(挂起)状态暂不支持自动恢复。
-
-### AI 接入(可选)
-
-让 AI 助手替你看管服务器:查状态、跑命令、改配置。三步:
-
-**1. agent 开启执行能力**
-
-出于安全考虑,agent 默认**不接受**任何远程执行。要用这个功能,在启动参数里加 `--allow-exec`(或设环境变量 `MOSS_ALLOW_EXEC=1`)。只想要监控的话,这一步跳过即可,其余功能不受影响。
-
-```bash
-# systemd 为例:编辑服务单元,给启动命令补上参数
-sudo systemctl edit --full moss-agent
-# 在 ExecStart 末尾加 --allow-exec,保存后
-sudo systemctl daemon-reload && sudo systemctl restart moss-agent
-```
-
-**2. 后台创建密钥**
-
-管理后台 →「AI 接入」→ 新建密钥。按需勾选能力(读取 / 执行命令 / 写入文件),可限定只能访问哪几台机器、设置有效期。**密钥明文只显示这一次**,关闭后无法找回。
-
-**3. 填进 AI 客户端**
-
-以支持 MCP 的客户端为例:
-
-```json
-{
-  "mcpServers": {
-    "moss": {
-      "type": "http",
-      "url": "https://your-domain.com/mcp",
-      "headers": { "Authorization": "Bearer 你的密钥" }
-    }
-  }
-}
-```
-
-接好后 AI 就能列出机器、读实时指标与历史曲线、执行命令、写配置文件。
-
-**哪些操作会被拒绝**
-
-以下两类一律拦下,没有"确认后放行"的入口 —— 需要时请自行登录机器操作:
-
-- **不可逆的**:删除根目录、格式化磁盘、直接写入块设备、改动 agent 自身
-- **会让你失联的**:改防火墙规则、改 SSH 配置或端口、停用 SSH、关闭网卡 —— 这类操作一旦出错,SSH 和 agent 会一并断开,连补救的机会都没有
-
-查询类命令(`iptables -L`、`ufw status`、读 `sshd_config`)照常放行,不影响排查。被拦截时会立即推送通知,并记入审计。
-
-其余操作直接执行,不打扰你 —— 停服务、清缓存、删文件这些虽然危险,但都能恢复。所有操作在「AI 接入」页的执行审计里可查:完整命令、输出、退出码、耗时。
-
-## 🏗 架构
-
-```
-moss/
-├── web/       # 前端 React + TS + Tailwind + Recharts
-├── server/    # 后端 Go + SQLite(modernc 纯 Go 驱动),内嵌前端,单二进制
-├── agent/     # 探针 Go + gopsutil,单二进制,WebSocket 上报
-├── internal/  # server / agent 共享的协议类型
-└── deploy/    # Dockerfile + docker-compose + nginx 反代示例 + 一键脚本 moss.sh
-```
-
-- Agent 通过 `ws(s)://<server>/api/agent/ws?token=mk_xxx` 连接,上报系统指标与探测结果;连接信息 Windows / Linux / macOS 三端通用,仅安装命令不同(`install.sh` / `install.ps1`)。
-- 浏览器通过 `/api/ws` 订阅实时推送;历史数据按采样间隔聚合入库。
-
-## 🛠 本地开发
-
-```powershell
-# 1. 构建前端(server 会托管 web/dist)
-cd web; npm install; npm run build
-
-# 2. 构建并启动 server(首次启动会打印随机管理密码,或用环境变量指定)
-cd ..
-go build -o bin/moss-server.exe ./server
-$env:MOSS_ADMIN_PASSWORD='你的密码'
-.\bin\moss-server.exe --listen :8787 --data .\data --web .\web\dist
-
-# 3. 登录 http://localhost:8787 后台添加服务器,拿到 token 启动本机 agent
-go build -o bin/moss-agent.exe ./agent
-.\bin\moss-agent.exe --endpoint http://localhost:8787 --token mk_xxx
-```
-
-前端热更新开发:`cd web; npm run dev`(Vite 已配置 `/api` 代理到 `localhost:8787`,打开 http://localhost:5173)。
-
-## 🗺 路线 & 进展
-
-核心功能均已上线并跑在生产环境:服务器监控、延迟探测、Telegram 告警、Docker / 一键脚本部署、Nginx 反代 + TLS/wss。详细变更见 [CHANGELOG](./CHANGELOG.md)。
+每个版本的变化见 [CHANGELOG](./CHANGELOG.md)。
 
 欢迎 Issue / PR / Star ⭐ —— 觉得好用就点个星,这是对项目最大的鼓励。
 

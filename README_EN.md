@@ -1,12 +1,11 @@
 # Moss
 
-> A lightweight, self-hosted server monitor — single binary, embedded frontend, SQLite storage. No MySQL/Redis, up and running in 5 minutes. It does the few things you actually need, without feature bloat.
+> **See every server clearly. When it's time to act, hand it to AI.**
 
 <p>
   <a href="https://github.com/J606y/moss/stargazers"><img src="https://img.shields.io/github/stars/J606y/moss?style=flat&logo=github" alt="Stars"></a>
   <a href="https://github.com/J606y/moss/releases"><img src="https://img.shields.io/github/v/release/J606y/moss?logo=github" alt="Release"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/github/license/J606y/moss" alt="License"></a>
-  <img src="https://img.shields.io/github/go-mod/go-version/J606y/moss?logo=go" alt="Go">
   <a href="https://ghcr.io/j606y/moss"><img src="https://img.shields.io/badge/ghcr.io-moss-2496ED?logo=docker&logoColor=white" alt="Docker"></a>
 </p>
 
@@ -14,194 +13,41 @@
 
 ![Moss home](docs/home.png)
 
----
+Moss is a monitoring dashboard that runs on your own server. A few machines or a few dozen, all on one page. And when something needs fixing, AI can do it for you.
 
-## ✨ Features
+## 🚀 Get started
 
-- 📊 **Overview** — card / list dual view: CPU, memory, disk, live network speed and traffic at a glance
-- 📈 **Realtime** — WebSocket push (2s by default), live-scrolling charts, smooth per-digit network-speed counter
-- 🕐 **History** — hours-to-days of load history, second-level adjustable sampling, stored in SQLite
-- 🛰️ **Probes** — ICMP / TCP / HTTP probe tasks, latency curves + packet loss
-- 🔔 **Alerts** — offline / load-threshold / network-speed-threshold alerts and server expiry reminders via Telegram (with recovery notices)
-- ☁️ **GCP Spot guardian** — when a Spot instance gets preempted, the panel automatically calls the GCP API to start it again (with confirmation delay / retry cooldown / attempt cap)
-- ⚙️ **Admin** — drag-to-reorder servers and probe tasks, one-click install commands, single-admin password login
-- 🌍 **中文 & English** — pick one in site settings: follow the visitor's browser, 中文, or English. On "follow", everyone gets their own language on the same panel — error messages and alert pushes included
-- 🚀 **Dead-simple deploy** — server single binary (frontend embedded) + agent single binary, works on Linux / macOS / Windows
-
-> Deliberately out of scope: OAuth / 2FA / multi-user, WebSSH, theme marketplace. Stay light, stay simple.
-
-## 📸 Screenshots
-
-| Load monitoring · live metrics & history | Latency probes · ICMP/TCP/HTTP |
-| :---: | :---: |
-| ![server detail](docs/detail.png) | ![latency probes](docs/probe.png) |
-
-## 🤔 Why Moss?
-
-There's no shortage of self-hosted monitors (Nezha, Komari and others are great). Moss makes a clear set of trade-offs:
-
-- **Zero external dependencies** — the backend uses Go + the pure-Go `modernc` SQLite driver, so storage is just a file. No separate MySQL / Redis. Comfortable even on a 1 vCPU / 512 MB box.
-- **Single-file delivery** — `moss-server` embeds the built frontend; run `./moss-server` and you're done. Prefer not to fuss? There's a Docker image and a one-line installer too.
-- **Just enough** — only server monitoring + latency probes + alerts. Clean UI, few knobs, works out of the box.
-
-Great for: anyone with a handful to a dozen VPSes who wants a good-looking, low-maintenance dashboard and doesn't need enterprise multi-tenancy.
-
-## 🚀 Quick Start
-
-### server (Docker, recommended)
-
-**Easiest — one-line script** (menu-driven install / update / uninstall, auto-generates and prints the admin password):
+On any server, run:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/J606y/moss/main/deploy/moss.sh)
 ```
 
-Then open `http://<server-ip>:8787`. The script also installs a global `moss` command — from then on just type `moss` on the server to reopen the management menu (install / update / uninstall / status & password / logs / switch listen address), no need to remember the curl line.
+Then open `http://<server-ip>:8787`, click "Add server" in the admin panel, and run the command it gives you on each machine you want to monitor.
 
-> On a **first** install the script asks which interface language you want: follow the visitor's browser (default), 中文, or English. You can change it any time under Admin → Site settings. Reusing an existing data volume skips the question — the language is already set, and the database wins.
+Want HTTPS? Choose "reverse proxy mode" during install, then set up your domain and certificate in minutes with our [nginx-rp](https://github.com/J606y/nginx-rp) script.
 
-Equivalent manual options:
+## ✨ Highlights
 
-```bash
-# Option A: prebuilt image (available once published to GitHub Release / GHCR)
-mkdir -p moss && cd moss
-curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/J606y/moss/main/deploy/docker-compose.yml
-echo 'MOSS_ADMIN_PASSWORD=your-strong-password' > .env   # only used on first init
-echo 'MOSS_LANG=en' >> .env                              # optional: auto/zh/en, also first-init only
-docker compose up -d
+**A clean, beautiful interface**
+CPU, memory, disk and network on one screen. Refreshed every two seconds, with smoothly scrolling charts and rolling digits.
 
-# Option B: build from source
-git clone https://github.com/J606y/moss.git && cd moss/deploy
-echo 'MOSS_ADMIN_PASSWORD=your-strong-password' > .env
-docker compose up -d --build
-```
+**Alerts the moment it matters**
+Offline, overloaded, unusual traffic, about to expire. Straight to Telegram. And when it recovers, you'll hear that too.
 
-Or a single `docker run`:
+**GCP Spot, back on its own**
+When a Spot instance is preempted, Moss starts it back up. No more getting up at 3 a.m. to do it yourself.
 
-```bash
-docker run -d --name moss -p 8787:8787 \
-  -e MOSS_ADMIN_PASSWORD=your-strong-password \
-  -e MOSS_LANG=en \
-  -v moss-data:/app/data \
-  ghcr.io/j606y/moss:latest
-```
+**AI in control**
+Connect an AI assistant to check status, run commands and edit config. Dangerous operations are always blocked, and every step is on record.
 
-> `MOSS_LANG` takes `auto` (follow the visitor's browser, default), `zh` or `en`. Like `MOSS_ADMIN_PASSWORD` it **only applies on first init** — changing it later will not override what the admin picked under Site settings.
+**English and Chinese**
+Interface, errors and alerts, in both languages. Every visitor sees their own browser's language.
 
-The database lives in the named volume `moss-data` (`/app/data` is owned by nonroot inside the image, no manual chown needed). Open `http://<server-ip>:8787`.
+**One-click updates**
+Update the panel and every agent with a click. If a new version has problems, it rolls back on its own.
 
-> Releases also ship self-contained `moss-server-*` binaries (frontend embedded) — run `./moss-server-linux-amd64 --data ./data` directly, no Docker required.
-
-### Reverse proxy + TLS (Nginx, optional but recommended for production)
-
-Put Nginx in front to terminate TLS and serve HTTPS / wss. First run the Moss container **bound to loopback with `--trust-proxy`** (`-p 127.0.0.1:8787:8787` plus the `--trust-proxy` flag — reads the real client IP and enables Secure cookies under HTTPS), then reverse-proxy to `http://127.0.0.1:8787`.
-
-> **Rate limiting + login lockout (on by default)**: Moss rate-limits `/api` per real client IP (default **600**/IP/min), with a stricter limit on sensitive endpoints like login (default **10**/IP/min, plus per-IP lockout on failed logins); over the limit returns `429`. Tune via env vars `MOSS_RATELIMIT_PER_MIN` / `MOSS_RATELIMIT_AUTH_PER_MIN`, set `0` to disable a layer.
->
-> **Identifying the real client IP (security)**: `--trust-proxy` is required to read `X-Forwarded-For` (otherwise the socket peer IP is used — which under multi-layer proxying is the origin Nginx's IP, lumping all visitors into one bucket). Each Nginx layer **appends** with `$proxy_add_x_forwarded_for`, and Moss **no longer trusts the left-most XFF entry** (the client can forge it and bypass rate limiting / login lockout). Instead it walks XFF **right-to-left** and returns the first address not in your trusted-proxy list:
-> - **Single layer** (one Nginx directly in front of Moss): no extra config — Moss takes the right-most XFF entry (the peer IP that this Nginx appended, which clients can't forge).
-> - **Multi-layer** (visitor → edge Nginx → origin Nginx → Moss): list your own edge nodes' public IPs via `--trusted-proxies` (comma-separated CIDRs or bare IPs, e.g. `--trusted-proxies 203.0.113.10,198.51.100.0/24`). Moss skips listed and loopback addresses from the right, and the first non-trusted address is the real client; the attacker-forged left-most segment can't reach that position.
-
-**Easy path — the [`nginx-rp`](https://github.com/J606y/nginx-rp) one-liner** (auto-installs Nginx + acme.sh, issues and auto-renews certs; supports HTTP-01 / DNS API / wildcard):
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/J606y/nginx-rp/main/nginx-rp.sh)
-```
-
-When prompted: set the **upstream target** to `http://127.0.0.1:8787`, **choose cache mode "none"** (Moss manages its own caching — "normal" / "slice" caching will pin stale HTML after an upgrade), then follow the guide for the domain and cert method. The generated config already ships the WebSocket upgrade headers, so `/api/ws` and `/api/agent/ws` (live charts + agent reporting) work out of the box.
-
-**Prefer to configure by hand** → see [`deploy/nginx.example.conf`](deploy/nginx.example.conf): a complete Moss-tailored example. The essentials are the WebSocket upgrade headers on `location /`, passing `X-Forwarded-Proto`, and **never caching HTML**.
-
-### agent (install script)
-
-On each monitored host, install the agent with the `mk_` token from "Add server" in the admin panel:
-
-```bash
-# Linux / macOS
-curl -fsSL https://<your-moss>/install.sh | bash -s -- --endpoint https://<your-moss> --token mk_xxx
-```
-
-```powershell
-# Windows (admin PowerShell)
-powershell -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((iwr -useb https://<your-moss>/install.ps1))) -Endpoint 'https://<your-moss>' -Token 'mk_xxx'"
-```
-
-The script downloads the matching agent binary from GitHub Release (`J606y/moss`) and registers it as an auto-start service (systemd / launchd / Scheduled Task).
-
-> ICMP probes need admin on Windows / root or `CAP_NET_RAW` on Linux; TCP / HTTP probes don't.
-
-### GCP Spot auto-start (optional)
-
-GCP Spot instances are cheap but can be preempted at any time (the instance becomes `TERMINATED`; data is kept). Moss can act as a watchdog: once a node is confirmed offline, it calls the Compute Engine API `instances.start` to bring it back, with success / failure / give-up notices pushed via Telegram.
-
-> 📖 Step-by-step guide (walkthrough + multi-instance / cross-project + FAQ + troubleshooting): [docs/gcp-guard_EN.md](./docs/gcp-guard_EN.md)
-
-**1. Create a least-privilege Service Account** (recommended — only "get status" + "start"):
-
-```bash
-PROJECT=your-project-id
-gcloud iam service-accounts create moss-starter --project=$PROJECT
-gcloud iam roles create mossSpotStarter --project=$PROJECT \
-  --permissions=compute.instances.get,compute.instances.start
-gcloud projects add-iam-policy-binding $PROJECT \
-  --member="serviceAccount:moss-starter@$PROJECT.iam.gserviceaccount.com" \
-  --role="projects/$PROJECT/roles/mossSpotStarter"
-gcloud iam service-accounts keys create moss-sa.json \
-  --iam-account=moss-starter@$PROJECT.iam.gserviceaccount.com
-```
-
-(The predefined `roles/compute.instanceAdmin.v1` also works but is far broader than needed.)
-
-**2. Panel setup**: on the admin "GCP 守护" (GCP Guardian) tab click "添加凭证" (Add credential), paste the contents of `moss-sa.json` and save → hit "测试" (Test) to verify it works → enable the auto-start master switch; then edit the node on the "服务器" (Servers) tab, enable "GCP auto-start", pick the credential and fill in the zone (e.g. `us-central1-a`) and instance name. A ▶ button appears on the node row for manual immediate start.
-
-Multiple GCP accounts: add one credential per account. Credentials coexist, and each node picks the one it uses.
-
-**How it works**: after a node stays offline past the confirmation delay (default 120s), Moss queries the instance status — it only starts instances in `TERMINATED` state; `RUNNING` but offline means an agent / network problem, so Moss alerts without touching the instance. Failed starts (e.g. Spot capacity shortage) are retried after the cooldown (default 300s) up to the attempt cap (default 3), then Moss stops and notifies; counters reset automatically once the node comes back online.
-
-**Caveats**:
-
-- **Do not host the panel on a guarded Spot instance** — if the panel is preempted together with the instance, nothing is left to restart it.
-- **Disable the node's auto-start switch before intentional shutdowns** (or the master switch), or the instance will be pulled back up.
-- Keep the Spot instance's termination action at the default **STOP**; with **DELETE** the instance is gone after preemption and cannot be started.
-- Credential private keys are encrypted in the panel database (master key from `MOSS_SECRET_KEY`, falling back to an auto-generated `secret.key` in the data directory) — back up that master key together with the database. Still grant only the two minimal permissions above and bind only the necessary project.
-- `SUSPENDED` instances are not auto-resumed.
-
-## 🏗 Architecture
-
-```
-moss/
-├── web/       # Frontend: React + TS + Tailwind + Recharts
-├── server/    # Backend: Go + SQLite (pure-Go modernc driver), embedded frontend, single binary
-├── agent/     # Agent: Go + gopsutil, single binary, reports over WebSocket
-├── internal/  # Protocol types shared by server / agent
-└── deploy/    # Dockerfile + docker-compose + nginx example + one-line script moss.sh
-```
-
-- The agent connects via `ws(s)://<server>/api/agent/ws?token=mk_xxx` and reports system metrics and probe results. Connection info is identical across Windows / Linux / macOS — only the install command differs (`install.sh` / `install.ps1`).
-- Browsers subscribe to realtime push over `/api/ws`; historical data is aggregated into storage by the sampling interval.
-
-## 🛠 Local Development
-
-```powershell
-# 1. Build the frontend (server serves web/dist)
-cd web; npm install; npm run build
-
-# 2. Build and start the server (prints a random admin password on first run, or set it via env var)
-cd ..
-go build -o bin/moss-server.exe ./server
-$env:MOSS_ADMIN_PASSWORD='your-password'
-.\bin\moss-server.exe --listen :8787 --data .\data --web .\web\dist
-
-# 3. Log in at http://localhost:8787, add a server in the admin panel, grab the token, start a local agent
-go build -o bin/moss-agent.exe ./agent
-.\bin\moss-agent.exe --endpoint http://localhost:8787 --token mk_xxx
-```
-
-Frontend hot reload: `cd web; npm run dev` (Vite proxies `/api` to `localhost:8787`; open http://localhost:5173).
-
-## 🗺 Roadmap & Status
-
-All core features are live and running in production: server monitoring, latency probes, Telegram alerts, Docker / one-line deploy, Nginx reverse proxy + TLS/wss. See the [CHANGELOG](./CHANGELOG.md) for details.
+See the [CHANGELOG](./CHANGELOG.md) for what changed in each release.
 
 Issues / PRs / Stars ⭐ welcome — if you find it useful, a star is the best encouragement.
 
