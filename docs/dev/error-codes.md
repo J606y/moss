@@ -102,7 +102,7 @@
 
 **不翻译的两处**：`exec.blocked` 的 `reason`（拦截规则给出的原因）与 `cmd`（用户/AI 敲的原文）。与错误码里 `Detail` 同理——那是证据，翻译反而会改变它。
 
-> **破坏性变更**：`metric` 字段值从「内存」变成 `mem`；`text` 字段随站点语言变化。已在 CHANGELOG 的「未发布」段注明，`docs/ai-ops.md` 的 webhook 契约同步更新。
+> **破坏性变更**：`metric` 字段值从「内存」变成 `mem`；`text` 字段随站点语言变化。已在 CHANGELOG 的「未发布」段注明，`docs/dev/ai-ops.md` 的 webhook 契约同步更新。
 
 ### E 一致性测试（已完成）
 

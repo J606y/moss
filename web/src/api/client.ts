@@ -7,7 +7,7 @@ export interface ApiError extends Error {
    *
    * 可能缺失：后端没登记这条错误，或它压根不是一条结构化错误（网络失败、
    * 非 JSON 响应）。缺失时界面退回显示 message 里的中文原文——漏一条只是
-   * 不翻译，不会变成空白。契约见 docs/error-codes.md。
+   * 不翻译，不会变成空白。契约见 docs/dev/error-codes.md。
    */
   code?: string
   /** 不翻译的那一截：机器名、版本号、Go error 原文。译文里用 {detail} 接住。 */

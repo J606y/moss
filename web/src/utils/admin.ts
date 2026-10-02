@@ -18,7 +18,7 @@ const coded = (code: string | undefined, detail: string | undefined, fallback: s
  *
  * 认不出的码——后端新增了却忘了补文案，或压根不是结构化错误（网络失败、
  * 非 JSON 响应）——退回 e.message，也就是后端给的中文原文。漏一条只是
- * 不翻译，不会变成空白。契约见 docs/error-codes.md。
+ * 不翻译，不会变成空白。契约见 docs/dev/error-codes.md。
  */
 export const errMsg = (e: unknown) => {
   if (!(e instanceof Error)) return translate(getLang(), 'common.requestFailed')

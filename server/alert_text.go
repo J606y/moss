@@ -6,7 +6,7 @@
 // 前端那套 i18n 够不着。但更要紧的收益是顺手拆开了一个身兼三职的字符串：
 // metric 此前既是状态机的 key（st.highSince[metric]）、又是 webhook 的契约字段、
 // 还要被拼进中文消息。改一个字，状态机 key 就与 clearMetricState 对不上，
-// 而编译器完全不管。契约见 docs/error-codes.md 的 D 段。
+// 而编译器完全不管。契约见 docs/dev/error-codes.md 的 D 段。
 package main
 
 import "strings"

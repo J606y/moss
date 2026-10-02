@@ -273,7 +273,7 @@ function AuditStatus({ row }: { row: ExecAudit }) {
     // 判据仍是中文子串，且**不该**跟着 HTTP 错误码一起改：这里的 row.error
     // 是当初落库的历史文本，不是错误响应——exec_audit 表没有 code 列，后端
     // 自己的「仅看拦截」筛选也是 error LIKE '命令被拦截：%'。要改得先加列并
-    // 回填，属于 docs/error-codes.md 的 D 段，届时这一处与后端同步改。
+    // 回填，属于 docs/dev/error-codes.md 的 D 段，届时这一处与后端同步改。
     const blocked = row.error.includes('拦截')
     return (
       <span

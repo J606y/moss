@@ -202,7 +202,7 @@ func runOnce(target string, runner *execRunner, up *upgrader) error {
 				//
 				// ⚠️ 这条成立的前提是「特权保持受限」。一旦升级支持指定版本
 				// （回滚到旧版）或自定义下载源，它就变成了任意代码分发通道，
-				// 那时必须补上 allow 检查——理由见 docs/ai-ops.md 的决策表。
+				// 那时必须补上 allow 检查——理由见 docs/dev/ai-ops.md 的决策表。
 				if msg.Upgrade != nil {
 					up.Handle(c, *msg.Upgrade)
 				}

@@ -168,7 +168,7 @@ export const zh = {
     '切换通道后只会提示版本号更高的更新。当前跑测试版时，要等正式版追上这个版本号才会出现更新提示；需要回退请到服务器上操作。',
   'upd.notes.show': '查看更新说明',
   'upd.notes.hide': '收起更新说明',
-  // {reason} 来自后端，目前仍是中文，见 docs/i18n.md 的「已知缺口」。
+  // {reason} 来自后端，目前仍是中文，见 docs/dev/i18n.md 的「已知缺口」。
   'upd.downgrade': '{reason}。面板只做升级，需要回退请到服务器上操作。',
   'upd.lastFailed': '上次更新失败：{err}',
   'upd.check': '检查更新',
@@ -463,7 +463,7 @@ export const zh = {
    *
    * 带 {detail} 的条目对应后端以冒号（或空格）收尾的 Msg，接住机器名、
    * 版本号、Go error 原文这类不翻译的尾巴。后端没给 detail 时它替换成空串。
-   * 新增一条码务必同时补这两张表，契约见 docs/error-codes.md。
+   * 新增一条码务必同时补这两张表，契约见 docs/dev/error-codes.md。
    */
   'err.internal': '内部错误',
   'err.bad_json': '请求格式错误',

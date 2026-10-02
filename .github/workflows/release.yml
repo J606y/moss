@@ -94,7 +94,7 @@ jobs:
       # 挪到发布者，是这条链路上唯一能防住敌意镜像的手段。
       #
       # 未配置密钥时跳过：此时 agent 侧也没有公钥可注入，两边一致地退回
-      # 「https + 校验和」。配置方法见 docs/release-signing.md。
+      # 「https + 校验和」。配置方法见 docs/dev/release-signing.md。
       - name: Sign checksums
         env:
           SIGNING_KEY: ${{ secrets.MOSS_RELEASE_PRIVKEY }}

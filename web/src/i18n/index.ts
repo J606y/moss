@@ -139,7 +139,7 @@ export function translate(l: Lang, key: TextKey, params?: TransParams): string {
  * 拿 zh 当码的登记册而不是另列一张表：它本来就是基准表，多一张就多一处
  * 会不同步的地方。调用方拿到 null 时退回显示后端给的中文原文——所以后端
  * 新增一条码却忘了加翻译，界面只是不翻译，不会变成空白或 undefined。
- * 这条缝由 server 侧的一致性测试兜住（见 docs/error-codes.md 的 E 段）。
+ * 这条缝由 server 侧的一致性测试兜住（见 docs/dev/error-codes.md 的 E 段）。
  */
 export function errKey(code: string | null | undefined): TextKey | null {
   if (!code) return null

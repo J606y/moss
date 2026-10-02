@@ -10,7 +10,7 @@
  * **唯一的例外是错误码那几条兜底串**（upgradeHint / hostHint）。它们照抄后端
  * 的中文原文是故意的：界面认出 code 就该显示译文，那句中文永远不该出现。
  * 一旦扫描在英文界面上扫出它，说明翻译那条路断了——这是真阳性，正是要抓的。
- * 契约见 docs/error-codes.md。
+ * 契约见 docs/dev/error-codes.md。
  */
 
 export const ADMIN_SERVER = {
