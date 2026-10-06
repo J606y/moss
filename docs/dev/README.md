@@ -6,6 +6,7 @@
 | --- | --- |
 | [development.md](./development.md) | 架构、技术栈、真实访客 IP 识别、本地开发 |
 | [ai-ops.md](./ai-ops.md) | AI 运维接口(MCP)设计与接手须知 |
+| [cloud-mcp.md](./cloud-mcp.md) | 云端会话接入 moss MCP 的配置与验证 |
 | [error-codes.md](./error-codes.md) | 错误码契约,前后端与 webhook 共用 |
 | [i18n.md](./i18n.md) | 界面多语言的实现与已知缺口 |
 | [release-signing.md](./release-signing.md) | 发布签名的原理与一次性配置 |

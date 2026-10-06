@@ -14,22 +14,19 @@
 |---|---|
 | 面板地址 | `https://jk.20051212.xyz`（**同时是 README 里的公开演示地址**） |
 | MCP 端点 | `https://jk.20051212.xyz/mcp` |
-| 接入方式 | 已加到 Claude Code 用户级配置（`claude mcp add --scope user`），全项目可用 |
-| 密钥范围 | 全部 7 台机器，读/执行/写三项能力齐全 |
+| 接入方式 | 本机：Claude Code 用户级配置（`claude mcp add --scope user`），全项目可用。云端会话：claude.ai/code 的 Default 云端环境，API credentials 只对 `jk.20051212.xyz/mcp` 注入云端专用密钥，Setup script 执行 `claude mcp add --scope user`；仓库不提交 `.mcp.json` |
+| 密钥范围 | 全部 6 台机器，读/执行/写三项能力齐全 |
 
-七台机器（`list_servers` 可查最新状态）：
+六台机器（2026-10-06 `list_servers` 实测，agent 均为 2.2.0；以 `list_servers` 为准）：
 
-| ID | 名称 | 系统 | agent 版本 |
+| ID | 名称 | 分组 | 系统 |
 |---|---|---|---|
-| `uQ8B6wha` | TW NGINX SERVER | Debian 13 | **已升 beta.1 ✅ exec 实测可用** |
-| `NhjbVUHB` | United States WEB SERVER | Debian 13 / aarch64 | **已升 beta.1 ✅ exec 实测可用**（**moss server 本体在这台**） |
-| `TNeWg5XB` | JP NGINX SERVER | Debian 13 | **已升 beta.1 ✅ exec 实测可用** |
-| `T5s5WDHB` | HK PROXY SERVER | Debian 13 | v1.4.0 待升 |
-| `TMVEKaQa` | KR PROXY SERVER | Debian 13 | v1.4.0 待升 |
-| `FwCxdg8F` | GUANGZHOU DNS SERVER | Debian 13 | v1.4.0 待升（**境内，GitHub 下载会超时**） |
-| `AkijA4Zu` | JP SCUM SERVER | **Windows Server 2022** | v1.4.0 待升 |
-
-**待升 4 台**（2026-08-04 逐台下发 `echo` 实测：前三台正常返回，后四台无响应）。
+| `t6PF6g7Q` | HK PROXY SERVER | PROXY | Debian 13 / x86_64 |
+| `5srmeBjD` | US WEB SERVER | WEB | Debian 13 / aarch64 |
+| `7cMzcTHB` | TW NGINX SERVER | CDN | Debian 13 / x86_64 |
+| `DYe9MGcq` | DE NGINX SERVER | CDN | Debian 13 / x86_64 |
+| `4b9xGBSu` | US NGINX SERVER | CDN | Debian 13 / x86_64 |
+| `v4dBkGXN` | GUANGZHOU DNS SERVER | DNS | Debian 13 / x86_64（**境内，GitHub 下载会超时**） |
 
 ### moss server 部署位置（已确认）
 
