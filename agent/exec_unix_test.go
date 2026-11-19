@@ -260,3 +260,36 @@ func systemdRunPresent() bool {
 	_, err := exec.LookPath("systemd-run")
 	return err == nil
 }
+
+func TestReadFileChunkOffsetAndEOF(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sample.bin")
+	payload := strings.Repeat("MOSS-READ-CHUNK-", 100) // 1600 字节
+	if err := os.WriteFile(path, []byte(payload), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := newExecRunner(true)
+	c1 := r.readFileChunk(protocol.ReadTask{ReqID: "r1", Path: path, Offset: 0, Length: 600})
+	if c1.Error != "" || c1.Offset != 0 || c1.NextOffset != 600 || c1.TotalBytes != 1600 || c1.EOF {
+		t.Fatalf("第一块读取不符: %+v", c1)
+	}
+	if string(c1.Data) != payload[:600] {
+		t.Fatal("第一块内容不匹配")
+	}
+
+	c2 := r.readFileChunk(protocol.ReadTask{ReqID: "r2", Path: path, Offset: c1.NextOffset, Length: 2000})
+	if c2.Error != "" || c2.Offset != 600 || c2.NextOffset != 1600 || !c2.EOF {
+		t.Fatalf("第二块读取不符: %+v", c2)
+	}
+	if string(c1.Data)+string(c2.Data) != payload {
+		t.Fatal("分块拼接内容与原文件不一致")
+	}
+
+	// 未开启 allow-exec 时应拒绝读取
+	rDenied := newExecRunner(false)
+	cd := rDenied.readFileChunk(protocol.ReadTask{ReqID: "r3", Path: path, Offset: 0, Length: 100})
+	if cd.Error == "" {
+		t.Fatal("未开启远程执行时 readFileChunk 应拒绝")
+	}
+}

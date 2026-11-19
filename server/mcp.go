@@ -1,7 +1,4 @@
 // MCP Streamable HTTP 传输层与方法分发。
-//
-// 单端点 POST /mcp，Bearer Key 鉴权（复用 apikey.go 的 Key 体系）。
-// 实现 legacy 语义（见 mcp_types.go 的版本选型说明）。
 package main
 
 import (
@@ -137,14 +134,15 @@ func (s *App) mcpInitialize(headerVer string, req *jsonrpcRequest) mcpInitialize
 }
 
 // mcpInstructions 是给 AI 的使用说明，随握手一次性下发。
-const mcpInstructions = `Moss 是服务器集群的监控与运维中枢。你可以查看机器状态、执行命令、写入配置文件。
+const mcpInstructions = `Moss 是服务器集群的监控与运维中枢。你可以查看机器状态、执行命令、传输文件、写入配置。
 
 工作方式：
 - 先用 list_servers 拿到机器 ID，后续所有操作都用这个 ID 指定目标。
 - 排查问题时先看 get_metrics，确认是 CPU、内存还是磁盘的问题，再决定执行什么命令。
-- exec 是异步的：提交后立刻返回 jobId，用 get_result 轮询取回输出。
-- 系统大包更新、dpkg 解压、编译构建等长耗时命令请给 exec 传 detach=true：agent 会用 systemd-run --unit=moss-job-<id> 拉起独立后台服务（超时上限 24 小时，日志落盘无 1MB 上限），可用 get_result 的 offset / tail 分段追读日志、用 list_jobs 查询任务列表、用 cancel 终止任务。
-- 写配置文件用 write_file，不要用 exec 配 heredoc——转义容易出错，且内容无法原样审计。
+- 集群巡检或多机探针优先用 batch_exec：一次并发下发到多台（或全部在线）服务器并在服务端聚合返回结果。
+- 单机命令用 exec（异步返回 jobId）配 get_result 轮询。get_result 统一提供 status 状态机字段与合并后的 output 字段，且通道异常与命令退出码解耦（命令非零 exitCode 不会触发 MCP isError）。
+- 系统大包更新、dpkg 解压、编译构建等长耗时命令请给 exec 传 detach=true：agent 会用 systemd-run --unit=moss-job-<id> 拉起独立后台服务（超时上限 24 小时，日志落盘无 1MB 上限），可用 get_result 的 offset/limit/tail 分页追读、用 list_jobs 查列表、用 cancel 终止任务。
+- 拉取远端文件（含大文件或二进制 deb/tar 包）用 read_file 按 offset + length 分块读取；写配置文件用 write_file。
 
 限制：
 - 破坏性命令会被服务端拦截（删根目录、格式化磁盘、关机、停用 moss agent 等），不要尝试绕过。

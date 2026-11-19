@@ -96,13 +96,9 @@ type JobStatus struct {
 }
 
 // WriteTask server → agent 的文件写入任务。
-//
-// 不复用 ExecTask + heredoc：shell 转义是 AI 写配置文件时最高频的出错点，
-// 且内容混在命令行里无法原样审计。独立任务类型让「写了什么」可以逐字节留痕。
 type WriteTask struct {
-	ID   string `json:"id"`
-	Path string `json:"path"`
-	// Data 走 base64，二进制安全；上限见 WriteSizeCap。
+	ID     string `json:"id"`
+	Path   string `json:"path"`
 	Data   []byte `json:"data"`
 	Mode   uint32 `json:"mode,omitempty"`   // 0 表示用 0644
 	Append bool   `json:"append,omitempty"` // 追加而非覆盖
@@ -110,35 +106,39 @@ type WriteTask struct {
 }
 
 // WriteSizeCap 单次写入的内容上限。
-//
-// WS 单条消息上限 64KB，base64 后膨胀约 33%，故内容取 48KB 上限一次装得下，
-// 无需为写入再实现一套分片重组。nginx 配置、compose 文件、systemd 单元
-// 都在几 KB 量级，48KB 覆盖绝大多数场景；更大的文件本就应当用 exec 去目标机拉取。
 const WriteSizeCap = 48 << 10
 
-// UpgradeTask server → agent 的自升级任务。
+// ReadTask server → agent 的分块文件读取/下载任务。
 //
-// 不复用 ExecTask 下发安装脚本，两条理由：
-//   - 闸 2 硬拦「动 agent 二进制 / 配置 / systemd 单元」，走 exec 会被自己的闸拦下；
-//   - 更要紧的是，能下发任意升级脚本等于开了一条绕过命令黑名单的通道。
-//
-// 升级逻辑内置在 agent 里，server 只给「升到哪个版本、从哪下载」，不给可执行内容。
-type UpgradeTask struct {
-	ID      string `json:"id"`      // 幂等 ID，agent 侧据此去重
-	Version string `json:"version"` // 目标版本，带 v 前缀的 tag 名，如 v2.0.0-beta.2
-	// BaseURL 是 release 的下载目录，文件名由 agent 按自身 runtime.GOOS/GOARCH 拼。
-	//
-	// 不由 server 拼好完整 URL：库里的 os 列存的是「Debian 13」这类人类可读的发行版名，
-	// 靠字符串匹配反推平台既脆又容易在新系统上悄悄猜错，而 agent 自己一定知道
-	// 它是什么平台什么架构。命名规则与 release.yml 的产物一致。
-	BaseURL string `json:"baseUrl"`
-	// GraceSec 回滚判据：重启后多少秒内没连回 server 就判定失败并回滚。
-	// 0 表示用 UpgradeDefaultGrace。
-	GraceSec int `json:"graceSec,omitempty"`
+// 单次 WS 帧读取上限由 agent 收敛在 ExecChunkSize（32KB），
+// server 侧可按需多帧连续拉取并拼接回传给调用方。
+type ReadTask struct {
+	ReqID  string `json:"reqId"`
+	Path   string `json:"path"`
+	Offset int64  `json:"offset,omitempty"`
+	Length int    `json:"length,omitempty"` // 0 表示默认取 ExecChunkSize (32KB)
 }
 
-// 升级阶段。replaced 之后连接必然中断，界面据此显示「正在重启，等待重连」，
-// 而不是把断连误报成升级失败。
+// ReadResult agent → server 的分块文件读取回执。
+type ReadResult struct {
+	ReqID      string `json:"reqId"`
+	Path       string `json:"path,omitempty"`
+	Data       []byte `json:"data,omitempty"`
+	Offset     int64  `json:"offset"`
+	NextOffset int64  `json:"nextOffset"`
+	TotalBytes int64  `json:"totalBytes"`
+	EOF        bool   `json:"eof"`
+	Error      string `json:"error,omitempty"`
+}
+
+// UpgradeTask server → agent 的自升级任务。
+type UpgradeTask struct {
+	ID       string `json:"id"`
+	Version  string `json:"version"`
+	BaseURL  string `json:"baseUrl"`
+	GraceSec int    `json:"graceSec,omitempty"`
+}
+
 const (
 	UpgradeStageDownloading = "downloading"
 	UpgradeStageVerified    = "verified"
@@ -146,62 +146,54 @@ const (
 	UpgradeStageRestarting  = "restarting"
 )
 
-// UpgradeDefaultGrace 新 agent 重启后允许的最长失联时间（秒）。
-// 正常重连在数秒内完成，60s 给足富余；再长则机器失联时间不可接受。
 const UpgradeDefaultGrace = 60
 
 // UpgradeResult agent → server 的升级进度。
-//
-// 收不到最终成功回执是正常的：agent 在 restarting 阶段就会被重启掐断连接。
-// 真正的成功判据是「agent 重新连上来且上报的版本号等于目标版本」，由 server 侧判定。
 type UpgradeResult struct {
 	ID    string `json:"id"`
 	Stage string `json:"stage"`
-	Error string `json:"error,omitempty"` // 非空表示升级在该阶段失败，此时不会重启
+	Error string `json:"error,omitempty"`
 }
 
 // ExecResult agent → server 的执行输出分片。
-// 输出流式回传：同一个 ID 会产生多条 Seq 递增的分片，最后一条 Done=true 且携带退出码。
-// 当 Detach=true 时，agent 用 systemd-run 拉起后台服务后立刻回传一条 Done=true, Detached=true 的确认消息。
 type ExecResult struct {
 	ID     string `json:"id"`
-	Seq    int    `json:"seq"`              // 分片序号，从 0 递增，供 server 侧排序重组
-	Stream string `json:"stream,omitempty"` // stdout / stderr
-	// Data 用 []byte 而非 string：命令输出可能含非 UTF-8 字节，
-	// Go 的 encoding/json 会把无效 UTF-8 的 string 替换成 U+FFFD 从而损坏输出，
-	// []byte 走 base64 可原样往返。
-	Data []byte `json:"data,omitempty"`
+	Seq    int    `json:"seq"`
+	Stream string `json:"stream,omitempty"`
+	Data   []byte `json:"data,omitempty"`
 
-	Done      bool   `json:"done"`                // true 表示本次执行结束（或 detach 任务已启动/启动失败）
-	Detached  bool   `json:"detached,omitempty"`  // true 表示 detach 任务已由 systemd-run 成功拉起并在后台独立运行
-	Unit      string `json:"unit,omitempty"`      // detach 模式的 systemd 单元名（如 moss-job-<id>.service）
-	ExitCode  int    `json:"exitCode,omitempty"`  // 仅 Done=true 且 Error 为空时有效
-	Error     string `json:"error,omitempty"`     // 非空表示未能正常执行（拒绝/超时/启动失败）
-	Truncated bool   `json:"truncated,omitempty"` // 输出触顶 ExecOutputCap 被截断
+	Done      bool   `json:"done"`
+	Detached  bool   `json:"detached,omitempty"`
+	Unit      string `json:"unit,omitempty"`
+	ExitCode  int    `json:"exitCode,omitempty"`
+	Error     string `json:"error,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
 }
 
 // AgentMsg agent → server。
 type AgentMsg struct {
-	Type      string     `json:"type"` // register / report / ping / exec_result / upgrade_result / job_status
+	Type      string     `json:"type"` // register / report / ping / exec_result / upgrade_result / job_status / read_result
 	Info      *AgentInfo `json:"info,omitempty"`
 	Stats     *Stats     `json:"stats,omitempty"`
 	UptimeSec uint64     `json:"uptimeSec,omitempty"`
 	TaskID    int64      `json:"taskId,omitempty"`
-	Ms        int        `json:"ms"` // -1 表示探测失败/丢包；agent 将 <1ms 记为 1ms，故 0 不会出现
+	Ms        int        `json:"ms"`
 
 	Exec      *ExecResult    `json:"exec,omitempty"`
 	Upgrade   *UpgradeResult `json:"upgrade,omitempty"`
 	JobStatus *JobStatus     `json:"jobStatus,omitempty"`
+	Read      *ReadResult    `json:"read,omitempty"`
 }
 
 // ServerMsg server → agent。
 type ServerMsg struct {
-	Type     string     `json:"type"` // config / exec / write / upgrade / job_query / job_cancel
+	Type     string     `json:"type"` // config / exec / write / read / upgrade / job_query / job_cancel
 	Interval int        `json:"interval,omitempty"`
 	Tasks    []PingTask `json:"tasks,omitempty"`
 
 	Exec      *ExecTask    `json:"exec,omitempty"`
 	Write     *WriteTask   `json:"write,omitempty"`
+	Read      *ReadTask    `json:"read,omitempty"`
 	Upgrade   *UpgradeTask `json:"upgrade,omitempty"`
 	JobQuery  *JobQuery    `json:"jobQuery,omitempty"`
 	JobCancel *JobCancel   `json:"jobCancel,omitempty"`

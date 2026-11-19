@@ -1,4 +1,4 @@
-// 服务端命令执行：下发任务、聚合分片回传、后台长任务托管（detach）、收敛异常、落审计。
+// 服务端命令执行：下发任务、聚合分片回传、后台长任务托管（detach）、分块文件拉取（read_file）、收敛异常、落审计。
 package main
 
 import (
@@ -27,10 +27,12 @@ const (
 	// 服务端等待结果的宽限：agent 自身超时后仍需时间回传收尾分片，
 	// 这里留出余量，避免两端超时打架导致本可正常返回的执行被判为失败。
 	execWaitGrace = 30 * time.Second
-	// detach 模式下单次 get_result 默认/最大聚合读取上限。
+	// detach 模式与 read_file 单次调用默认/最大聚合读取上限。
 	// 每次底层 WS 传输以 protocol.ExecChunkSize（32KB）分帧拉取，不触碰 64KB WS 帧上限。
 	detachDefaultReadWindow = 64 << 10
 	detachMaxReadWindow     = 256 << 10
+	readFileDefaultLength   = 64 << 10
+	readFileMaxLength       = 256 << 10
 )
 
 // execChunk 是一片带序号的输出，序号用于还原顺序。
@@ -79,7 +81,7 @@ func (j *execJob) addChunk(c execChunk) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.finished {
-		return // 收敛之后到达的分片直接丢弃
+		return
 	}
 	j.chunks = append(j.chunks, c)
 }
@@ -100,7 +102,6 @@ type ExecOutcome struct {
 func (j *execJob) outcome() ExecOutcome {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	// 按 seq 还原顺序后再分流：不依赖传输层的到达顺序假设。
 	sort.SliceStable(j.chunks, func(a, b int) bool { return j.chunks[a].seq < j.chunks[b].seq })
 	var out, errOut strings.Builder
 	for _, c := range j.chunks {
@@ -123,7 +124,6 @@ func (j *execJob) outcome() ExecOutcome {
 	}
 }
 
-// finishedJob 是已收敛任务的完整结果，供异步调用方回来取。
 type finishedJob struct {
 	outcome  ExecOutcome
 	at       time.Time
@@ -135,21 +135,25 @@ type jobWaiter struct {
 	ch       chan *protocol.JobStatus
 }
 
+type readWaiter struct {
+	serverID string
+	ch       chan *protocol.ReadResult
+}
+
 // execManager 跟踪所有在途执行，并暂存异步任务的结果。
 type execManager struct {
 	db       *sql.DB
 	notifier *Notifier
 
-	mu       sync.Mutex
-	jobs     map[string]*execJob
-	finished map[string]finishedJob
-	waiters  map[string]jobWaiter
+	mu          sync.Mutex
+	jobs        map[string]*execJob
+	finished    map[string]finishedJob
+	waiters     map[string]jobWaiter
+	readWaiters map[string]readWaiter
 }
 
-// execBlockedPrefix 拦截记录的错误前缀。
 const execBlockedPrefix = "命令被拦截："
 
-// reportBlocked 落审计并推送拦截告警。
 func (m *execManager) reportBlocked(job *execJob, serverID, caller, target, reason string) ExecOutcome {
 	out := ExecOutcome{JobID: job.id, Error: execBlockedPrefix + reason}
 	m.auditFinish(job.id, out)
@@ -164,19 +168,18 @@ func (m *execManager) reportBlocked(job *execJob, serverID, caller, target, reas
 	return out
 }
 
-// 异步任务内存结果的保留时长。超时未取走即丢弃，审计表仍留有持久化记录。
 const execResultTTL = 30 * time.Minute
 
 func newExecManager(db *sql.DB) *execManager {
 	return &execManager{
-		db:       db,
-		jobs:     make(map[string]*execJob),
-		finished: make(map[string]finishedJob),
-		waiters:  make(map[string]jobWaiter),
+		db:          db,
+		jobs:        make(map[string]*execJob),
+		finished:    make(map[string]finishedJob),
+		waiters:     make(map[string]jobWaiter),
+		readWaiters: make(map[string]readWaiter),
 	}
 }
 
-// remember 把结果放进 finished 并同时把任务从 jobs 摘除，顺带清理过期项。
 func (m *execManager) remember(jobID, serverID string, out ExecOutcome) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -190,7 +193,6 @@ func (m *execManager) remember(jobID, serverID string, out ExecOutcome) {
 	delete(m.jobs, jobID)
 }
 
-// Result 查询普通异步任务当前状态（若仍在运行，也一并返回目前已收到的分片输出）。
 func (m *execManager) Result(jobID string) (out ExecOutcome, serverID string, running, found bool) {
 	m.mu.Lock()
 	now := time.Now()
@@ -219,7 +221,6 @@ func (m *execManager) isRunningInMemory(jobID string) bool {
 	return ok
 }
 
-// sanitizeUnitName 与 agent 侧 jobUnit 规则一致，预先生成预期的 systemd 单元名。
 func sanitizeUnitName(id string) string {
 	var b strings.Builder
 	b.WriteString("moss-job-")
@@ -233,8 +234,6 @@ func sanitizeUnitName(id string) string {
 	return b.String()
 }
 
-// normalizeTaskTimeout 按执行模式收敛超时：
-// 普通模式默认 60s、上限 1800s；detach 模式默认 3600s（1 小时）、上限 86400s（24 小时）。
 func normalizeTaskTimeout(task *protocol.ExecTask) {
 	if task.Detach {
 		if task.Timeout <= 0 {
@@ -253,7 +252,6 @@ func normalizeTaskTimeout(task *protocol.ExecTask) {
 	}
 }
 
-// prepare 校验、落审计、过拦截闸、下发，并把任务注册进在途表。
 func (m *execManager) prepare(hub *Hub, serverID, caller string, task *protocol.ExecTask) (*execJob, *ExecOutcome, error) {
 	if task.ID == "" {
 		task.ID = newExecJobID()
@@ -309,7 +307,6 @@ func (m *execManager) unregister(jobID string) {
 	m.mu.Unlock()
 }
 
-// await 等待任务收敛，落审计并返回结果。
 func (m *execManager) await(ctx context.Context, job *execJob, timeout int) (ExecOutcome, error) {
 	wait := time.Duration(timeout)*time.Second + execWaitGrace
 	timer := time.NewTimer(wait)
@@ -341,11 +338,7 @@ func (m *execManager) Submit(ctx context.Context, hub *Hub, serverID, caller str
 	return out, err
 }
 
-// Start 异步执行：
-//   - 普通模式（Detach=false）：下发后立即返回 jobID，后台流式收集输出，完成后落入 finished；
-//   - 后台托管模式（Detach=true）：等待 agent 用 systemd-run 拉起单元的即时回执（通常数十毫秒），
-//     若平台不支持（如 Windows）或启动失败则当场返回错误；启动成功后即从内存 jobs 表摘除，
-//     交由数据库与目标机 systemd + 磁盘日志持久化跟踪。
+// Start 异步执行。
 func (m *execManager) Start(hub *Hub, serverID, caller string, task protocol.ExecTask) (string, error) {
 	job, failed, err := m.prepare(hub, serverID, caller, &task)
 	if failed != nil {
@@ -445,7 +438,6 @@ func (m *execManager) SubmitWrite(ctx context.Context, hub *Hub, serverID, calle
 	return out, failure
 }
 
-// auditFinishWrite 收尾写入审计，把文件内容存进 stdout 位置以便日后逐字节比对。
 func (m *execManager) auditFinishWrite(jobID string, out ExecOutcome, content []byte) {
 	if _, err := m.db.Exec(
 		`UPDATE exec_audit SET finished_at = ?, exit_code = ?, error = ?, stdout = ?, truncated = ?
@@ -455,6 +447,103 @@ func (m *execManager) auditFinishWrite(jobID string, out ExecOutcome, content []
 	); err != nil {
 		log.Printf("更新写入审计失败: %v", err)
 	}
+}
+
+// requestReadChunk 向在线 agent 发送单帧文件读取请求（上限 32KB）并等待响应。
+func (m *execManager) requestReadChunk(hub *Hub, serverID string, task protocol.ReadTask, timeout time.Duration) (*protocol.ReadResult, error) {
+	conn := hub.AgentConn(serverID)
+	if conn == nil {
+		return nil, errAgentOffline
+	}
+	ch := make(chan *protocol.ReadResult, 1)
+	m.mu.Lock()
+	m.readWaiters[task.ReqID] = readWaiter{serverID: serverID, ch: ch}
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.readWaiters, task.ReqID)
+		m.mu.Unlock()
+	}()
+
+	if err := conn.send(protocol.ServerMsg{Type: "read", Read: &task}); err != nil {
+		return nil, err
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case res, ok := <-ch:
+		if !ok || res == nil {
+			return nil, errAgentOffline
+		}
+		return res, nil
+	case <-timer.C:
+		return nil, errExecTimeout
+	}
+}
+
+// SubmitRead 向目标机分块拉取文件内容（单次最多拉取 readFileMaxLength=256KB，底层按 32KB WS 帧拼接）。
+func (m *execManager) SubmitRead(hub *Hub, serverID, path string, offset int64, length int) (*protocol.ReadResult, error) {
+	if why := checkProtectedReadPath(path); why != "" {
+		return nil, errors.New(execBlockedPrefix + why)
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if length <= 0 {
+		length = readFileDefaultLength
+	}
+	if length > readFileMaxLength {
+		length = readFileMaxLength
+	}
+
+	firstChunk := protocol.ExecChunkSize
+	if length < firstChunk {
+		firstChunk = length
+	}
+	reqID := "r_" + randString(16)
+	first, err := m.requestReadChunk(hub, serverID, protocol.ReadTask{
+		ReqID:  reqID,
+		Path:   path,
+		Offset: offset,
+		Length: firstChunk,
+	}, 15*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	if first.Error != "" {
+		return first, errors.New(first.Error)
+	}
+
+	buf := append([]byte(nil), first.Data...)
+	startOffset := first.Offset
+	currNext := first.NextOffset
+
+	for !first.EOF && currNext < first.TotalBytes && len(buf) < length && len(first.Data) > 0 {
+		rem := length - len(buf)
+		if rem > protocol.ExecChunkSize {
+			rem = protocol.ExecChunkSize
+		}
+		nextReqID := "r_" + randString(16)
+		next, err := m.requestReadChunk(hub, serverID, protocol.ReadTask{
+			ReqID:  nextReqID,
+			Path:   path,
+			Offset: currNext,
+			Length: rem,
+		}, 15*time.Second)
+		if err != nil || next.Error != "" || len(next.Data) == 0 {
+			break
+		}
+		buf = append(buf, next.Data...)
+		currNext = next.NextOffset
+		first.TotalBytes = next.TotalBytes
+		first.EOF = next.EOF
+	}
+
+	first.Data = buf
+	first.Offset = startOffset
+	first.NextOffset = currNext
+	first.EOF = currNext >= first.TotalBytes
+	return first, nil
 }
 
 // OnResult 收下 agent 回传的一片结果。
@@ -512,7 +601,31 @@ func (m *execManager) OnJobStatus(fromServer string, st *protocol.JobStatus) {
 	}
 }
 
-// OnAgentGone agent 掉线时立即收敛其名下所有在途流式任务，并唤醒等待中的状态查询。
+// OnReadResult 收下 agent 对分块文件读取的响应。
+func (m *execManager) OnReadResult(fromServer string, res *protocol.ReadResult) {
+	if res == nil || res.ReqID == "" {
+		return
+	}
+	m.mu.Lock()
+	w, ok := m.readWaiters[res.ReqID]
+	if ok && w.serverID == fromServer {
+		delete(m.readWaiters, res.ReqID)
+	}
+	m.mu.Unlock()
+	if !ok {
+		return
+	}
+	if w.serverID != fromServer {
+		log.Printf("丢弃越权文件读取回执: 机器 %s 试图响应归属于 %s 的请求 %s", fromServer, w.serverID, res.ReqID)
+		return
+	}
+	select {
+	case w.ch <- res:
+	default:
+	}
+}
+
+// OnAgentGone agent 掉线时立即收敛其名下所有在途流式任务，并唤醒等待中的状态/文件查询。
 func (m *execManager) OnAgentGone(serverID string) {
 	m.mu.Lock()
 	var affected []*execJob
@@ -528,6 +641,13 @@ func (m *execManager) OnAgentGone(serverID string) {
 			delete(m.waiters, reqID)
 		}
 	}
+	var pendingReads []chan *protocol.ReadResult
+	for reqID, w := range m.readWaiters {
+		if w.serverID == serverID {
+			pendingReads = append(pendingReads, w.ch)
+			delete(m.readWaiters, reqID)
+		}
+	}
 	m.mu.Unlock()
 
 	for _, job := range affected {
@@ -536,9 +656,11 @@ func (m *execManager) OnAgentGone(serverID string) {
 	for _, ch := range pendingWaiters {
 		close(ch)
 	}
+	for _, ch := range pendingReads {
+		close(ch)
+	}
 }
 
-// requestJobStatus 向在线 agent 发送一条单帧的 JobQuery 或 JobCancel 请求并等待响应。
 func (m *execManager) requestJobStatus(hub *Hub, serverID string, msg protocol.ServerMsg, reqID string, timeout time.Duration) (*protocol.JobStatus, error) {
 	conn := hub.AgentConn(serverID)
 	if conn == nil {
@@ -571,12 +693,14 @@ func (m *execManager) requestJobStatus(hub *Hub, serverID string, msg protocol.S
 }
 
 // QueryDetached 向目标机 agent 分段拉取后台托管任务（detach=true）的最新状态与磁盘日志切片。
-//
-// tailKB > 0 时读取文件末尾 tailKB * 1024 字节（单次最多拉取 detachMaxReadWindow=256KB）；
-// tailKB <= 0 时从 offset 起顺序读取（单次最多拉取 detachDefaultReadWindow=64KB）。
-// 每次底层 WS 帧严格限制在 ExecChunkSize（32KB）以内。
-func (m *execManager) QueryDetached(hub *Hub, serverID, jobID string, offset, tailKB int64) (*protocol.JobStatus, error) {
+func (m *execManager) QueryDetached(hub *Hub, serverID, jobID string, offset, tailKB, limitBytes int64) (*protocol.JobStatus, error) {
 	var wantBytes int64 = detachDefaultReadWindow
+	if limitBytes > 0 {
+		wantBytes = limitBytes
+		if wantBytes > detachMaxReadWindow {
+			wantBytes = detachMaxReadWindow
+		}
+	}
 	var tailBytes int64
 	if tailKB > 0 {
 		tailBytes = tailKB * 1024
@@ -650,7 +774,6 @@ func (m *execManager) QueryDetached(hub *Hub, serverID, jobID string, offset, ta
 	return first, nil
 }
 
-// syncDetachedAudit 将从 agent 探测到的后台任务状态与日志大小同步回数据库。
 func (m *execManager) syncDetachedAudit(jobID string, st *protocol.JobStatus) {
 	if st == nil || !st.Found {
 		return
@@ -683,7 +806,6 @@ func (m *execManager) syncDetachedAudit(jobID string, st *protocol.JobStatus) {
 	)
 }
 
-// auditJobMeta 是从 exec_audit 表读出的任务持久化元数据。
 type auditJobMeta struct {
 	JobID      string
 	ServerID   string
@@ -729,7 +851,6 @@ func (m *execManager) lookupAuditJob(jobID string) (*auditJobMeta, error) {
 	return &meta, nil
 }
 
-// Cancel 终止正在运行的任务（支持 detach 后台任务与普通在途任务），并将取消状态持久化到数据库。
 func (m *execManager) Cancel(hub *Hub, meta *auditJobMeta) (alreadyFinished bool, err error) {
 	inMem := m.isRunningInMemory(meta.JobID)
 	if meta.FinishedAt > 0 && !inMem {
@@ -745,7 +866,6 @@ func (m *execManager) Cancel(hub *Hub, meta *auditJobMeta) (alreadyFinished bool
 		},
 	}, reqID, 10*time.Second)
 
-	// 若是普通在途任务，服务端内存侧一并收敛。
 	m.mu.Lock()
 	job := m.jobs[meta.JobID]
 	m.mu.Unlock()
@@ -757,7 +877,6 @@ func (m *execManager) Cancel(hub *Hub, meta *auditJobMeta) (alreadyFinished bool
 		return false, reqErr
 	}
 	if st != nil && st.Found && !st.Canceled && !st.Running && st.Error != "任务已取消" {
-		// 在取消请求抵达前，任务已在目标机上自然结束。
 		m.syncDetachedAudit(meta.JobID, st)
 		return true, nil
 	}
@@ -808,7 +927,6 @@ func (m *execManager) auditFinish(jobID string, out ExecOutcome) {
 	}
 }
 
-// clipForAudit 截断入库文本，并显式标注截断。
 func clipForAudit(s string) string {
 	if len(s) <= execAuditOutputCap {
 		return s

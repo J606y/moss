@@ -48,8 +48,6 @@ func (c *client) send(v any) error {
 	return c.conn.WriteJSON(v)
 }
 
-// resolveToken 按优先级取 token：--token > MOSS_TOKEN 环境变量 > --token-file。
-// 安装脚本改用文件/环境变量，避免 token 出现在进程命令行（ps / schtasks /Query）。
 func resolveToken(token, tokenFile string) string {
 	if token != "" {
 		return token
@@ -77,8 +75,6 @@ func main() {
 	guardGrace := flag.Int("guard-grace", protocol.UpgradeDefaultGrace, "内部使用：回滚守护等待新版本连回的秒数")
 	flag.Parse()
 
-	// 守护模式必须在 token 校验之前分流：它只负责重启与回滚，不连 server，
-	// 也就没有 token 可用——升级中的机器此刻正处在两个版本之间。
 	if *guard {
 		if *guardTarget == "" {
 			log.Fatal("--rollback-guard 需要 --guard-target")
@@ -96,16 +92,11 @@ func main() {
 		log.Fatalf("地址解析失败: %v", err)
 	}
 
-	// 远程执行默认关闭：装了 agent 不等于接受被远程操作，需显式开启。
 	allow := *allowExec || os.Getenv("MOSS_ALLOW_EXEC") == "1"
 	if allow {
 		log.Printf("远程执行已开启")
 	}
-	// runner 在重连间保持存活：幂等记录必须跨连接有效，
-	// 否则服务端在重连后重发同一任务会造成二次执行（例如重复跑一遍部署）。
 	runner := newExecRunner(allow)
-	// upgrader 同样跨重连存活：幂等记录若随连接重置，server 重发同一升级任务
-	// 会导致二次下载与二次替换。
 	up := newUpgrader()
 
 	const baseBackoff = 3 * time.Second
@@ -115,8 +106,6 @@ func main() {
 		if err := runOnce(target, runner, up); err != nil {
 			log.Printf("连接中断: %v，%v 后重连", err, backoff)
 		}
-		// 维持过一段在线再断（如服务端重启/部署）属正常掉线 → 退避归零，下次快速重连；
-		// 只有持续连不上（拨号失败/连上即断）才线性退避（每次 +3s）到 60s，避免雪崩。
 		if time.Since(start) >= 30*time.Second {
 			backoff = baseBackoff
 		}
@@ -190,6 +179,10 @@ func runOnce(target string, runner *execRunner, up *upgrader) error {
 			case "write":
 				if msg.Write != nil {
 					runner.HandleWrite(c, *msg.Write)
+				}
+			case "read":
+				if msg.Read != nil {
+					runner.HandleRead(c, *msg.Read)
 				}
 			case "upgrade":
 				if msg.Upgrade != nil {

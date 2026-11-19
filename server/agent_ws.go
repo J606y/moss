@@ -11,7 +11,6 @@ import (
 	"moss/internal/protocol"
 )
 
-// taskAppliesTo 判断探测任务是否应用于指定服务器。
 func taskAppliesTo(taskServerID, serverID string) bool {
 	if taskServerID == "" {
 		return true
@@ -24,7 +23,6 @@ func taskAppliesTo(taskServerID, serverID string) bool {
 	return false
 }
 
-// tasksForServer 查询应用到某服务器的启用探测任务。
 func tasksForServer(db *sql.DB, serverID string) []protocol.PingTask {
 	rows, err := db.Query(`SELECT id, type, target, interval, server_id FROM ping_tasks WHERE enabled = 1`)
 	if err != nil {
@@ -43,7 +41,6 @@ func tasksForServer(db *sql.DB, serverID string) []protocol.PingTask {
 	return out
 }
 
-// pushConfig 向某台服务器的 agent 下发最新配置。
 func (s *App) pushConfig(serverID string) {
 	c := s.hub.AgentConn(serverID)
 	if c == nil {
@@ -59,7 +56,6 @@ func (s *App) pushConfig(serverID string) {
 	}
 }
 
-// pushConfigAll 配置变更后通知所有在线 agent。
 func (s *App) pushConfigAll() {
 	for _, id := range s.hub.AgentIDs() {
 		s.pushConfig(id)
@@ -176,6 +172,9 @@ func (s *App) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 
 		case "job_status":
 			s.exec.OnJobStatus(serverID, msg.JobStatus)
+
+		case "read_result":
+			s.exec.OnReadResult(serverID, msg.Read)
 
 		case "upgrade_result":
 			s.upgrade.OnResult(serverID, msg.Upgrade)
