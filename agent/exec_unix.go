@@ -4,12 +4,18 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
+
+	"moss/internal/protocol"
 )
 
 // ---- 为什么需要 cgroup，而不只是进程组 ----
@@ -21,10 +27,6 @@ import (
 //
 // cgroup 是内核里唯一「进程无法自行退出」的归属关系。把命令放进一条 transient
 // scope，杀 cgroup 就能连 setsid 的子孙一起收走。
-//
-// 代价与回退：systemd-run 每条命令多一个进程和约几十毫秒开销，且它并非处处可用
-// （容器里没有 systemd、非 root 且无 polkit 授权都会失败）。所以先探测再决定，
-// 探不通就回退到原来的进程组隔离——宁可少杀，也不能让 exec 整体不可用。
 
 var (
 	systemdRunOnce sync.Once
@@ -34,20 +36,6 @@ var (
 // systemdRunUsable 探测 systemd-run --scope 是否真的能用，只探一次。
 //
 // **默认关闭，需 MOSS_EXEC_CGROUP=1 显式开启。**
-//
-// 关着不是因为它不对，而是因为它验证不了：探测在非 root 或无 polkit 授权时
-// 必然失败，而 CI runner 正是这种环境——也就是说这条路径在能跑测试的任何地方
-// 都不会被执行到，只在真实的 root + systemd 生产机上激活。
-// 而它一旦出错，表现是**所有机器的命令执行全部失效**，exec 是这个产品的核心能力。
-//
-// 排空宽限（exec.go 的 execDrainGrace）已经堵掉了那个真正致命的后果
-// ——agent 被逃逸进程拖到并发槽耗尽、彻底无法执行命令。cgroup 解决的是
-// 「逃逸进程本身还活着」，重要但不紧急。所以：先在一台机器上开、验证、
-// 再全量铺开，而不是拿全部机器赌一条没人跑过的路径。
-//
-// 光看 LookPath 不够：装了 systemd-run 不等于跑得起来。容器里通常没有
-// systemd（连不上 D-Bus），非 root 又没有 polkit 授权时也会被拒。
-// 所以真跑一条 true 试试——这个代价只付一次。
 func systemdRunUsable() bool {
 	systemdRunOnce.Do(func() {
 		if os.Getenv("MOSS_EXEC_CGROUP") != "1" {
@@ -69,11 +57,7 @@ func systemdRunUsable() bool {
 	return systemdRunOK
 }
 
-// scopeUnit 由任务 ID 生成 systemd 单元名。
-//
-// 只保留字母数字：单元名的合法字符集有限，而 jobID 的字母表将来可能变。
-// 与其信任上游，不如在这里过滤掉——一个非法单元名会让 systemd-run 直接失败，
-// 那就等于这条命令根本执行不了。
+// scopeUnit 由任务 ID 生成流式执行的 systemd scope 单元名。
 func scopeUnit(id string) string {
 	var b strings.Builder
 	b.WriteString("moss-exec-")
@@ -92,15 +76,11 @@ func scopeUnit(id string) string {
 func buildShellCmd(id, command string) *exec.Cmd {
 	var cmd *exec.Cmd
 	if systemdRunUsable() {
-		// --collect 让 scope 在退出后自动回收，不留下失败态单元堆积。
-		// --scope 是同步执行且透传退出码与 stdio，因此不影响输出采集与 exitCode。
 		cmd = exec.Command("systemd-run", "--scope", "--quiet", "--collect",
 			"--unit="+scopeUnit(id), "/bin/sh", "-c", command)
 	} else {
 		cmd = exec.Command("/bin/sh", "-c", command)
 	}
-	// 进程组照设：scope 模式下它是收不走逃逸子孙时的兜底，
-	// 回退模式下它是唯一的手段。
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return cmd
 }
@@ -113,8 +93,6 @@ type unixKiller struct {
 }
 
 func newProcessKiller(id string, cmd *exec.Cmd) (processKiller, error) {
-	// Setpgid 保证子进程自成进程组且 pgid == pid，故直接取 pid。
-	// 不调用 Getpgid：命令秒退时它会返回 ESRCH，导致本可正常收尾的执行被误判为失败。
 	k := &unixKiller{pgid: cmd.Process.Pid}
 	if systemdRunUsable() {
 		k.scope = scopeUnit(id) + ".scope"
@@ -125,23 +103,16 @@ func newProcessKiller(id string, cmd *exec.Cmd) (processKiller, error) {
 func (k *unixKiller) KillTree() {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	// Close 之后一律不再发信号：此时进程已被回收，PID 可能已被系统复用，
-	// 继续发信号会误杀一个无关进程。
 	if k.closed {
 		return
 	}
-	// 先杀 cgroup：这是唯一能收走 setsid 逃逸子孙的手段。
-	// 失败不算致命——下面的进程组信号仍会收走绝大多数情况。
 	if k.scope != "" {
 		out, err := exec.Command("systemctl", "kill", "--kill-whom=all",
 			"--signal=SIGKILL", k.scope).CombinedOutput()
-		// 单元已不存在说明命令早已自然结束，属预期情况。
 		if err != nil && !strings.Contains(string(out), "not loaded") {
 			log.Printf("终止 scope %s 失败: %v (%s)", k.scope, err, strings.TrimSpace(string(out)))
 		}
 	}
-	// 负号表示向整个进程组发信号。ESRCH 意味着进程组已不存在
-	// （命令在超时回调抢到锁之前自然结束），属预期情况，不算失败。
 	if err := syscall.Kill(-k.pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 		log.Printf("终止进程组 %d 失败: %v", k.pgid, err)
 	}
@@ -151,4 +122,238 @@ func (k *unixKiller) Close() {
 	k.mu.Lock()
 	k.closed = true
 	k.mu.Unlock()
+}
+
+/* ---------- detach 后台托管（systemd-run --unit=moss-job-<id>） ---------- */
+
+// buildDetachSystemdArgs 构造 systemd-run 启动后台托管服务的参数列表。
+//
+// 关键设计：
+//   - 不加 --scope：以 transient service 单元交由 PID 1 systemd 托管，命令立即返回且彻底脱离 moss-agent；
+//   - RuntimeMaxSec 控制最长运行时间（最高 24 小时），超时由 systemd 自动终止整个 cgroup；
+//   - ExecStopPost 作为兜底：无论正常退出、RuntimeMaxSec 超时、OOM 还是 systemctl stop，
+//     都在单元回收前把 SERVICE_RESULT 与 EXIT_STATUS 原子写入状态文件。
+func buildDetachSystemdArgs(unit, dir, runScript, postScript string, timeout int) []string {
+	args := []string{
+		"--unit=" + unit,
+		"--quiet",
+		"--collect",
+		"-p", "RuntimeMaxSec=" + strconv.Itoa(timeout),
+		"-p", "ExecStopPost=/bin/sh " + postScript,
+	}
+	if dir != "" {
+		args = append(args, "--working-directory="+dir)
+	}
+	args = append(args, "/bin/sh", runScript)
+	return args
+}
+
+// pruneDetachedJobDirs 顺带清理已结束且超过保留期的磁盘任务目录。
+func (r *execRunner) pruneDetachedJobDirs() {
+	base := r.jobDir
+	if base == "" {
+		return
+	}
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(base, e.Name())
+		fi, err := os.Stat(filepath.Join(dir, "status"))
+		if err != nil {
+			continue // 尚无 status 文件说明可能仍在运行，绝不清理
+		}
+		if now.Sub(fi.ModTime()) > detachKeepAge {
+			_ = os.RemoveAll(dir)
+		}
+	}
+}
+
+// startDetachedJob 用 systemd-run --unit=moss-job-<id> 拉起后台托管任务并立即返回。
+func (r *execRunner) startDetachedJob(task protocol.ExecTask, timeout int) (string, error) {
+	if _, err := exec.LookPath("systemd-run"); err != nil {
+		return "", errors.New("本机未找到 systemd-run，无法启动 detach 后台托管任务")
+	}
+	if task.Dir != "" {
+		fi, err := os.Stat(task.Dir)
+		if err != nil || !fi.IsDir() {
+			return "", fmt.Errorf("工作目录不存在或不可用: %s", task.Dir)
+		}
+	}
+
+	r.pruneDetachedJobDirs()
+
+	dir := r.jobPath(task.ID)
+	_ = os.RemoveAll(dir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("创建任务目录失败: %w", err)
+	}
+
+	logPath := filepath.Join(dir, "output.log")
+	cmdScript := filepath.Join(dir, "cmd.sh")
+	runScript := filepath.Join(dir, "run.sh")
+	postScript := filepath.Join(dir, "post.sh")
+	statusPath := filepath.Join(dir, "status")
+	statusTmp := filepath.Join(dir, "status.tmp")
+
+	// 预先创建空日志文件，使任务刚启动时的首次 get_result 即可正常打开读取。
+	if err := os.WriteFile(logPath, nil, 0o600); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", fmt.Errorf("创建日志文件失败: %w", err)
+	}
+	// 用户命令单独落脚本文件，彻底规避多层引号、换行、heredoc 与 exit 提前退出外层包装的问题。
+	if err := os.WriteFile(cmdScript, []byte(task.Cmd+"\n"), 0o700); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", fmt.Errorf("写入命令脚本失败: %w", err)
+	}
+
+	runBody := fmt.Sprintf(`#!/bin/sh
+/bin/sh %q >> %q 2>&1
+code=$?
+if [ ! -f %q ]; then
+	printf 'exited:%%d\n' "$code" > %q && mv %q %q
+fi
+exit "$code"
+`, cmdScript, logPath, statusPath, statusTmp, statusTmp, statusPath)
+	if err := os.WriteFile(runScript, []byte(runBody), 0o700); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", fmt.Errorf("写入启动包装脚本失败: %w", err)
+	}
+
+	postBody := fmt.Sprintf(`#!/bin/sh
+if [ ! -f %q ]; then
+	printf '%%s:%%s\n' "${SERVICE_RESULT:-unknown}" "${EXIT_STATUS:-1}" > %q && mv %q %q
+fi
+`, statusPath, statusTmp, statusTmp, statusPath)
+	if err := os.WriteFile(postScript, []byte(postBody), 0o700); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", fmt.Errorf("写入收尾脚本失败: %w", err)
+	}
+
+	unit := jobUnit(task.ID)
+	args := buildDetachSystemdArgs(unit, task.Dir, runScript, postScript, timeout)
+	out, err := exec.Command("systemd-run", args...).CombinedOutput()
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		detail := strings.TrimSpace(string(out))
+		if detail != "" {
+			return "", fmt.Errorf("systemd-run 启动失败: %v (%s)", err, detail)
+		}
+		return "", fmt.Errorf("systemd-run 启动失败: %v", err)
+	}
+	return unit + ".service", nil
+}
+
+// inspectDetachedState 读取指定后台托管任务当前的运行状态与退出码。
+func (r *execRunner) inspectDetachedState(dir, unit string) (running, canceled bool, exitCode int, errMsg string) {
+	statusPath := filepath.Join(dir, "status")
+	if b, err := os.ReadFile(statusPath); err == nil && len(strings.TrimSpace(string(b))) > 0 {
+		canceled, exitCode, errMsg = parseDetachStatusFile(string(b))
+		return false, canceled, exitCode, errMsg
+	}
+
+	// 状态文件尚未生成时，向 systemd 确认单元是否仍在运行。
+	if err := exec.Command("systemctl", "is-active", "--quiet", unit+".service").Run(); err == nil {
+		return true, false, 0, ""
+	}
+
+	// 单元已不活跃：给 ExecStopPost 留出极短落盘窗口后再读一次 status 文件，
+	// 避免恰好在进程退出与 ExecStopPost 写盘之间读到空状态。
+	time.Sleep(50 * time.Millisecond)
+	if b, err := os.ReadFile(statusPath); err == nil && len(strings.TrimSpace(string(b))) > 0 {
+		canceled, exitCode, errMsg = parseDetachStatusFile(string(b))
+		return false, canceled, exitCode, errMsg
+	}
+
+	// 单元已消失且无状态文件（例如机器重启过），落盘标记以免后续每次都调 systemctl。
+	_ = writeDetachStatusAtomic(dir, "lost:-1")
+	return false, false, -1, "后台任务单元已停止，未捕获到退出码"
+}
+
+// queryDetachedJob 读取后台托管任务的状态与指定区间（offset 或 tail）的磁盘日志。
+func (r *execRunner) queryDetachedJob(q protocol.JobQuery) protocol.JobStatus {
+	dir := r.jobPath(q.JobID)
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		return protocol.JobStatus{
+			ReqID: q.ReqID,
+			JobID: q.JobID,
+			Found: false,
+			Error: "目标机上找不到该后台任务的磁盘记录",
+		}
+	}
+	unit := jobUnit(q.JobID)
+	running, canceled, exitCode, errMsg := r.inspectDetachedState(dir, unit)
+	logPath := filepath.Join(dir, "output.log")
+	data, actualOffset, nextOffset, totalBytes := readLogSlice(logPath, q.Offset, q.Tail, q.Limit)
+	return protocol.JobStatus{
+		ReqID:      q.ReqID,
+		JobID:      q.JobID,
+		Unit:       unit + ".service",
+		Found:      true,
+		Running:    running,
+		Canceled:   canceled,
+		ExitCode:   exitCode,
+		Error:      errMsg,
+		Data:       data,
+		Offset:     actualOffset,
+		NextOffset: nextOffset,
+		TotalBytes: totalBytes,
+	}
+}
+
+// cancelDetachedJob 终止后台托管任务的 systemd 单元并落盘取消状态。
+func (r *execRunner) cancelDetachedJob(req protocol.JobCancel) protocol.JobStatus {
+	dir := r.jobPath(req.JobID)
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		return protocol.JobStatus{
+			ReqID: req.ReqID,
+			JobID: req.JobID,
+			Found: false,
+			Error: "目标机上找不到该后台任务的磁盘记录",
+		}
+	}
+	unit := jobUnit(req.JobID)
+	statusPath := filepath.Join(dir, "status")
+	if b, err := os.ReadFile(statusPath); err == nil && len(strings.TrimSpace(string(b))) > 0 {
+		canceled, exitCode, errMsg := parseDetachStatusFile(string(b))
+		_, _, _, totalBytes := readLogSlice(filepath.Join(dir, "output.log"), 0, 0, -1)
+		return protocol.JobStatus{
+			ReqID:      req.ReqID,
+			JobID:      req.JobID,
+			Unit:       unit + ".service",
+			Found:      true,
+			Running:    false,
+			Canceled:   canceled,
+			ExitCode:   exitCode,
+			Error:      errMsg,
+			Offset:     totalBytes,
+			NextOffset: totalBytes,
+			TotalBytes: totalBytes,
+		}
+	}
+
+	// 先写状态文件再停单元，防止 ExecStopPost 抢先把状态写成 signal:TERM。
+	_ = writeDetachStatusAtomic(dir, "canceled:130")
+	_ = exec.Command("systemctl", "stop", unit+".service").Run()
+	_ = exec.Command("systemctl", "kill", "--kill-whom=all", "--signal=SIGKILL", unit+".service").Run()
+
+	_, _, _, totalBytes := readLogSlice(filepath.Join(dir, "output.log"), 0, 0, -1)
+	return protocol.JobStatus{
+		ReqID:      req.ReqID,
+		JobID:      req.JobID,
+		Unit:       unit + ".service",
+		Found:      true,
+		Running:    false,
+		Canceled:   true,
+		ExitCode:   -1,
+		Error:      "任务已取消",
+		Offset:     totalBytes,
+		NextOffset: totalBytes,
+		TotalBytes: totalBytes,
+	}
 }

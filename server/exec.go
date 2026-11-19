@@ -1,4 +1,4 @@
-// 服务端命令执行：下发任务、聚合分片回传、收敛异常、落审计。
+// 服务端命令执行：下发任务、聚合分片回传、后台长任务托管（detach）、收敛异常、落审计。
 package main
 
 import (
@@ -27,6 +27,10 @@ const (
 	// 服务端等待结果的宽限：agent 自身超时后仍需时间回传收尾分片，
 	// 这里留出余量，避免两端超时打架导致本可正常返回的执行被判为失败。
 	execWaitGrace = 30 * time.Second
+	// detach 模式下单次 get_result 默认/最大聚合读取上限。
+	// 每次底层 WS 传输以 protocol.ExecChunkSize（32KB）分帧拉取，不触碰 64KB WS 帧上限。
+	detachDefaultReadWindow = 64 << 10
+	detachMaxReadWindow     = 256 << 10
 )
 
 // execChunk 是一片带序号的输出，序号用于还原顺序。
@@ -41,9 +45,12 @@ type execJob struct {
 	id       string
 	serverID string
 	started  time.Time
+	detach   bool
 
 	mu        sync.Mutex
 	chunks    []execChunk
+	unit      string
+	detached  bool
 	exitCode  int
 	errMsg    string
 	truncated bool
@@ -86,6 +93,8 @@ type ExecOutcome struct {
 	Stderr     string `json:"stderr"`
 	Truncated  bool   `json:"truncated,omitempty"`
 	DurationMs int64  `json:"durationMs"`
+	Detached   bool   `json:"detached,omitempty"`
+	Unit       string `json:"unit,omitempty"`
 }
 
 func (j *execJob) outcome() ExecOutcome {
@@ -109,47 +118,38 @@ func (j *execJob) outcome() ExecOutcome {
 		Stderr:     errOut.String(),
 		Truncated:  j.truncated,
 		DurationMs: time.Since(j.started).Milliseconds(),
+		Detached:   j.detached,
+		Unit:       j.unit,
 	}
 }
 
 // finishedJob 是已收敛任务的完整结果，供异步调用方回来取。
-//
-// 不直接让调用方查审计表：审计里的输出被截到 32KB 以控制库体积，
-// 而 AI 读一段日志时需要的是完整的 1MB。内存留全量，审计留摘要。
 type finishedJob struct {
-	outcome ExecOutcome
-	at      time.Time
-	// serverID 是这条任务打在哪台机器上。
-	//
-	// 必须留着：get_result 此前只校验能力、不校验机器作用域，是六个 MCP 工具里
-	// 唯一没过第二道闸的——而根因就在这里，结果里没存 serverID，校验无处可做。
-	// jobID 有 116 bit 熵、猜不到，但 jobId 会经审计界面、日志、AI 会话原文外泄，
-	// 一旦泄漏就是无闸直读别人机器上的完整输出。
+	outcome  ExecOutcome
+	at       time.Time
 	serverID string
+}
+
+type jobWaiter struct {
+	serverID string
+	ch       chan *protocol.JobStatus
 }
 
 // execManager 跟踪所有在途执行，并暂存异步任务的结果。
 type execManager struct {
-	db *sql.DB
-	// notifier 由 main.go 注入，仅用于推送拦截告警。
+	db       *sql.DB
 	notifier *Notifier
 
 	mu       sync.Mutex
 	jobs     map[string]*execJob
 	finished map[string]finishedJob
+	waiters  map[string]jobWaiter
 }
 
 // execBlockedPrefix 拦截记录的错误前缀。
-//
-// 审计的「仅看拦截」筛选靠它识别，落库与查询共用这一处定义——
-// 散落成字面量的话，改一次文案就会让筛选静默失效，而「谁试图执行什么危险操作」
-// 恰恰是审计里最不能丢的那类记录。
 const execBlockedPrefix = "命令被拦截："
 
 // reportBlocked 落审计并推送拦截告警。
-//
-// 命令拦截与路径拦截都收敛到这里，保证两条路径的留痕与告警行为一致——
-// 「谁试图执行什么危险操作」是审计里最有价值的记录，不能因为拦得早就不记。
 func (m *execManager) reportBlocked(job *execJob, serverID, caller, target, reason string) ExecOutcome {
 	out := ExecOutcome{JobID: job.id, Error: execBlockedPrefix + reason}
 	m.auditFinish(job.id, out)
@@ -164,7 +164,7 @@ func (m *execManager) reportBlocked(job *execJob, serverID, caller, target, reas
 	return out
 }
 
-// 异步任务结果的保留时长。超时未取走即丢弃，审计表仍留有截断版记录。
+// 异步任务内存结果的保留时长。超时未取走即丢弃，审计表仍留有持久化记录。
 const execResultTTL = 30 * time.Minute
 
 func newExecManager(db *sql.DB) *execManager {
@@ -172,17 +172,11 @@ func newExecManager(db *sql.DB) *execManager {
 		db:       db,
 		jobs:     make(map[string]*execJob),
 		finished: make(map[string]finishedJob),
+		waiters:  make(map[string]jobWaiter),
 	}
 }
 
-// remember 把结果放进 finished 并同时把任务从 jobs 摘除，顺带清理过期项
-// （省去一个常驻 goroutine）。
-//
-// 「放进 finished」与「从 jobs 摘除」必须在同一把锁里完成。此前摘除由 await 的
-// defer 先执行、remember 在其后，两次加锁之间有一个窗口：jobs 里已经没有、
-// finished 里还没有，Result 于是返回 found=false，get_result 回的是措辞很确定的
-// 「jobId 有误，或结果已超过 30 分钟保留期」——而命令其实刚刚成功执行完。
-// 轮询的模型据此判定 jobId 写错而放弃，或者干脆把一条非幂等的命令重跑一遍。
+// remember 把结果放进 finished 并同时把任务从 jobs 摘除，顺带清理过期项。
 func (m *execManager) remember(jobID, serverID string, out ExecOutcome) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -196,35 +190,60 @@ func (m *execManager) remember(jobID, serverID string, out ExecOutcome) {
 	delete(m.jobs, jobID)
 }
 
-// Result 查询任务当前状态。
-//
-// serverID 是这条任务归属的机器，调用方据此校验 Key 的机器作用域。
-// running 为 true 表示仍在执行中；found 为 false 表示任务不存在或结果已过期。
+// Result 查询普通异步任务当前状态（若仍在运行，也一并返回目前已收到的分片输出）。
 func (m *execManager) Result(jobID string) (out ExecOutcome, serverID string, running, found bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	now := time.Now()
 	if j, ok := m.jobs[jobID]; ok {
-		return ExecOutcome{JobID: jobID}, j.serverID, true, true
+		srv := j.serverID
+		m.mu.Unlock()
+		return j.outcome(), srv, true, true
 	}
 	if f, ok := m.finished[jobID]; ok {
-		// 读的时候也判一次过期。remember 只在有新任务落袋时顺带清理，
-		// 没有新任务的时段里，30 分钟前的结果照样读得到、占的内存也不释放，
-		// 与工具描述承诺的「结果保留 30 分钟」对不上。
 		if now.Sub(f.at) > execResultTTL {
 			delete(m.finished, jobID)
+			m.mu.Unlock()
 			return ExecOutcome{}, "", false, false
 		}
+		m.mu.Unlock()
 		return f.outcome, f.serverID, false, true
 	}
+	m.mu.Unlock()
 	return ExecOutcome{}, "", false, false
 }
 
-// prepare 校验、落审计、过拦截闸、下发，并把任务注册进在途表。
-// 第二个返回值非 nil 表示尚未下发就已失败，调用方直接把它返回给上层。
-func (m *execManager) prepare(hub *Hub, serverID, caller string, task *protocol.ExecTask) (*execJob, *ExecOutcome, error) {
-	if task.ID == "" {
-		task.ID = newExecJobID()
+func (m *execManager) isRunningInMemory(jobID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.jobs[jobID]
+	return ok
+}
+
+// sanitizeUnitName 与 agent 侧 jobUnit 规则一致，预先生成预期的 systemd 单元名。
+func sanitizeUnitName(id string) string {
+	var b strings.Builder
+	b.WriteString("moss-job-")
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		}
+	}
+	b.WriteString(".service")
+	return b.String()
+}
+
+// normalizeTaskTimeout 按执行模式收敛超时：
+// 普通模式默认 60s、上限 1800s；detach 模式默认 3600s（1 小时）、上限 86400s（24 小时）。
+func normalizeTaskTimeout(task *protocol.ExecTask) {
+	if task.Detach {
+		if task.Timeout <= 0 {
+			task.Timeout = protocol.ExecDetachDefaultTimeout
+		}
+		if task.Timeout > protocol.ExecDetachMaxTimeout {
+			task.Timeout = protocol.ExecDetachMaxTimeout
+		}
+		return
 	}
 	if task.Timeout <= 0 {
 		task.Timeout = 60
@@ -232,26 +251,33 @@ func (m *execManager) prepare(hub *Hub, serverID, caller string, task *protocol.
 	if task.Timeout > protocol.ExecMaxTimeout {
 		task.Timeout = protocol.ExecMaxTimeout
 	}
+}
 
+// prepare 校验、落审计、过拦截闸、下发，并把任务注册进在途表。
+func (m *execManager) prepare(hub *Hub, serverID, caller string, task *protocol.ExecTask) (*execJob, *ExecOutcome, error) {
+	if task.ID == "" {
+		task.ID = newExecJobID()
+	}
+	normalizeTaskTimeout(task)
+
+	unit := ""
+	if task.Detach {
+		unit = sanitizeUnitName(task.ID)
+	}
 	job := &execJob{
 		id:       task.ID,
 		serverID: serverID,
 		started:  time.Now(),
+		detach:   task.Detach,
+		unit:     unit,
 		done:     make(chan struct{}),
 	}
 
-	// 先落审计再下发：服务端若在执行途中崩溃，仍留有「曾经下发过什么」的痕迹。
-	// 只在完成后写审计，等于给了一个抹掉记录的窗口。
-	// 审计写不进去就不执行：没有痕迹的远程执行不该发生。
 	if err := m.auditStart(job, serverID, caller, *task); err != nil {
 		out := ExecOutcome{JobID: task.ID, Error: "审计写入失败，已拒绝执行（无法留痕的操作不予下发）"}
 		return nil, &out, err
 	}
 
-	// 拦截同样要留痕——「谁试图执行什么危险命令」是审计里最有价值的记录之一。
-	//
-	// 必须连 Dir 一起判：它一路直达 agent 的 cmd.Dir，只看 Cmd 就等于给
-	// `{"cmd":"rm -rf *","dir":"/"}` 留了后门——命令本身无害，落点才是致命的。
 	if why := checkCommand(task.Cmd, task.Dir); why != "" {
 		out := m.reportBlocked(job, serverID, caller, task.Cmd, why)
 		return nil, &out, errExecBlocked
@@ -284,10 +310,6 @@ func (m *execManager) unregister(jobID string) {
 }
 
 // await 等待任务收敛，落审计并返回结果。
-//
-// 刻意不在这里从 jobs 摘除：对异步任务而言，摘除必须与「把结果放进 finished」
-// 是同一个原子动作，否则中间那一瞬 Result 两张表都查不到（见 remember 的注释）。
-// 收尾方式由调用方决定——同步的 Submit 直接 unregister，异步的 Start 走 remember。
 func (m *execManager) await(ctx context.Context, job *execJob, timeout int) (ExecOutcome, error) {
 	wait := time.Duration(timeout)*time.Second + execWaitGrace
 	timer := time.NewTimer(wait)
@@ -297,7 +319,6 @@ func (m *execManager) await(ctx context.Context, job *execJob, timeout int) (Exe
 	select {
 	case <-job.done:
 	case <-timer.C:
-		// agent 完全失联（网络黑洞），连超时收尾分片都没回来。
 		job.finish(0, errExecTimeout.Error(), false)
 		failure = errExecTimeout
 	case <-ctx.Done():
@@ -310,29 +331,46 @@ func (m *execManager) await(ctx context.Context, job *execJob, timeout int) (Exe
 }
 
 // Submit 同步执行：阻塞直到执行结束、超时或 agent 掉线。
-// 适合秒级命令；AI 下发的部署动辄数分钟，应当走 Start。
 func (m *execManager) Submit(ctx context.Context, hub *Hub, serverID, caller string, task protocol.ExecTask) (ExecOutcome, error) {
 	job, failed, err := m.prepare(hub, serverID, caller, &task)
 	if failed != nil {
 		return *failed, err
 	}
 	out, err := m.await(ctx, job, task.Timeout)
-	// 同步调用方直接拿到结果，不需要留在 finished 里供人回来查。
 	m.unregister(job.id)
 	return out, err
 }
 
-// Start 异步执行：下发后立即返回 jobID，结果由调用方稍后用 Result 取回。
-//
-// 后台等待用 context.Background 而非调用方的请求 context——HTTP 请求一返回，
-// 请求 context 就被取消，若沿用它，任务会在提交的瞬间被判为「调用方取消」。
+// Start 异步执行：
+//   - 普通模式（Detach=false）：下发后立即返回 jobID，后台流式收集输出，完成后落入 finished；
+//   - 后台托管模式（Detach=true）：等待 agent 用 systemd-run 拉起单元的即时回执（通常数十毫秒），
+//     若平台不支持（如 Windows）或启动失败则当场返回错误；启动成功后即从内存 jobs 表摘除，
+//     交由数据库与目标机 systemd + 磁盘日志持久化跟踪。
 func (m *execManager) Start(hub *Hub, serverID, caller string, task protocol.ExecTask) (string, error) {
 	job, failed, err := m.prepare(hub, serverID, caller, &task)
 	if failed != nil {
-		// 下发前就失败也要留住结果：调用方拿到 jobID 后来查，
-		// 应当看到「命令被拦截」这类原因，而不是「任务不存在」。
 		m.remember(task.ID, serverID, *failed)
 		return task.ID, err
+	}
+	if task.Detach {
+		timer := time.NewTimer(execWaitGrace)
+		defer timer.Stop()
+		select {
+		case <-job.done:
+		case <-timer.C:
+			job.finish(0, "等待 agent 启动 detach 后台任务超时", false)
+		}
+		m.unregister(job.id)
+		out := job.outcome()
+		if out.Error != "" {
+			m.auditFinish(job.id, out)
+			m.remember(job.id, serverID, out)
+			return job.id, errors.New(out.Error)
+		}
+		if out.Unit != "" {
+			_, _ = m.db.Exec(`UPDATE exec_audit SET unit = ? WHERE job_id = ?`, out.Unit, job.id)
+		}
+		return job.id, nil
 	}
 	go func() {
 		out, _ := m.await(context.Background(), job, task.Timeout)
@@ -342,9 +380,6 @@ func (m *execManager) Start(hub *Hub, serverID, caller string, task protocol.Exe
 }
 
 // SubmitWrite 下发文件写入并等待结果。
-//
-// 写入是瞬时操作（无输出流、无长耗时），因此保持同步语义，不像 exec 那样提供异步模式。
-// 复用 execJob 的收敛机制：agent 侧用同一条 exec_result 通道回传结果。
 func (m *execManager) SubmitWrite(ctx context.Context, hub *Hub, serverID, caller string, task protocol.WriteTask) (ExecOutcome, error) {
 	if task.ID == "" {
 		task.ID = newExecJobID()
@@ -361,10 +396,6 @@ func (m *execManager) SubmitWrite(ctx context.Context, hub *Hub, serverID, calle
 		done:     make(chan struct{}),
 	}
 
-	// 审计记录写入意图：命令位置存路径，输出位置存文件内容原文。
-	// 这是 write_file 独立于 exec 的核心价值——「写了什么」可以逐字节回溯。
-	// 同 exec：审计写不进去就不写文件。write_file 的可追溯性比 exec 更要紧——
-	// 它记的是文件内容原文，丢一条就等于「某次改动无从回溯」。
 	if err := m.auditStart(job, serverID, caller, protocol.ExecTask{
 		Cmd:     "[write_file] " + task.Path,
 		Dir:     "",
@@ -373,8 +404,6 @@ func (m *execManager) SubmitWrite(ctx context.Context, hub *Hub, serverID, calle
 		return ExecOutcome{JobID: task.ID, Error: "审计写入失败，已拒绝写入（无法留痕的操作不予下发）"}, err
 	}
 
-	// 受保护路径的拦截与命令拦截同级：一样要留痕、一样要告警。
-	// 放在这里而非工具层，是为了让两条拦截路径共用同一套审计与推送逻辑。
 	if why := checkProtectedPath(task.Path); why != "" {
 		out := m.reportBlocked(job, serverID, caller, "[write_file] "+task.Path, why)
 		return out, errExecBlocked
@@ -428,14 +457,7 @@ func (m *execManager) auditFinishWrite(jobID string, out ExecOutcome, content []
 	}
 }
 
-// OnResult 处理 agent 回传的输出分片。
 // OnResult 收下 agent 回传的一片结果。
-//
-// fromServer 是回传方的身份，必须与任务归属的机器一致。不比对的话，任一持有
-// 合法 token 的 agent（含被入侵的受监控机）就能往**别的机器**的 job 里注入输出，
-// 或者直接 Done:true / ExitCode:0 抢先收敛掉，真机的输出随后被 addChunk 丢弃。
-// jobID 有 116 bit 熵、猜不到，所以不是可用漏洞——但 job.serverID 字段本来就在，
-// 比对只是一行，没有理由留着这个缺口。
 func (m *execManager) OnResult(fromServer string, res *protocol.ExecResult) {
 	if res == nil {
 		return
@@ -444,7 +466,7 @@ func (m *execManager) OnResult(fromServer string, res *protocol.ExecResult) {
 	job := m.jobs[res.ID]
 	m.mu.Unlock()
 	if job == nil {
-		return // 任务已收敛或服务端重启过，迟到的分片无处安放
+		return
 	}
 	if job.serverID != fromServer {
 		log.Printf("丢弃越权回传: 机器 %s 试图写入归属于 %s 的任务 %s", fromServer, job.serverID, res.ID)
@@ -453,13 +475,44 @@ func (m *execManager) OnResult(fromServer string, res *protocol.ExecResult) {
 	if len(res.Data) > 0 {
 		job.addChunk(execChunk{seq: res.Seq, stream: res.Stream, data: res.Data})
 	}
+	if res.Detached || res.Unit != "" {
+		job.mu.Lock()
+		job.detached = res.Detached
+		if res.Unit != "" {
+			job.unit = res.Unit
+		}
+		job.mu.Unlock()
+	}
 	if res.Done {
 		job.finish(res.ExitCode, res.Error, res.Truncated)
 	}
 }
 
-// OnAgentGone agent 掉线时立即收敛其名下所有在途任务。
-// 不做这件事，调用方会一直等到宽限超时才拿到结果——而结果早已注定拿不到。
+// OnJobStatus 收下 agent 对 JobQuery / JobCancel 的状态与日志回执。
+func (m *execManager) OnJobStatus(fromServer string, st *protocol.JobStatus) {
+	if st == nil || st.ReqID == "" {
+		return
+	}
+	m.mu.Lock()
+	w, ok := m.waiters[st.ReqID]
+	if ok && w.serverID == fromServer {
+		delete(m.waiters, st.ReqID)
+	}
+	m.mu.Unlock()
+	if !ok {
+		return
+	}
+	if w.serverID != fromServer {
+		log.Printf("丢弃越权状态回执: 机器 %s 试图响应归属于 %s 的请求 %s", fromServer, w.serverID, st.ReqID)
+		return
+	}
+	select {
+	case w.ch <- st:
+	default:
+	}
+}
+
+// OnAgentGone agent 掉线时立即收敛其名下所有在途流式任务，并唤醒等待中的状态查询。
 func (m *execManager) OnAgentGone(serverID string) {
 	m.mu.Lock()
 	var affected []*execJob
@@ -468,27 +521,271 @@ func (m *execManager) OnAgentGone(serverID string) {
 			affected = append(affected, job)
 		}
 	}
+	var pendingWaiters []chan *protocol.JobStatus
+	for reqID, w := range m.waiters {
+		if w.serverID == serverID {
+			pendingWaiters = append(pendingWaiters, w.ch)
+			delete(m.waiters, reqID)
+		}
+	}
 	m.mu.Unlock()
 
 	for _, job := range affected {
-		// 命令可能仍在目标机上继续执行（agent 侧断线不杀进程），
-		// 但输出已无从回传，如实告知调用方而非谎称失败。
 		job.finish(0, "执行期间 agent 掉线，输出已中断；命令可能仍在目标机上继续运行", false)
+	}
+	for _, ch := range pendingWaiters {
+		close(ch)
 	}
 }
 
-// auditStart 在下发前落一条审计。返回错误即表示**不允许继续执行**。
+// requestJobStatus 向在线 agent 发送一条单帧的 JobQuery 或 JobCancel 请求并等待响应。
+func (m *execManager) requestJobStatus(hub *Hub, serverID string, msg protocol.ServerMsg, reqID string, timeout time.Duration) (*protocol.JobStatus, error) {
+	conn := hub.AgentConn(serverID)
+	if conn == nil {
+		return nil, errAgentOffline
+	}
+	ch := make(chan *protocol.JobStatus, 1)
+	m.mu.Lock()
+	m.waiters[reqID] = jobWaiter{serverID: serverID, ch: ch}
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.waiters, reqID)
+		m.mu.Unlock()
+	}()
+
+	if err := conn.send(msg); err != nil {
+		return nil, err
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case st, ok := <-ch:
+		if !ok || st == nil {
+			return nil, errAgentOffline
+		}
+		return st, nil
+	case <-timer.C:
+		return nil, errExecTimeout
+	}
+}
+
+// QueryDetached 向目标机 agent 分段拉取后台托管任务（detach=true）的最新状态与磁盘日志切片。
 //
-// 改成 fail-closed 是有意的：原来 INSERT 失败只记一行日志、命令照常下发，
-// 之后 auditFinish 的 UPDATE 匹配 0 行，于是这条命令在库里完全无痕。
-// 而 MCP 的服务器说明对模型承诺「每次操作都有完整审计记录」，
-// 审计失效的那一刻恰恰是最需要它的时刻（通常是锁竞争或磁盘出问题）。
-// WAL + busy_timeout(5000) 让这条路径的失败概率很低，
-// 所以 fail-closed 的代价小，而 fail-open 的代价是「无从追溯」。
+// tailKB > 0 时读取文件末尾 tailKB * 1024 字节（单次最多拉取 detachMaxReadWindow=256KB）；
+// tailKB <= 0 时从 offset 起顺序读取（单次最多拉取 detachDefaultReadWindow=64KB）。
+// 每次底层 WS 帧严格限制在 ExecChunkSize（32KB）以内。
+func (m *execManager) QueryDetached(hub *Hub, serverID, jobID string, offset, tailKB int64) (*protocol.JobStatus, error) {
+	var wantBytes int64 = detachDefaultReadWindow
+	var tailBytes int64
+	if tailKB > 0 {
+		tailBytes = tailKB * 1024
+		if tailBytes > detachMaxReadWindow {
+			tailBytes = detachMaxReadWindow
+		}
+		wantBytes = tailBytes
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	firstLimit := protocol.ExecChunkSize
+	if wantBytes < int64(firstLimit) {
+		firstLimit = int(wantBytes)
+	}
+	reqID := "q_" + randString(16)
+	first, err := m.requestJobStatus(hub, serverID, protocol.ServerMsg{
+		Type: "job_query",
+		JobQuery: &protocol.JobQuery{
+			ReqID:  reqID,
+			JobID:  jobID,
+			Offset: offset,
+			Tail:   tailBytes,
+			Limit:  firstLimit,
+		},
+	}, reqID, 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	if !first.Found {
+		return first, nil
+	}
+
+	buf := append([]byte(nil), first.Data...)
+	startOffset := first.Offset
+	currNext := first.NextOffset
+
+	for currNext < first.TotalBytes && int64(len(buf)) < wantBytes && len(first.Data) > 0 {
+		rem := int(wantBytes - int64(len(buf)))
+		if rem > protocol.ExecChunkSize {
+			rem = protocol.ExecChunkSize
+		}
+		nextReqID := "q_" + randString(16)
+		next, err := m.requestJobStatus(hub, serverID, protocol.ServerMsg{
+			Type: "job_query",
+			JobQuery: &protocol.JobQuery{
+				ReqID:  nextReqID,
+				JobID:  jobID,
+				Offset: currNext,
+				Limit:  rem,
+			},
+		}, nextReqID, 10*time.Second)
+		if err != nil || !next.Found || len(next.Data) == 0 {
+			break
+		}
+		buf = append(buf, next.Data...)
+		currNext = next.NextOffset
+		first.TotalBytes = next.TotalBytes
+		first.Running = next.Running
+		first.Canceled = next.Canceled
+		first.ExitCode = next.ExitCode
+		first.Error = next.Error
+	}
+
+	first.Data = buf
+	first.Offset = startOffset
+	first.NextOffset = currNext
+
+	m.syncDetachedAudit(jobID, first)
+	return first, nil
+}
+
+// syncDetachedAudit 将从 agent 探测到的后台任务状态与日志大小同步回数据库。
+func (m *execManager) syncDetachedAudit(jobID string, st *protocol.JobStatus) {
+	if st == nil || !st.Found {
+		return
+	}
+	if st.Running {
+		_, _ = m.db.Exec(`UPDATE exec_audit SET log_bytes = ?, unit = COALESCE(NULLIF(?, ''), unit) WHERE job_id = ?`,
+			st.TotalBytes, st.Unit, jobID)
+		return
+	}
+	var finishedAt int64
+	var existingStdout string
+	if err := m.db.QueryRow(`SELECT finished_at, stdout FROM exec_audit WHERE job_id = ?`, jobID).
+		Scan(&finishedAt, &existingStdout); err != nil {
+		return
+	}
+	if finishedAt == 0 {
+		finishedAt = time.Now().UnixMilli()
+	}
+	stdoutSummary := existingStdout
+	if stdoutSummary == "" && len(st.Data) > 0 {
+		stdoutSummary = clipForAudit(string(st.Data))
+	}
+	_, _ = m.db.Exec(
+		`UPDATE exec_audit
+		    SET finished_at = ?, exit_code = ?, error = ?, canceled = ?, log_bytes = ?,
+		        unit = COALESCE(NULLIF(?, ''), unit), stdout = ?
+		  WHERE job_id = ?`,
+		finishedAt, st.ExitCode, st.Error, boolToInt(st.Canceled), st.TotalBytes,
+		st.Unit, stdoutSummary, jobID,
+	)
+}
+
+// auditJobMeta 是从 exec_audit 表读出的任务持久化元数据。
+type auditJobMeta struct {
+	JobID      string
+	ServerID   string
+	ServerName string
+	Caller     string
+	Cmd        string
+	Dir        string
+	Timeout    int
+	Detach     bool
+	Unit       string
+	StartedAt  int64
+	FinishedAt int64
+	ExitCode   int
+	Error      string
+	Canceled   bool
+	LogBytes   int64
+	Stdout     string
+	Stderr     string
+	Truncated  bool
+}
+
+func (m *execManager) lookupAuditJob(jobID string) (*auditJobMeta, error) {
+	var (
+		meta                   auditJobMeta
+		detach, canceled, trun int
+	)
+	err := m.db.QueryRow(`
+		SELECT a.job_id, a.server_id, COALESCE(s.name, ''), a.caller, a.cmd, a.dir, a.timeout,
+		       a.detach, a.unit, a.started_at, a.finished_at, a.exit_code, a.error,
+		       a.canceled, a.log_bytes, a.stdout, a.stderr, a.truncated
+		  FROM exec_audit a LEFT JOIN servers s ON s.id = a.server_id
+		 WHERE a.job_id = ?`, jobID).Scan(
+		&meta.JobID, &meta.ServerID, &meta.ServerName, &meta.Caller, &meta.Cmd, &meta.Dir, &meta.Timeout,
+		&detach, &meta.Unit, &meta.StartedAt, &meta.FinishedAt, &meta.ExitCode, &meta.Error,
+		&canceled, &meta.LogBytes, &meta.Stdout, &meta.Stderr, &trun,
+	)
+	if err != nil {
+		return nil, err
+	}
+	meta.Detach = detach == 1
+	meta.Canceled = canceled == 1
+	meta.Truncated = trun == 1
+	return &meta, nil
+}
+
+// Cancel 终止正在运行的任务（支持 detach 后台任务与普通在途任务），并将取消状态持久化到数据库。
+func (m *execManager) Cancel(hub *Hub, meta *auditJobMeta) (alreadyFinished bool, err error) {
+	inMem := m.isRunningInMemory(meta.JobID)
+	if meta.FinishedAt > 0 && !inMem {
+		return true, nil
+	}
+
+	reqID := "c_" + randString(16)
+	st, reqErr := m.requestJobStatus(hub, meta.ServerID, protocol.ServerMsg{
+		Type: "job_cancel",
+		JobCancel: &protocol.JobCancel{
+			ReqID: reqID,
+			JobID: meta.JobID,
+		},
+	}, reqID, 10*time.Second)
+
+	// 若是普通在途任务，服务端内存侧一并收敛。
+	m.mu.Lock()
+	job := m.jobs[meta.JobID]
+	m.mu.Unlock()
+	if job != nil {
+		job.finish(-1, "任务已取消", false)
+	}
+
+	if reqErr != nil && meta.Detach {
+		return false, reqErr
+	}
+	if st != nil && st.Found && !st.Canceled && !st.Running && st.Error != "任务已取消" {
+		// 在取消请求抵达前，任务已在目标机上自然结束。
+		m.syncDetachedAudit(meta.JobID, st)
+		return true, nil
+	}
+
+	nowMs := time.Now().UnixMilli()
+	var logBytes int64 = meta.LogBytes
+	if st != nil && st.TotalBytes > 0 {
+		logBytes = st.TotalBytes
+	}
+	_, _ = m.db.Exec(
+		`UPDATE exec_audit
+		    SET finished_at = CASE WHEN finished_at = 0 THEN ? ELSE finished_at END,
+		        canceled = 1,
+		        exit_code = CASE WHEN finished_at = 0 THEN -1 ELSE exit_code END,
+		        error = CASE WHEN error = '' THEN '任务已取消' ELSE error END,
+		        log_bytes = ?
+		  WHERE job_id = ?`,
+		nowMs, logBytes, meta.JobID,
+	)
+	return false, nil
+}
+
 func (m *execManager) auditStart(job *execJob, serverID, caller string, task protocol.ExecTask) error {
 	if _, err := m.db.Exec(
-		`INSERT INTO exec_audit(job_id, server_id, caller, cmd, dir, timeout, started_at) VALUES(?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO exec_audit(job_id, server_id, caller, cmd, dir, timeout, started_at, detach, unit)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		job.id, serverID, caller, task.Cmd, task.Dir, task.Timeout, job.started.UnixMilli(),
+		boolToInt(task.Detach), job.unit,
 	); err != nil {
 		log.Printf("写入执行审计失败，拒绝执行: %v", err)
 		return err
@@ -497,17 +794,21 @@ func (m *execManager) auditStart(job *execJob, serverID, caller string, task pro
 }
 
 func (m *execManager) auditFinish(jobID string, out ExecOutcome) {
+	canceled := out.Error == "任务已取消"
 	if _, err := m.db.Exec(
-		`UPDATE exec_audit SET finished_at = ?, exit_code = ?, error = ?, stdout = ?, stderr = ?, truncated = ?
-		 WHERE job_id = ?`,
+		`UPDATE exec_audit
+		    SET finished_at = ?, exit_code = ?, error = ?, stdout = ?, stderr = ?,
+		        truncated = ?, canceled = ?, log_bytes = ?
+		  WHERE job_id = ?`,
 		time.Now().UnixMilli(), out.ExitCode, out.Error,
-		clipForAudit(out.Stdout), clipForAudit(out.Stderr), boolToInt(out.Truncated), jobID,
+		clipForAudit(out.Stdout), clipForAudit(out.Stderr),
+		boolToInt(out.Truncated), boolToInt(canceled), len(out.Stdout)+len(out.Stderr), jobID,
 	); err != nil {
 		log.Printf("更新执行审计失败: %v", err)
 	}
 }
 
-// clipForAudit 截断入库文本，并显式标注截断，避免日后误读为「命令只输出了这些」。
+// clipForAudit 截断入库文本，并显式标注截断。
 func clipForAudit(s string) string {
 	if len(s) <= execAuditOutputCap {
 		return s

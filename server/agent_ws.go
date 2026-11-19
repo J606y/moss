@@ -12,7 +12,6 @@ import (
 )
 
 // taskAppliesTo 判断探测任务是否应用于指定服务器。
-// taskServerID 为空字符串表示「全部服务器」，否则为逗号分隔的服务器 ID 列表。
 func taskAppliesTo(taskServerID, serverID string) bool {
 	if taskServerID == "" {
 		return true
@@ -86,19 +85,12 @@ func (s *App) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 	s.hub.RegisterAgent(serverID, ac)
 	defer func() {
 		conn.Close()
-		// 只有这条连接仍是活跃连接时才收敛在途执行。
-		//
-		// OnAgentGone 按 serverID 扫全表，不区分任务是由哪条连接下发的。
-		// agent 抖动重连后，旧连接的 goroutine 才从 ReadJSON 醒来跑到这里，
-		// 此刻新连接早已在册、新的 exec 也可能刚下发——无条件调用会把它打成
-		// 「执行期间 agent 掉线」，而那条命令实际正在目标机上正常执行。
 		if s.hub.UnregisterAgent(serverID, ac) {
 			s.exec.OnAgentGone(serverID)
 		}
 		log.Printf("agent 已断开: %s", serverID)
 	}()
 
-	// 心跳：30s ping，60s 未读到任何数据判定断开
 	conn.SetReadLimit(64 << 10)
 	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	conn.SetPongHandler(func(string) error {
@@ -126,9 +118,6 @@ func (s *App) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// 采样间隔不再于连接建立时固定读取；HandleReport 每次上报时按需读取（带缓存），
-	// 后台改“采样间隔”后近实时生效。
-
 	for {
 		var msg protocol.AgentMsg
 		if err := conn.ReadJSON(&msg); err != nil {
@@ -142,8 +131,6 @@ func (s *App) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			info := msg.Info
-			// 优先用 agent 自测的公网 IP；某一族拿不到才用连接来源 IP 按地址族兜底
-			// （Docker/反代下来源 IP 往往是网桥网关，如 172.17.0.1）。
 			ipv4, ipv6 := info.IP, info.IPv6
 			if strings.Contains(ip, ":") {
 				if ipv6 == "" {
@@ -160,7 +147,6 @@ func (s *App) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 			); err != nil {
 				log.Printf("更新主机信息失败: %v", err)
 			}
-			// 自动国旗：仅在 agent 解析出国家码时更新，避免覆盖；手动设置的 flag 始终优先。
 			if info.CountryCode != "" {
 				if _, err := s.db.Exec(`UPDATE servers SET auto_flag=? WHERE id=?`, info.CountryCode, serverID); err != nil {
 					log.Printf("更新自动国旗失败: %v", err)
@@ -169,15 +155,12 @@ func (s *App) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 			s.hub.SetTotals(serverID, info.MemTotal, info.SwapTotal, info.DiskTotal)
 			s.hub.BroadcastMeta()
 			s.pushConfig(serverID)
-			// 升级的成功判据就在这里：agent 重连并上报版本号。
-			// 版本等于目标即成功；仍是旧版本说明 agent 侧守护已经回滚。
 			s.upgrade.OnRegister(serverID, info.AgentVersion)
 
 		case "report":
 			if msg.Stats == nil {
 				continue
 			}
-			// 第四参数已废弃（HandleReport 内部按需读取采样间隔），传 0 占位以维持签名稳定。
 			s.hub.HandleReport(serverID, msg.Stats, msg.UptimeSec, 0)
 
 		case "ping":
@@ -190,6 +173,9 @@ func (s *App) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 
 		case "exec_result":
 			s.exec.OnResult(serverID, msg.Exec)
+
+		case "job_status":
+			s.exec.OnJobStatus(serverID, msg.JobStatus)
 
 		case "upgrade_result":
 			s.upgrade.OnResult(serverID, msg.Upgrade)

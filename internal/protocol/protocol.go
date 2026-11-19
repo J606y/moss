@@ -45,17 +45,54 @@ type PingTask struct {
 // 执行任务的传输约束。WS 单条消息上限 64KB（见 server/agent_ws.go 的 SetReadLimit），
 // Data 经 JSON base64 编码后约膨胀 33%，故原始分片上限取 32KB 留足余量。
 const (
-	ExecChunkSize  = 32 << 10 // 单个分片的原始字节上限
-	ExecOutputCap  = 1 << 20  // 单次执行回传的总输出上限，超出即截断
-	ExecMaxTimeout = 30 * 60  // 单次执行允许的最长超时（秒）
+	ExecChunkSize            = 32 << 10     // 单个分片的原始字节上限
+	ExecOutputCap            = 1 << 20      // 单次流式执行回传的总输出上限，超出即截断
+	ExecMaxTimeout           = 30 * 60      // 普通执行允许的最长超时（30 分钟，秒）
+	ExecDetachDefaultTimeout = 60 * 60      // detach 后台托管模式的默认超时（1 小时，秒）
+	ExecDetachMaxTimeout     = 24 * 60 * 60 // detach 后台托管模式允许的最长超时（24 小时，秒）
 )
 
 // ExecTask server → agent 的命令执行任务。
 type ExecTask struct {
-	ID      string `json:"id"`      // 幂等 ID，agent 侧据此去重，重连后重复下发不会二次执行
-	Cmd     string `json:"cmd"`     // 完整命令，由 agent 交给平台默认 shell 执行
-	Dir     string `json:"dir"`     // 工作目录，留空则由 agent 取平台默认值
-	Timeout int    `json:"timeout"` // 硬超时（秒），到点 agent 强杀整个进程树
+	ID      string `json:"id"`               // 幂等 ID，agent 侧据此去重，重连后重复下发不会二次执行
+	Cmd     string `json:"cmd"`              // 完整命令，由 agent 交给平台默认 shell 执行
+	Dir     string `json:"dir"`              // 工作目录，留空则由 agent 取平台默认值
+	Timeout int    `json:"timeout"`          // 硬超时（秒），普通模式到点强杀进程树，detach 模式走 systemd RuntimeMaxSec
+	Detach  bool   `json:"detach,omitempty"` // true 表示后台托管模式（systemd-run --unit=moss-job-<id>，日志落盘无 1MB 上限）
+}
+
+// JobQuery server → agent 查询后台托管任务的运行状态与增量/尾部日志。
+//
+// 单次读取的原始字节数由 agent 侧收敛在 ExecChunkSize（32KB）以内，
+// 确保 base64 编码后不会触碰 WebSocket 单帧 64KB 上限。
+type JobQuery struct {
+	ReqID  string `json:"reqId"`            // 本次查询请求 ID，用于并发查询的响应匹配
+	JobID  string `json:"jobId"`            // 目标任务 ID
+	Offset int64  `json:"offset,omitempty"` // 起始字节偏移（>= 0）
+	Tail   int64  `json:"tail,omitempty"`   // 若 > 0，读取日志末尾 Tail 字节（优先于 Offset）
+	Limit  int    `json:"limit,omitempty"`  // 本次最多读取字节数；<0 表示仅查状态不读日志，0 表示取默认上限 ExecChunkSize
+}
+
+// JobCancel server → agent 终止正在执行的任务（含 detach 后台单元与普通在途进程树）。
+type JobCancel struct {
+	ReqID string `json:"reqId"`
+	JobID string `json:"jobId"`
+}
+
+// JobStatus agent → server 的后台任务状态与日志切片回执（响应 JobQuery 或 JobCancel）。
+type JobStatus struct {
+	ReqID      string `json:"reqId"`
+	JobID      string `json:"jobId"`
+	Unit       string `json:"unit,omitempty"`
+	Found      bool   `json:"found"`
+	Running    bool   `json:"running"`
+	Canceled   bool   `json:"canceled,omitempty"`
+	ExitCode   int    `json:"exitCode"`
+	Error      string `json:"error,omitempty"`
+	Data       []byte `json:"data,omitempty"` // 本次读出的日志片段
+	Offset     int64  `json:"offset"`         // Data 对应的起始字节偏移
+	NextOffset int64  `json:"nextOffset"`     // Data 之后的下一个字节偏移（offset + len(data)）
+	TotalBytes int64  `json:"totalBytes"`     // 当前磁盘日志总字节数
 }
 
 // WriteTask server → agent 的文件写入任务。
@@ -125,6 +162,7 @@ type UpgradeResult struct {
 
 // ExecResult agent → server 的执行输出分片。
 // 输出流式回传：同一个 ID 会产生多条 Seq 递增的分片，最后一条 Done=true 且携带退出码。
+// 当 Detach=true 时，agent 用 systemd-run 拉起后台服务后立刻回传一条 Done=true, Detached=true 的确认消息。
 type ExecResult struct {
 	ID     string `json:"id"`
 	Seq    int    `json:"seq"`              // 分片序号，从 0 递增，供 server 侧排序重组
@@ -134,7 +172,9 @@ type ExecResult struct {
 	// []byte 走 base64 可原样往返。
 	Data []byte `json:"data,omitempty"`
 
-	Done      bool   `json:"done"`                // true 表示本次执行结束，此后不再有分片
+	Done      bool   `json:"done"`                // true 表示本次执行结束（或 detach 任务已启动/启动失败）
+	Detached  bool   `json:"detached,omitempty"`  // true 表示 detach 任务已由 systemd-run 成功拉起并在后台独立运行
+	Unit      string `json:"unit,omitempty"`      // detach 模式的 systemd 单元名（如 moss-job-<id>.service）
 	ExitCode  int    `json:"exitCode,omitempty"`  // 仅 Done=true 且 Error 为空时有效
 	Error     string `json:"error,omitempty"`     // 非空表示未能正常执行（拒绝/超时/启动失败）
 	Truncated bool   `json:"truncated,omitempty"` // 输出触顶 ExecOutputCap 被截断
@@ -142,24 +182,27 @@ type ExecResult struct {
 
 // AgentMsg agent → server。
 type AgentMsg struct {
-	Type      string     `json:"type"` // register / report / ping / exec_result / upgrade_result
+	Type      string     `json:"type"` // register / report / ping / exec_result / upgrade_result / job_status
 	Info      *AgentInfo `json:"info,omitempty"`
 	Stats     *Stats     `json:"stats,omitempty"`
 	UptimeSec uint64     `json:"uptimeSec,omitempty"`
 	TaskID    int64      `json:"taskId,omitempty"`
 	Ms        int        `json:"ms"` // -1 表示探测失败/丢包；agent 将 <1ms 记为 1ms，故 0 不会出现
 
-	Exec    *ExecResult    `json:"exec,omitempty"`
-	Upgrade *UpgradeResult `json:"upgrade,omitempty"`
+	Exec      *ExecResult    `json:"exec,omitempty"`
+	Upgrade   *UpgradeResult `json:"upgrade,omitempty"`
+	JobStatus *JobStatus     `json:"jobStatus,omitempty"`
 }
 
 // ServerMsg server → agent。
 type ServerMsg struct {
-	Type     string     `json:"type"` // config / exec / write / upgrade
+	Type     string     `json:"type"` // config / exec / write / upgrade / job_query / job_cancel
 	Interval int        `json:"interval,omitempty"`
 	Tasks    []PingTask `json:"tasks,omitempty"`
 
-	Exec    *ExecTask    `json:"exec,omitempty"`
-	Write   *WriteTask   `json:"write,omitempty"`
-	Upgrade *UpgradeTask `json:"upgrade,omitempty"`
+	Exec      *ExecTask    `json:"exec,omitempty"`
+	Write     *WriteTask   `json:"write,omitempty"`
+	Upgrade   *UpgradeTask `json:"upgrade,omitempty"`
+	JobQuery  *JobQuery    `json:"jobQuery,omitempty"`
+	JobCancel *JobCancel   `json:"jobCancel,omitempty"`
 }

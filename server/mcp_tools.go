@@ -18,9 +18,6 @@ import (
 )
 
 // mcpTools 返回工具清单。编译期固定，故 capabilities 里不声明 listChanged。
-//
-// 说明文字是写给模型看的，不是写给人看的：要讲清楚什么时候用、
-// 返回什么、有什么坑，模型才不会拿错工具或反复试错。
 func mcpTools() []mcpTool {
 	return []mcpTool{
 		{
@@ -112,6 +109,8 @@ func mcpTools() []mcpTool {
 			Name:  "exec",
 			Title: "执行命令",
 			Description: "在指定服务器上执行 shell 命令。异步：立即返回 jobId，需用 get_result 轮询取回输出。" +
+				"长耗时任务（系统大包更新、dpkg 解压、编译构建等）请设 detach=true：agent 将用 systemd-run --unit=moss-job-<id> 拉起独立后台服务并立即返回，" +
+				"任务脱离 agent 运行，日志直接落盘（无 1MB 上限），超时由 RuntimeMaxSec 控制（最高 24 小时），退出码写入状态文件；Windows 暂不支持 detach。" +
 				"破坏性命令（删根目录、格式化磁盘、关机、停用 moss agent 等）会被服务端拦截并记入审计。" +
 				"执行前务必确认 server_id 是对的；生产环境的破坏性变更应先向人确认。",
 			InputSchema: map[string]any{
@@ -131,15 +130,18 @@ func mcpTools() []mcpTool {
 					},
 					"timeout": map[string]any{
 						"type":        "integer",
-						"description": "硬超时（秒），默认 60，最大 1800。到点后 agent 强杀整个进程树",
+						"description": "硬超时（秒）。默认模式下默认 60、最大 1800，到点后 agent 强杀进程树；detach=true 时默认 3600（1 小时）、最大 86400（24 小时），由 systemd RuntimeMaxSec 控制",
+					},
+					"detach": map[string]any{
+						"type":        "boolean",
+						"description": "true 表示启用后台托管模式（systemd-run --unit=moss-job-<id>）：任务脱离 agent 独立运行，日志写磁盘无 1MB 上限，超时上限放宽到 24 小时（Windows 暂不支持）。默认 false",
 					},
 				},
 				"required":             []string{"server_id", "cmd"},
 				"additionalProperties": false,
 			},
 			Annotations: &mcpToolAnnotations{
-				Title: "执行命令",
-				// 任意命令，可能造成破坏且不幂等，如实标注让客户端有机会提示用户。
+				Title:           "执行命令",
 				ReadOnlyHint:    boolPtr(false),
 				DestructiveHint: boolPtr(true),
 				IdempotentHint:  boolPtr(false),
@@ -149,8 +151,9 @@ func mcpTools() []mcpTool {
 		{
 			Name:  "get_result",
 			Title: "取回执行结果",
-			Description: "用 exec 返回的 jobId 取回执行结果。running 为 true 表示仍在执行，稍后重试。" +
-				"结果保留 30 分钟。输出超过 1MB 会被截断并标注。",
+			Description: "用 exec 返回的 jobId 取回执行结果与日志。running 为 true 表示仍在执行，稍后重试。" +
+				"支持 offset（按字节偏移增量追读新增日志，配合返回的 nextOffset 分段流式读取）和 tail（直接读取日志末尾 N KB）。" +
+				"普通任务结果在内存保留 30 分钟（输出上限 1MB）；detach=true 的后台托管任务日志落盘无 1MB 上限，且元数据存数据库，不受 30 分钟 TTL 和服务重启影响。",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -158,12 +161,73 @@ func mcpTools() []mcpTool {
 						"type":        "string",
 						"description": "exec 返回的 jobId",
 					},
+					"offset": map[string]any{
+						"type":        "integer",
+						"description": "从指定字节偏移量开始读取增量日志（默认 0）。可传入上次 get_result 返回的 nextOffset 实现分段追读",
+					},
+					"tail": map[string]any{
+						"type":        "integer",
+						"description": "直接读取日志末尾的 N KB（例如 16 表示读取末尾 16KB）。设置大于 0 时优先于 offset",
+					},
 				},
 				"required":             []string{"job_id"},
 				"additionalProperties": false,
 			},
 			Annotations: &mcpToolAnnotations{
 				Title:           "取回执行结果",
+				ReadOnlyHint:    boolPtr(true),
+				DestructiveHint: boolPtr(false),
+				IdempotentHint:  boolPtr(true),
+				OpenWorldHint:   boolPtr(false),
+			},
+		},
+		{
+			Name:  "cancel",
+			Title: "取消执行任务",
+			Description: "终止正在运行的命令任务（支持 detach 后台托管任务与普通异步任务），并将取消状态持久化到数据库。",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"job_id": map[string]any{
+						"type":        "string",
+						"description": "要取消的任务 jobId（来自 exec 或 list_jobs）",
+					},
+				},
+				"required":             []string{"job_id"},
+				"additionalProperties": false,
+			},
+			Annotations: &mcpToolAnnotations{
+				Title:           "取消执行任务",
+				ReadOnlyHint:    boolPtr(false),
+				DestructiveHint: boolPtr(true),
+				IdempotentHint:  boolPtr(true),
+				OpenWorldHint:   boolPtr(false),
+			},
+		},
+		{
+			Name:  "list_jobs",
+			Title: "列出执行任务",
+			Description: "列出命令执行任务（含 detach 后台长任务与普通异步任务）。任务元数据存于数据库，不受 30 分钟内存 TTL 和服务端重启影响；跨会话或重启后可用本工具找回在途或已完成的任务。",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"server_id": map[string]any{
+						"type":        "string",
+						"description": "按目标服务器 id 筛选；留空则列出当前 Key 有权访问的所有服务器上的任务",
+					},
+					"running_only": map[string]any{
+						"type":        "boolean",
+						"description": "true 表示仅列出仍在运行中的任务，默认 false",
+					},
+					"limit": map[string]any{
+						"type":        "integer",
+						"description": "返回条数上限，默认 20，最大 100",
+					},
+				},
+				"additionalProperties": false,
+			},
+			Annotations: &mcpToolAnnotations{
+				Title:           "列出执行任务",
 				ReadOnlyHint:    boolPtr(true),
 				DestructiveHint: boolPtr(false),
 				IdempotentHint:  boolPtr(true),
@@ -208,8 +272,7 @@ func mcpTools() []mcpTool {
 				"additionalProperties": false,
 			},
 			Annotations: &mcpToolAnnotations{
-				Title: "写入文件",
-				// 覆盖既有文件属于破坏性操作；同样的内容重复写结果一致，故幂等。
+				Title:           "写入文件",
 				ReadOnlyHint:    boolPtr(false),
 				DestructiveHint: boolPtr(true),
 				IdempotentHint:  boolPtr(true),
@@ -220,10 +283,6 @@ func mcpTools() []mcpTool {
 }
 
 // mcpCallTool 分发工具调用。
-//
-// 返回值一律是 jsonrpcResponse 包着 mcpCallToolResult：
-// 工具层面的失败（越权、拦截、掉线、非零退出码）走 isError=true 让模型看见并自我纠正，
-// 只有「工具不存在」才用 JSON-RPC error——这是规范的明确要求。
 func (s *App) mcpCallTool(r *http.Request, key *apiKey, id json.RawMessage, p mcpCallToolParams) jsonrpcResponse {
 	switch p.Name {
 	case "list_servers":
@@ -236,6 +295,10 @@ func (s *App) mcpCallTool(r *http.Request, key *apiKey, id json.RawMessage, p mc
 		return rpcResult(id, s.toolExec(key, p.Arguments))
 	case "get_result":
 		return rpcResult(id, s.toolGetResult(key, p.Arguments))
+	case "cancel":
+		return rpcResult(id, s.toolCancel(key, p.Arguments))
+	case "list_jobs":
+		return rpcResult(id, s.toolListJobs(key, p.Arguments))
 	case "write_file":
 		return rpcResult(id, s.toolWriteFile(r, key, p.Arguments))
 	default:
@@ -243,9 +306,6 @@ func (s *App) mcpCallTool(r *http.Request, key *apiKey, id json.RawMessage, p mc
 	}
 }
 
-// jsonResult 把结构化数据同时放进 structuredContent 与 text 块。
-// 规范建议：返回结构化内容时也应把序列化后的 JSON 放进一个 text 块，
-// 以兼容尚未支持 structuredContent 的客户端。
 func jsonResult(v any) mcpCallToolResult {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -254,7 +314,6 @@ func jsonResult(v any) mcpCallToolResult {
 	return mcpCallToolResult{Content: mcpText(string(b)), StructuredContent: v}
 }
 
-// requireCap 校验能力集（闸 1 的前半）。
 func requireCap(key *apiKey, cap string) *mcpCallToolResult {
 	if !key.has(cap) {
 		f := toolFailure(fmt.Sprintf("当前 Key 缺少 %q 能力，无法执行此操作。请让管理员在 moss 后台调整 Key 权限。", cap))
@@ -263,7 +322,6 @@ func requireCap(key *apiKey, cap string) *mcpCallToolResult {
 	return nil
 }
 
-// resolveTarget 校验机器作用域（闸 1 的后半）并确认服务器存在。
 func (s *App) resolveTarget(key *apiKey, serverID string) (string, *mcpCallToolResult) {
 	serverID = strings.TrimSpace(serverID)
 	if serverID == "" {
@@ -271,7 +329,6 @@ func (s *App) resolveTarget(key *apiKey, serverID string) (string, *mcpCallToolR
 		return "", &f
 	}
 	if !key.canAccess(serverID) {
-		// 措辞明确告诉模型这是权限问题而非 ID 写错，避免它反复重试。
 		f := toolFailure("当前 Key 未被授权访问服务器 " + serverID + "。这是权限限制，重试不会成功；可调用 list_servers 查看有权访问的机器。")
 		return "", &f
 	}
@@ -286,20 +343,17 @@ func (s *App) resolveTarget(key *apiKey, serverID string) (string, *mcpCallToolR
 /* ---------- list_servers ---------- */
 
 type mcpServerInfo struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Group    string `json:"group"`
-	Online   bool   `json:"online"`
-	OS       string `json:"os,omitempty"`
-	Arch     string `json:"arch,omitempty"`
-	CPUCores int    `json:"cpuCores,omitempty"`
-	MemTotal uint64 `json:"memTotalBytes,omitempty"`
-	DiskGB   uint64 `json:"diskTotalBytes,omitempty"`
-	IP       string `json:"ip,omitempty"`
-	Note     string `json:"note,omitempty"`
-	// AgentVersion 必须返回给模型：agent 版本过低时 exec / write_file 的消息会被
-	// 旧 agent 静默丢弃（agent/main.go 的 switch 无 default 分支），症状只是干等到
-	// 超时，没有任何"版本过低"的提示。没有这个字段，模型只能靠超时时长反推。
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Group        string `json:"group"`
+	Online       bool   `json:"online"`
+	OS           string `json:"os,omitempty"`
+	Arch         string `json:"arch,omitempty"`
+	CPUCores     int    `json:"cpuCores,omitempty"`
+	MemTotal     uint64 `json:"memTotalBytes,omitempty"`
+	DiskGB       uint64 `json:"diskTotalBytes,omitempty"`
+	IP           string `json:"ip,omitempty"`
+	Note         string `json:"note,omitempty"`
 	AgentVersion string `json:"agentVersion,omitempty"`
 }
 
@@ -321,8 +375,6 @@ func (s *App) toolListServers(key *apiKey) mcpCallToolResult {
 			&it.CPUCores, &it.MemTotal, &it.DiskGB, &it.IP, &it.Note, &it.AgentVersion); err != nil {
 			return toolFailure("读取服务器列表失败: " + err.Error())
 		}
-		// 只返回这把 Key 有权访问的机器：让模型看见它碰不到的机器毫无意义，
-		// 只会诱导它去尝试越权操作。
 		if !key.canAccess(it.ID) {
 			continue
 		}
@@ -378,16 +430,12 @@ func (s *App) toolGetMetrics(key *apiKey, raw json.RawMessage) mcpCallToolResult
 
 /* ---------- get_history ---------- */
 
-// historyMetric 把一个指标的三种写法钉在一起：入参名沿用数据库列的 snake_case
-// （模型看 schema 就能猜对），输出键统一 camelCase 以对齐项目其余 JSON。
 type historyMetric struct {
 	arg string
 	col string
 	key string
 }
 
-// 顺序即输出顺序，也是校验入参用的白名单——col 直接拼进 SQL，
-// 只能取自这张表，绝不能让入参字符串落到 SQL 里。
 var historyMetricList = []historyMetric{
 	{"cpu", "cpu", "cpu"},
 	{"mem", "mem", "mem"},
@@ -400,12 +448,8 @@ var historyMetricList = []historyMetric{
 	{"processes", "processes", "processes"},
 }
 
-// 默认只给这三条：模型要的是「哪台机器什么时候开始变坏」，
-// 一次把九条曲线全塞回去只会把它真正需要的上下文挤掉。
 var historyDefaultMetrics = []string{"cpu", "mem", "disk"}
 
-// historyMaxPoints 是单条曲线的返回点数上限。
-// 采样间隔默认 10 秒，一小时就是 360 点、一天 8640 点，不降采样必然撑爆模型上下文。
 const historyMaxPoints = 120
 
 type historySummary struct {
@@ -443,8 +487,6 @@ func (s *App) toolGetHistory(key *apiKey, raw json.RawMessage) mcpCallToolResult
 	if hours < 1 {
 		hours = 1
 	}
-	// 保留期之外的数据早被 cleanupLoop 删了，放行只会让模型误以为「那段真的没事」。
-	// 收敛而不是报错：它要的是曲线，给到手里能拿到的最长一段更有用。
 	maxHours := getSettingInt(s.db, keyHistoryDays, 7) * 24
 	if hours > maxHours {
 		notes = append(notes, fmt.Sprintf("hours 超出历史保留期，已收敛为 %d 小时（history_days=%d 天）。",
@@ -472,8 +514,6 @@ func (s *App) toolGetHistory(key *apiKey, raw json.RawMessage) mcpCallToolResult
 		}
 	}
 	if len(times) == 0 {
-		// 空窗口不是错误：机器刚接入、长期离线、或数据已过保留期都会走到这里，
-		// 报 isError 会诱导模型反复重试同一个必然为空的查询。
 		notes = append(notes, "该时间窗内没有历史数据。可能是机器刚接入、长时间离线，或数据已超出保留期；换更大的 hours 再看一次即可判断，不必重复用相同参数重试。")
 	}
 
@@ -495,8 +535,6 @@ func (s *App) toolGetHistory(key *apiKey, raw json.RawMessage) mcpCallToolResult
 	return jsonResult(res)
 }
 
-// pickHistoryMetrics 把入参指标名解析成白名单条目，顺序按 historyMetricList 归一化。
-// 未知指标直接报错而不是静默忽略：静默会让模型以为自己拿到了那条曲线。
 func pickHistoryMetrics(want []string) ([]historyMetric, error) {
 	if len(want) == 0 {
 		want = historyDefaultMetrics
@@ -529,29 +567,20 @@ func pickHistoryMetrics(want []string) ([]historyMetric, error) {
 	return sel, nil
 }
 
-// historyBucketSeconds 选出能把点数压进上限的最小「整」粒度。
-//
-// 取整值（30s/60s/5min…）而不是 跨度÷120 的余数粒度，是为了让模型一眼看懂分辨率。
-// 判据用严格大于：桶宽恰好等于 跨度÷120 时，落在区间末端的那一行会算出第 120 个桶号，
-// 点数就会变成 121 而破掉上限。
 func historyBucketSeconds(rangeSec int64) int64 {
 	for _, b := range []int64{10, 15, 20, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400, 21600, 43200, 86400} {
 		if b*historyMaxPoints > rangeSec {
 			return b
 		}
 	}
-	return rangeSec/historyMaxPoints + 1 // 跨度超过 120 天时的兜底，同样保证严格大于
+	return rangeSec/historyMaxPoints + 1
 }
 
-// queryHistory 在 SQL 里按等距时间桶聚合，避免把上万原始行捞进内存再算。
-// 桶号以 sinceMs 为原点而非 epoch：epoch 对齐会让首尾各多出半个桶，点数不可控。
 func (s *App) queryHistory(serverID string, sel []historyMetric, sinceMs, untilMs, bucketMs int64) ([]int64, [][]float64, error) {
 	cols := make([]string, len(sel))
 	for i, m := range sel {
 		cols[i] = "AVG(" + m.col + ")"
 	}
-	// time <= untilMs 不能省：agent 时钟快了会写入未来时间戳，那种行的桶号会越界，
-	// 一行脏数据就能把返回点数顶破上限。
 	rows, err := s.db.Query(
 		`SELECT CAST(AVG(time) AS INTEGER), `+strings.Join(cols, ", ")+
 			` FROM history WHERE server_id = ? AND time >= ? AND time <= ?
@@ -589,7 +618,6 @@ func (s *App) queryHistory(serverID string, sel []historyMetric, sinceMs, untilM
 	return times, series, nil
 }
 
-// summarize 出摘要。模型多数时候看完摘要就能下判断，逐点读曲线是浪费 token。
 func summarize(v []float64) historySummary {
 	out := historySummary{Min: v[0], Max: v[0], First: v[0], Last: v[len(v)-1]}
 	sum := 0.0
@@ -607,10 +635,6 @@ func summarize(v []float64) historySummary {
 	return out
 }
 
-// trendOf 用首尾各 1/4 段的均值比较判断走向。
-// 取段均值而不是首尾两个点：单点受毛刺影响太大，一次采样抖动就能翻转结论。
-// 阈值取相对值而非绝对值：绝对差 5 对百分比是明显变化，对字节每秒则毫无意义。
-// 基准取首尾两段中较大的一个，避免起点为 0（机器刚起来）时除零。
 func trendOf(v []float64) string {
 	q := len(v) / 4
 	if q < 1 {
@@ -648,6 +672,7 @@ func (s *App) toolExec(key *apiKey, raw json.RawMessage) mcpCallToolResult {
 		Cmd      string `json:"cmd"`
 		Dir      string `json:"dir"`
 		Timeout  int    `json:"timeout"`
+		Detach   bool   `json:"detach"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return toolFailure("参数解析失败: " + err.Error())
@@ -660,13 +685,16 @@ func (s *App) toolExec(key *apiKey, raw json.RawMessage) mcpCallToolResult {
 		return *f
 	}
 
-	jobID, err := s.exec.Start(s.hub, serverID, s.callerLabel(key), protocol.ExecTask{
+	task := protocol.ExecTask{
 		Cmd:     args.Cmd,
 		Dir:     args.Dir,
 		Timeout: args.Timeout,
-	})
+		Detach:  args.Detach,
+	}
+	normalizeTaskTimeout(&task)
+
+	jobID, err := s.exec.Start(s.hub, serverID, s.callerLabel(key), task)
 	if err != nil {
-		// 拦截与掉线都在这里落地。带上 jobId：调用方仍可用 get_result 看到完整原因。
 		msg := err.Error()
 		if errors.Is(err, errExecBlocked) {
 			if out, _, _, ok := s.exec.Result(jobID); ok && out.Error != "" {
@@ -676,65 +704,192 @@ func (s *App) toolExec(key *apiKey, raw json.RawMessage) mcpCallToolResult {
 		}
 		return toolFailure(msg)
 	}
-	return jsonResult(map[string]any{
-		"jobId":  jobID,
-		"status": "running",
-		"hint":   "用 get_result 并传入此 jobId 取回输出；命令仍在执行时 running 为 true，稍后重试即可。",
-	})
+	res := map[string]any{
+		"jobId":   jobID,
+		"status":  "running",
+		"timeout": task.Timeout,
+		"hint":    "用 get_result 并传入此 jobId 取回输出；命令仍在执行时 running 为 true，稍后重试即可。",
+	}
+	if args.Detach {
+		res["detached"] = true
+		res["unit"] = sanitizeUnitName(jobID)
+		res["hint"] = "任务已通过 systemd-run 在后台托管运行；可用 get_result（支持 offset 增量追读或 tail 查看末尾 N KB）轮询输出，或用 cancel 终止任务。"
+	}
+	return jsonResult(res)
 }
 
 /* ---------- get_result ---------- */
 
-// getResultFromAudit 在内存里查不到 jobID 时回退查审计表。
-//
-// jobs 与 finished 都是纯内存，服务端一重启就全部归零；而 exec_audit 里明明
-// 有这条记录。此前一律回「jobId 有误，或结果已超过 30 分钟保留期」，
-// 等于把「服务端重启过」说成「你参数写错了」，会让模型往完全错误的方向排查，
-// 甚至把一条非幂等的命令重跑一遍。
-//
-// 审计里的输出被截到 32KB（内存留全量、审计留摘要），所以要明确告知这是
-// 降级结果，别让调用方把截断后的日志当成完整输出。
-func (s *App) getResultFromAudit(key *apiKey, jobID string) mcpCallToolResult {
-	var (
-		serverID   string
-		exitCode   int
-		errMsg     string
-		stdout     string
-		stderr     string
-		truncated  int
-		startedAt  int64
-		finishedAt int64
-	)
-	err := s.db.QueryRow(
-		`SELECT server_id, exit_code, error, stdout, stderr, truncated, started_at, finished_at
-		   FROM exec_audit WHERE job_id = ?`, jobID).
-		Scan(&serverID, &exitCode, &errMsg, &stdout, &stderr, &truncated, &startedAt, &finishedAt)
+// sliceTextByOffsetTail 对内存/审计中的文本按 offset 或 tailKB 切片，保持与 detach 磁盘切片一致的语义。
+func sliceTextByOffsetTail(s string, offset, tailKB int64) (sliced string, actualOffset, nextOffset, totalBytes int64) {
+	totalBytes = int64(len(s))
+	start := offset
+	if tailKB > 0 {
+		start = totalBytes - tailKB*1024
+	}
+	if start < 0 {
+		start = 0
+	}
+	if start > totalBytes {
+		start = totalBytes
+	}
+	return s[start:], start, totalBytes, totalBytes
+}
+
+// getResultFromAudit 在内存里查不到 jobID 时回退查数据库（支持 detach 后台任务的实时日志拉取）。
+func (s *App) getResultFromAudit(key *apiKey, jobID string, offset, tailKB int64) mcpCallToolResult {
+	meta, err := s.exec.lookupAuditJob(jobID)
 	if err != nil {
 		return toolFailure("找不到任务 " + jobID + "：jobId 有误，或记录已被审计清理策略删除。")
 	}
-	// 审计表这条路同样要过机器作用域闸，不能因为走了降级分支就放行。
-	if _, f := s.resolveTarget(key, serverID); f != nil {
+	if _, f := s.resolveTarget(key, meta.ServerID); f != nil {
 		return *f
 	}
-	if finishedAt == 0 {
+
+	if meta.Detach {
+		return s.getDetachedResult(meta, offset, tailKB)
+	}
+
+	if meta.FinishedAt == 0 {
 		return toolFailure("任务 " + jobID + " 的结果已随服务端重启丢失，且它当时尚未执行完。" +
 			"命令可能仍在目标机上运行过——重跑前请先确认它是否幂等。")
 	}
+	slicedOut, actualOffset, nextOffset, totalBytes := sliceTextByOffsetTail(meta.Stdout, offset, tailKB)
 	res := map[string]any{
 		"jobId":      jobID,
 		"running":    false,
-		"exitCode":   exitCode,
-		"stdout":     stdout,
-		"stderr":     stderr,
-		"durationMs": finishedAt - startedAt,
+		"exitCode":   meta.ExitCode,
+		"stdout":     slicedOut,
+		"stderr":     meta.Stderr,
+		"offset":     actualOffset,
+		"nextOffset": nextOffset,
+		"totalBytes": totalBytes,
+		"durationMs": meta.FinishedAt - meta.StartedAt,
 		"source":     "audit",
 		"sourceNote": "内存结果已随服务端重启丢失，这份取自审计表：输出被截断到 32KB，可能不完整。",
 	}
-	if truncated != 0 {
+	if meta.Truncated {
 		res["truncated"] = true
 	}
-	if errMsg != "" {
-		res["error"] = errMsg
+	if meta.Error != "" {
+		res["error"] = meta.Error
+	}
+	return jsonResult(res)
+}
+
+func (s *App) getDetachedResult(meta *auditJobMeta, offset, tailKB int64) mcpCallToolResult {
+	if meta.FinishedAt > 0 && meta.Error != "" && meta.LogBytes == 0 && meta.Stdout == "" {
+		res := map[string]any{
+			"jobId":      meta.JobID,
+			"running":    false,
+			"detached":   true,
+			"exitCode":   meta.ExitCode,
+			"error":      meta.Error,
+			"stdout":     "",
+			"stderr":     "",
+			"offset":     int64(0),
+			"nextOffset": int64(0),
+			"totalBytes": int64(0),
+			"durationMs": meta.FinishedAt - meta.StartedAt,
+		}
+		return mcpCallToolResult{
+			Content:           mcpText(mustJSON(res)),
+			StructuredContent: res,
+			IsError:           true,
+		}
+	}
+
+	st, err := s.exec.QueryDetached(s.hub, meta.ServerID, meta.JobID, offset, tailKB)
+	if err != nil {
+		if meta.FinishedAt > 0 {
+			slicedOut, actualOffset, nextOffset, totalBytes := sliceTextByOffsetTail(meta.Stdout, offset, tailKB)
+			res := map[string]any{
+				"jobId":      meta.JobID,
+				"running":    false,
+				"detached":   true,
+				"unit":       meta.Unit,
+				"exitCode":   meta.ExitCode,
+				"stdout":     slicedOut,
+				"stderr":     meta.Stderr,
+				"offset":     actualOffset,
+				"nextOffset": nextOffset,
+				"totalBytes": totalBytes,
+				"durationMs": meta.FinishedAt - meta.StartedAt,
+				"source":     "audit",
+				"sourceNote": "目标机当前离线，无法读取完整磁盘日志，这份取自数据库审计摘要。",
+			}
+			if meta.Error != "" {
+				res["error"] = meta.Error
+			}
+			return jsonResult(res)
+		}
+		return toolFailure(fmt.Sprintf("读取后台任务 %s 状态失败: %v（后台任务仍在目标机 systemd 中独立运行，待 agent 在线后可继续查询）", meta.JobID, err))
+	}
+
+	if !st.Found {
+		if meta.FinishedAt > 0 {
+			slicedOut, actualOffset, nextOffset, totalBytes := sliceTextByOffsetTail(meta.Stdout, offset, tailKB)
+			res := map[string]any{
+				"jobId":      meta.JobID,
+				"running":    false,
+				"detached":   true,
+				"unit":       meta.Unit,
+				"exitCode":   meta.ExitCode,
+				"stdout":     slicedOut,
+				"stderr":     meta.Stderr,
+				"offset":     actualOffset,
+				"nextOffset": nextOffset,
+				"totalBytes": totalBytes,
+				"durationMs": meta.FinishedAt - meta.StartedAt,
+				"source":     "audit",
+			}
+			if meta.Error != "" {
+				res["error"] = meta.Error
+			}
+			return jsonResult(res)
+		}
+		return toolFailure("目标机上找不到后台任务 " + meta.JobID + " 的磁盘日志记录。")
+	}
+
+	endMs := time.Now().UnixMilli()
+	if !st.Running && meta.FinishedAt > 0 {
+		endMs = meta.FinishedAt
+	}
+	res := map[string]any{
+		"jobId":      meta.JobID,
+		"running":    st.Running,
+		"detached":   true,
+		"unit":       st.Unit,
+		"exitCode":   st.ExitCode,
+		"stdout":     string(st.Data),
+		"stderr":     "",
+		"offset":     st.Offset,
+		"nextOffset": st.NextOffset,
+		"totalBytes": st.TotalBytes,
+		"hasMore":    st.NextOffset < st.TotalBytes,
+		"durationMs": endMs - meta.StartedAt,
+	}
+	if st.Canceled {
+		res["canceled"] = true
+	}
+	if st.Running {
+		res["hint"] = "后台任务仍在运行；下次调用 get_result 传入 offset=nextOffset 可继续追读新增日志，或传 tail 查看末尾 N KB。"
+		return jsonResult(res)
+	}
+	if st.Error != "" {
+		res["error"] = st.Error
+		return mcpCallToolResult{
+			Content:           mcpText(mustJSON(res)),
+			StructuredContent: res,
+			IsError:           true,
+		}
+	}
+	if st.ExitCode != 0 {
+		return mcpCallToolResult{
+			Content:           mcpText(mustJSON(res)),
+			StructuredContent: res,
+			IsError:           true,
+		}
 	}
 	return jsonResult(res)
 }
@@ -744,7 +899,9 @@ func (s *App) toolGetResult(key *apiKey, raw json.RawMessage) mcpCallToolResult 
 		return *f
 	}
 	var args struct {
-		JobID string `json:"job_id"`
+		JobID  string `json:"job_id"`
+		Offset int64  `json:"offset"`
+		Tail   int64  `json:"tail"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return toolFailure("参数解析失败: " + err.Error())
@@ -753,39 +910,47 @@ func (s *App) toolGetResult(key *apiKey, raw json.RawMessage) mcpCallToolResult 
 		return toolFailure("job_id 不能为空")
 	}
 
+	if meta, err := s.exec.lookupAuditJob(args.JobID); err == nil && meta.Detach {
+		if _, f := s.resolveTarget(key, meta.ServerID); f != nil {
+			return *f
+		}
+		return s.getDetachedResult(meta, args.Offset, args.Tail)
+	}
+
 	out, serverID, running, found := s.exec.Result(args.JobID)
 	if !found {
-		// 查不到时回退查审计表，把两种完全不同的情况区分开。
-		//
-		// jobs/finished 都是纯内存：服务端一重启，在途任务与已完成结果一并归零，
-		// 而 exec_audit 里明明有这条记录（含 32KB 截断输出）。此前一律回
-		// 「jobId 有误」，等于把「服务端重启过」说成「你参数写错了」，
-		// 会让模型往完全错误的方向排查。
-		return s.getResultFromAudit(key, args.JobID)
+		return s.getResultFromAudit(key, args.JobID, args.Offset, args.Tail)
 	}
-	// 闸 1 的后半：机器作用域。get_result 曾是六个工具里唯一漏掉这道闸的，
-	// 任何持 exec 能力的 Key 都能读到别的机器上的完整 stdout。
 	if _, f := s.resolveTarget(key, serverID); f != nil {
 		return *f
 	}
+	slicedOut, actualOffset, nextOffset, totalBytes := sliceTextByOffsetTail(out.Stdout, args.Offset, args.Tail)
 	if running {
-		return jsonResult(map[string]any{
-			"jobId":   args.JobID,
-			"running": true,
-			"hint":    "命令仍在执行，稍后再次调用本工具。",
-		})
+		res := map[string]any{
+			"jobId":      args.JobID,
+			"running":    true,
+			"stdout":     slicedOut,
+			"offset":     actualOffset,
+			"nextOffset": nextOffset,
+			"totalBytes": totalBytes,
+			"hint":       "命令仍在执行，稍后再次调用本工具（可传入 offset=nextOffset 增量读取）。",
+		}
+		return jsonResult(res)
 	}
 	res := map[string]any{
 		"jobId":      out.JobID,
 		"running":    false,
 		"exitCode":   out.ExitCode,
-		"stdout":     out.Stdout,
+		"stdout":     slicedOut,
 		"stderr":     out.Stderr,
+		"offset":     actualOffset,
+		"nextOffset": nextOffset,
+		"totalBytes": totalBytes,
 		"durationMs": out.DurationMs,
 	}
 	if out.Truncated {
 		res["truncated"] = true
-		res["truncatedNote"] = "输出触顶 1MB 已截断，如需完整内容请缩小命令的输出范围后重跑。"
+		res["truncatedNote"] = "输出触顶 1MB 已截断，如需完整内容请改用 detach=true 后台托管模式或缩小输出范围。"
 	}
 	if out.Error != "" {
 		res["error"] = out.Error
@@ -795,7 +960,6 @@ func (s *App) toolGetResult(key *apiKey, raw json.RawMessage) mcpCallToolResult 
 			IsError:           true,
 		}
 	}
-	// 退出码非零不算工具故障，但要让模型明确看到失败，否则它会以为命令成功了。
 	if out.ExitCode != 0 {
 		return mcpCallToolResult{
 			Content:           mcpText(mustJSON(res)),
@@ -804,6 +968,255 @@ func (s *App) toolGetResult(key *apiKey, raw json.RawMessage) mcpCallToolResult 
 		}
 	}
 	return jsonResult(res)
+}
+
+/* ---------- cancel ---------- */
+
+func (s *App) toolCancel(key *apiKey, raw json.RawMessage) mcpCallToolResult {
+	if f := requireCap(key, capExec); f != nil {
+		return *f
+	}
+	var args struct {
+		JobID string `json:"job_id"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return toolFailure("参数解析失败: " + err.Error())
+	}
+	args.JobID = strings.TrimSpace(args.JobID)
+	if args.JobID == "" {
+		return toolFailure("job_id 不能为空")
+	}
+
+	meta, err := s.exec.lookupAuditJob(args.JobID)
+	if err != nil {
+		if out, serverID, running, found := s.exec.Result(args.JobID); found {
+			if _, f := s.resolveTarget(key, serverID); f != nil {
+				return *f
+			}
+			if !running {
+				return jsonResult(map[string]any{
+					"jobId":    args.JobID,
+					"serverId": serverID,
+					"running":  false,
+					"canceled": false,
+					"status":   "already_finished",
+					"exitCode": out.ExitCode,
+					"note":     "任务已执行结束，无需取消。",
+				})
+			}
+		}
+		return toolFailure("找不到任务 " + args.JobID + "：jobId 有误，或记录已被清理。")
+	}
+
+	if _, f := s.resolveTarget(key, meta.ServerID); f != nil {
+		return *f
+	}
+
+	alreadyFinished, cancelErr := s.exec.Cancel(s.hub, meta)
+	if cancelErr != nil {
+		return toolFailure("取消任务失败: " + cancelErr.Error())
+	}
+	if alreadyFinished {
+		if latest, err := s.exec.lookupAuditJob(args.JobID); err == nil {
+			meta = latest
+		}
+		return jsonResult(map[string]any{
+			"jobId":    meta.JobID,
+			"serverId": meta.ServerID,
+			"running":  false,
+			"canceled": meta.Canceled,
+			"status":   "already_finished",
+			"exitCode": meta.ExitCode,
+			"note":     "任务此前已执行结束，无需取消。",
+		})
+	}
+	return jsonResult(map[string]any{
+		"jobId":    meta.JobID,
+		"serverId": meta.ServerID,
+		"detached": meta.Detach,
+		"unit":     meta.Unit,
+		"running":  false,
+		"canceled": true,
+		"status":   "canceled",
+	})
+}
+
+/* ---------- list_jobs ---------- */
+
+type mcpJobItem struct {
+	JobID      string `json:"jobId"`
+	ServerID   string `json:"serverId"`
+	ServerName string `json:"serverName,omitempty"`
+	Cmd        string `json:"cmd"`
+	Dir        string `json:"dir,omitempty"`
+	Detach     bool   `json:"detach,omitempty"`
+	Unit       string `json:"unit,omitempty"`
+	Timeout    int    `json:"timeout"`
+	Running    bool   `json:"running"`
+	Status     string `json:"status"`
+	Canceled   bool   `json:"canceled,omitempty"`
+	ExitCode   int    `json:"exitCode"`
+	Error      string `json:"error,omitempty"`
+	LogBytes   int64  `json:"logBytes,omitempty"`
+	StartedAt  int64  `json:"startedAt"`
+	FinishedAt int64  `json:"finishedAt,omitempty"`
+	DurationMs int64  `json:"durationMs"`
+}
+
+func (s *App) toolListJobs(key *apiKey, raw json.RawMessage) mcpCallToolResult {
+	if f := requireCap(key, capExec); f != nil {
+		return *f
+	}
+	var args struct {
+		ServerID    string `json:"server_id"`
+		RunningOnly bool   `json:"running_only"`
+		Limit       int    `json:"limit"`
+	}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &args); err != nil {
+			return toolFailure("参数解析失败: " + err.Error())
+		}
+	}
+	args.ServerID = strings.TrimSpace(args.ServerID)
+	if args.ServerID != "" {
+		sid, f := s.resolveTarget(key, args.ServerID)
+		if f != nil {
+			return *f
+		}
+		args.ServerID = sid
+	}
+	limit := args.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	query := `
+		SELECT a.job_id, a.server_id, COALESCE(s.name, ''), a.cmd, a.dir, a.timeout,
+		       a.detach, a.unit, a.started_at, a.finished_at, a.exit_code, a.error,
+		       a.canceled, a.log_bytes
+		  FROM exec_audit a LEFT JOIN servers s ON s.id = a.server_id
+		 WHERE a.cmd NOT LIKE '[write_file] %'`
+	qArgs := []any{}
+	if args.ServerID != "" {
+		query += ` AND a.server_id = ?`
+		qArgs = append(qArgs, args.ServerID)
+	}
+	query += ` ORDER BY a.started_at DESC, a.id DESC LIMIT 200`
+
+	rows, err := s.db.Query(query, qArgs...)
+	if err != nil {
+		return toolFailure("查询任务列表失败: " + err.Error())
+	}
+	var candidates []mcpJobItem
+	for rows.Next() {
+		var (
+			it               mcpJobItem
+			detach, canceled int
+		)
+		if err := rows.Scan(
+			&it.JobID, &it.ServerID, &it.ServerName, &it.Cmd, &it.Dir, &it.Timeout,
+			&detach, &it.Unit, &it.StartedAt, &it.FinishedAt, &it.ExitCode, &it.Error,
+			&canceled, &it.LogBytes,
+		); err != nil {
+			rows.Close()
+			return toolFailure("读取任务列表失败: " + err.Error())
+		}
+		if !key.canAccess(it.ServerID) {
+			continue
+		}
+		it.Detach = detach == 1
+		it.Canceled = canceled == 1
+		candidates = append(candidates, it)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return toolFailure("读取任务列表失败: " + err.Error())
+	}
+	rows.Close()
+
+	nowMs := time.Now().UnixMilli()
+	list := make([]mcpJobItem, 0, limit)
+	for _, it := range candidates {
+		if it.FinishedAt == 0 {
+			if it.Detach {
+				reqID := "l_" + randString(16)
+				if st, err := s.exec.requestJobStatus(s.hub, it.ServerID, protocol.ServerMsg{
+					Type: "job_query",
+					JobQuery: &protocol.JobQuery{
+						ReqID: reqID,
+						JobID: it.JobID,
+						Limit: -1,
+					},
+				}, reqID, 2*time.Second); err == nil && st.Found {
+					s.exec.syncDetachedAudit(it.JobID, st)
+					it.LogBytes = st.TotalBytes
+					if st.Unit != "" {
+						it.Unit = st.Unit
+					}
+					if st.Running {
+						it.Running = true
+						it.Status = "running"
+						it.DurationMs = nowMs - it.StartedAt
+					} else {
+						it.Running = false
+						it.FinishedAt = nowMs
+						it.ExitCode = st.ExitCode
+						it.Error = st.Error
+						it.Canceled = st.Canceled
+						it.DurationMs = it.FinishedAt - it.StartedAt
+						it.Status = classifyFinishedStatus(it.Canceled, it.ExitCode, it.Error)
+					}
+				} else {
+					it.Running = true
+					it.Status = "running"
+					it.DurationMs = nowMs - it.StartedAt
+				}
+			} else if s.exec.isRunningInMemory(it.JobID) {
+				it.Running = true
+				it.Status = "running"
+				it.DurationMs = nowMs - it.StartedAt
+			} else {
+				it.Running = false
+				it.Status = "lost"
+				if it.Error == "" {
+					it.Error = "服务端曾重启，非 detach 任务连接已断开"
+				}
+			}
+		} else {
+			it.Running = false
+			it.DurationMs = it.FinishedAt - it.StartedAt
+			it.Status = classifyFinishedStatus(it.Canceled, it.ExitCode, it.Error)
+		}
+
+		if args.RunningOnly && !it.Running {
+			continue
+		}
+		list = append(list, it)
+		if len(list) >= limit {
+			break
+		}
+	}
+
+	return jsonResult(map[string]any{
+		"jobs":  list,
+		"count": len(list),
+	})
+}
+
+func classifyFinishedStatus(canceled bool, exitCode int, errMsg string) string {
+	if canceled || errMsg == "任务已取消" {
+		return "canceled"
+	}
+	if strings.HasPrefix(errMsg, execBlockedPrefix) {
+		return "blocked"
+	}
+	if errMsg != "" || exitCode != 0 {
+		return "failed"
+	}
+	return "succeeded"
 }
 
 /* ---------- write_file ---------- */
@@ -837,7 +1250,6 @@ func (s *App) toolWriteFile(r *http.Request, key *apiKey, raw json.RawMessage) m
 	if err != nil {
 		return toolFailure(err.Error())
 	}
-	// 路径拦截不在此处判断——交给 SubmitWrite，那里能一并落审计并推送告警。
 	serverID, f := s.resolveTarget(key, args.ServerID)
 	if f != nil {
 		return *f
@@ -856,7 +1268,6 @@ func (s *App) toolWriteFile(r *http.Request, key *apiKey, raw json.RawMessage) m
 			msg = err.Error()
 		}
 		if errors.Is(err, errExecBlocked) {
-			// 明确告诉模型这是安全拦截、重试无用，否则它会不断变换写法尝试绕过
 			msg += "。这是服务端的安全拦截，请让人工上机操作。"
 		}
 		return toolFailure("写入失败: " + msg)
@@ -870,16 +1281,14 @@ func (s *App) toolWriteFile(r *http.Request, key *apiKey, raw json.RawMessage) m
 	})
 }
 
-// isWindowsAbs 判断形如 C:\ 的 Windows 绝对路径。
 func isWindowsAbs(p string) bool {
 	return len(p) >= 3 && p[1] == ':' && (p[2] == '\\' || p[2] == '/')
 }
 
-// parseFileMode 解析八进制权限字符串。
 func parseFileMode(s string) (uint32, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return 0, nil // 交给 agent 用默认 0644
+		return 0, nil
 	}
 	var mode uint32
 	if _, err := fmt.Sscanf(s, "%o", &mode); err != nil || mode > 0o7777 {
@@ -888,8 +1297,6 @@ func parseFileMode(s string) (uint32, error) {
 	return mode, nil
 }
 
-// callerLabel 生成审计里的调用方标识。
-// 带上 Key 名与 ID：同一把 Key 可能被改名，ID 才是稳定锚点。
 func (s *App) callerLabel(key *apiKey) string {
 	return fmt.Sprintf("key:%d(%s)", key.ID, key.Name)
 }
