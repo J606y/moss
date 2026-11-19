@@ -122,6 +122,12 @@ CREATE TABLE IF NOT EXISTS gcp_credentials (
 -- 同一个 SA 只该存一份：client_email 形如 name@project.iam.gserviceaccount.com，
 -- 项目已嵌在里面，全局唯一，不存在跨项目重名。重复添加只会是误操作。
 CREATE UNIQUE INDEX IF NOT EXISTS idx_gcp_cred_email ON gcp_credentials(client_email);
+CREATE TABLE IF NOT EXISTS oauth_clients (
+	client_id TEXT PRIMARY KEY,
+	client_name TEXT NOT NULL DEFAULT '',
+	redirect_uris TEXT NOT NULL,
+	created_at INTEGER NOT NULL
+);
 `
 
 // pruneExecAudit 清理执行审计：按保留天数与条数上限，两条规则取先触发者。
@@ -334,6 +340,8 @@ func cleanupLoop(db *sql.DB) {
 			getSettingInt(db, keyExecAuditDays, 90),
 			getSettingInt(db, keyExecAuditMaxRows, execAuditMaxRows))
 		gcLoginAttempts(now) // 回收登录失败限流的内存 map，防无界增长
+		gcOAuthCodes(now)    // 回收过期 OAuth 一次性授权码
+		pruneOAuthClients(db, oauthMaxClients)
 		time.Sleep(time.Hour)
 	}
 }

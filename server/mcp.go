@@ -7,6 +7,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -57,7 +58,7 @@ func (s *App) handleMCP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, errKeyMissing) || errors.Is(err, errKeyInvalid) || errors.Is(err, errKeyExpired) {
 			// 规范要求 401 带 WWW-Authenticate 挑战。
-			w.Header().Set("WWW-Authenticate", `Bearer realm="moss"`)
+			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm="moss", resource_metadata="%s/.well-known/oauth-protected-resource"`, s.baseURL(r)))
 		}
 		writeJSON(w, keyErrStatus(err), rpcError(nil, jrpcInvalidRequest, err.Error(), nil))
 		return

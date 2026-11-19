@@ -171,7 +171,8 @@ func main() {
 	mux.HandleFunc("PUT /api/admin/settings", app.requireAuth(app.handlePutSettings))
 	mux.HandleFunc("PUT /api/admin/password", app.requireAuth(app.handleChangePassword))
 
-	// MCP 端点（AI 客户端接入，Bearer API Key 鉴权）
+	// MCP 端点（AI 客户端接入，支持 Bearer API Key 与 OAuth 2.1 鉴权）
+	app.registerOAuthRoutes(mux)
 	mux.HandleFunc("/mcp", app.handleMCP)
 
 	// 安装脚本

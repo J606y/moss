@@ -201,7 +201,7 @@ func (s *App) limit(lim *limiter, next http.Handler) http.Handler {
 //
 // 前端静态资源仍然放行：首屏会并发拉多张国旗 SVG，纳入会误伤正常浏览。
 func rateLimited(path string) bool {
-	if strings.HasPrefix(path, "/api/") {
+	if strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/oauth/") || strings.HasPrefix(path, "/.well-known/") {
 		return true
 	}
 	return path == "/mcp" || path == "/install.sh" || path == "/install.ps1"

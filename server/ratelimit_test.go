@@ -203,7 +203,12 @@ func TestRateLimitCoversAuthSurface(t *testing.T) {
 	}{
 		{"/api/site", true},
 		{"/api/admin/servers", true},
-		{"/mcp", true},         // MCP 鉴权入口：每次请求一次 SHA-256 + 一次索引查询
+		{"/mcp", true}, // MCP 鉴权入口：每次请求一次 SHA-256 + 一次索引查询
+		{"/.well-known/oauth-protected-resource", true},
+		{"/.well-known/oauth-authorization-server", true},
+		{"/oauth/register", true},
+		{"/oauth/authorize", true},
+		{"/oauth/token", true},
 		{"/install.sh", true},  // 无鉴权公开端点，600/min 的额度不会误伤正常安装
 		{"/install.ps1", true}, // 同上
 		{"/", false},           // 前端首屏会并发拉多张国旗 SVG，纳入会误伤正常浏览
