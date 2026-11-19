@@ -67,6 +67,42 @@ func (s *App) pushConfigAll() {
 	}
 }
 
+// rebindByUUID 若新注册上来的节点携带了固定的硬件/持久化 UUID，
+// 且库中已有一条离线旧节点记录持有相同 UUID（典型场景：管理员重新添加节点拿了新 token 重装），
+// 自动将新 token 合并回旧 server_id 并移除临时新建的空壳行，保证重注册后 server_id 永不改变。
+func (s *App) rebindByUUID(currentID, token, uuid string) string {
+	uuid = strings.ToLower(strings.TrimSpace(uuid))
+	if uuid == "" {
+		return currentID
+	}
+	var oldID string
+	err := s.db.QueryRow(`SELECT id FROM servers WHERE uuid = ? AND id != ? ORDER BY created_at ASC LIMIT 1`,
+		uuid, currentID).Scan(&oldID)
+	if err != nil || oldID == "" {
+		return currentID
+	}
+	// 仅在旧节点当前离线时才自动合并接管，防止克隆镜像未清理 machine-id 时两台在线机器互相顶号。
+	if s.hub.AgentConn(oldID) != nil {
+		return currentID
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return currentID
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM servers WHERE id = ?`, currentID); err != nil {
+		return currentID
+	}
+	if _, err := tx.Exec(`UPDATE servers SET token = ?, uuid = ? WHERE id = ?`, token, uuid, oldID); err != nil {
+		return currentID
+	}
+	if err := tx.Commit(); err != nil {
+		return currentID
+	}
+	log.Printf("检测到相同节点 UUID (%s) 重注册，已将新连接自动绑定回原 server_id=%s（释放临时 id=%s）", uuid, oldID, currentID)
+	return oldID
+}
+
 func (s *App) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
 	var serverID string
@@ -144,6 +180,15 @@ func (s *App) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 			info := msg.Info
 			// 优先用 agent 自测的公网 IP；某一族拿不到才用连接来源 IP 按地址族兜底
 			// （Docker/反代下来源 IP 往往是网桥网关，如 172.17.0.1）。
+			nodeUUID := strings.ToLower(strings.TrimSpace(info.UUID))
+			if nodeUUID != "" {
+				if reboundID := s.rebindByUUID(serverID, token, nodeUUID); reboundID != serverID {
+					s.hub.UnregisterAgent(serverID, ac)
+					s.hub.Drop(serverID)
+					serverID = reboundID
+					s.hub.RegisterAgent(serverID, ac)
+				}
+			}
 			ipv4, ipv6 := info.IP, info.IPv6
 			if strings.Contains(ip, ":") {
 				if ipv6 == "" {
@@ -153,9 +198,9 @@ func (s *App) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 				ipv4 = ip
 			}
 			if _, err := s.db.Exec(
-				`UPDATE servers SET os=?, arch=?, virt=?, cpu_model=?, cpu_cores=?, mem_total=?, swap_total=?,
-				 disk_total=?, agent_version=?, ip=?, ipv6=?, last_seen=? WHERE id=?`,
-				info.OS, info.Arch, info.Virtualization, info.CPUModel, info.CPUCores,
+				`UPDATE servers SET uuid=COALESCE(NULLIF(?, ''), uuid), os=?, arch=?, virt=?, cpu_model=?, cpu_cores=?,
+				 mem_total=?, swap_total=?, disk_total=?, agent_version=?, ip=?, ipv6=?, last_seen=? WHERE id=?`,
+				nodeUUID, info.OS, info.Arch, info.Virtualization, info.CPUModel, info.CPUCores,
 				info.MemTotal, info.SwapTotal, info.DiskTotal, info.AgentVersion, ipv4, ipv6, time.Now().Unix(), serverID,
 			); err != nil {
 				log.Printf("更新主机信息失败: %v", err)
@@ -190,6 +235,12 @@ func (s *App) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 
 		case "exec_result":
 			s.exec.OnResult(serverID, msg.Exec)
+
+		case "job_status":
+			s.exec.OnJobStatus(serverID, msg.JobStatus)
+
+		case "read_result":
+			s.exec.OnReadResult(serverID, msg.Read)
 
 		case "upgrade_result":
 			s.upgrade.OnResult(serverID, msg.Upgrade)

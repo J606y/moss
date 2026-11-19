@@ -1,7 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -36,6 +39,108 @@ func (r *execRunner) HandleWrite(c sender, task protocol.WriteTask) {
 		}
 		sendExecFinal(c, task.ID, 0, "", false)
 	}()
+}
+
+// HandleRead 受理分块文件读取/下载请求，异步执行。
+//
+// 单帧读取字节数上限收敛至 protocol.ExecChunkSize（32KB），
+// 确保经 JSON base64 编码后不会超过 WebSocket 单条消息 64KB 上限。
+func (r *execRunner) HandleRead(c sender, task protocol.ReadTask) {
+	go func() {
+		res := r.readFileChunk(task)
+		if err := c.send(protocol.AgentMsg{Type: "read_result", Read: &res}); err != nil {
+			log.Printf("回传文件读取结果失败: %v", err)
+		}
+	}()
+}
+
+func (r *execRunner) readFileChunk(task protocol.ReadTask) protocol.ReadResult {
+	if !r.allow {
+		return protocol.ReadResult{
+			ReqID: task.ReqID,
+			Path:  task.Path,
+			Error: "本机未开启远程执行（需 --allow-exec）",
+		}
+	}
+	if task.Path == "" {
+		return protocol.ReadResult{
+			ReqID: task.ReqID,
+			Error: "文件路径为空",
+		}
+	}
+	fi, err := os.Stat(task.Path)
+	if err != nil {
+		return protocol.ReadResult{
+			ReqID: task.ReqID,
+			Path:  task.Path,
+			Error: "读取文件失败: " + err.Error(),
+		}
+	}
+	if fi.IsDir() {
+		return protocol.ReadResult{
+			ReqID: task.ReqID,
+			Path:  task.Path,
+			Error: "目标路径是目录而非普通文件",
+		}
+	}
+
+	totalBytes := fi.Size()
+	start := task.Offset
+	if start < 0 {
+		start = 0
+	}
+	if start > totalBytes {
+		start = totalBytes
+	}
+	limit := task.Length
+	if limit <= 0 || limit > protocol.ExecChunkSize {
+		limit = protocol.ExecChunkSize
+	}
+	remain := totalBytes - start
+	if remain <= 0 {
+		return protocol.ReadResult{
+			ReqID:      task.ReqID,
+			Path:       task.Path,
+			Offset:     start,
+			NextOffset: start,
+			TotalBytes: totalBytes,
+			EOF:        true,
+		}
+	}
+	toRead := int64(limit)
+	if remain < toRead {
+		toRead = remain
+	}
+	f, err := os.Open(task.Path)
+	if err != nil {
+		return protocol.ReadResult{
+			ReqID: task.ReqID,
+			Path:  task.Path,
+			Error: "打开文件失败: " + err.Error(),
+		}
+	}
+	defer f.Close()
+
+	buf := make([]byte, toRead)
+	n, err := f.ReadAt(buf, start)
+	if err != nil && !errors.Is(err, io.EOF) && n == 0 {
+		return protocol.ReadResult{
+			ReqID: task.ReqID,
+			Path:  task.Path,
+			Error: "读取文件内容失败: " + err.Error(),
+		}
+	}
+	buf = buf[:n]
+	next := start + int64(n)
+	return protocol.ReadResult{
+		ReqID:      task.ReqID,
+		Path:       task.Path,
+		Data:       buf,
+		Offset:     start,
+		NextOffset: next,
+		TotalBytes: totalBytes,
+		EOF:        next >= totalBytes,
+	}
 }
 
 // writeDefaultMode 目标文件不存在、调用方也没指定权限时用的默认值。

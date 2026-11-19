@@ -11,7 +11,10 @@
 // 分流，将来升级时按此扩展，不必推翻现有代码。
 package main
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // 协议版本。
 const (
@@ -137,13 +140,11 @@ type mcpInitializeResult struct {
 // mcpToolAnnotations 全部字段都只是 hint，规范明确客户端不应据此做安全决策。
 // 我们如实标注，方便客户端排序与提示，真正的边界在 Key 作用域与命令拦截。
 type mcpToolAnnotations struct {
-	Title string `json:"title,omitempty"`
-	// 指针类型区分「未声明」与「显式 false」：规范给的默认值不全是 false
-	// （destructiveHint 与 openWorldHint 默认为 true），零值语义会写反。
-	ReadOnlyHint    *bool `json:"readOnlyHint,omitempty"`
-	DestructiveHint *bool `json:"destructiveHint,omitempty"`
-	IdempotentHint  *bool `json:"idempotentHint,omitempty"`
-	OpenWorldHint   *bool `json:"openWorldHint,omitempty"`
+	Title           string `json:"title,omitempty"`
+	ReadOnlyHint    *bool  `json:"readOnlyHint,omitempty"`
+	DestructiveHint *bool  `json:"destructiveHint,omitempty"`
+	IdempotentHint  *bool  `json:"idempotentHint,omitempty"`
+	OpenWorldHint   *bool  `json:"openWorldHint,omitempty"`
 }
 
 type mcpTool struct {
@@ -172,24 +173,46 @@ type mcpContent struct {
 
 // mcpCallToolResult 的 Content 必填，即使为空也要是空数组而非 null。
 type mcpCallToolResult struct {
-	Content []mcpContent `json:"content"`
-	// StructuredContent 在 legacy 版本里只能是 object。
-	StructuredContent any  `json:"structuredContent,omitempty"`
-	IsError           bool `json:"isError,omitempty"`
+	Content           []mcpContent `json:"content"`
+	StructuredContent any          `json:"structuredContent,omitempty"`
+	IsError           bool         `json:"isError,omitempty"`
 }
 
 func mcpText(s string) []mcpContent { return []mcpContent{{Type: "text", Text: s}} }
 
-// toolFailure 构造「工具执行失败」结果。
+// toolFailure 构造结构化的「通道 / 权限 / 参数失败」结果。
 //
-// 关键区分（规范原文要求）：工具自身产生的错误必须作为正常响应返回并置
-// isError=true，而不是 JSON-RPC 协议错误——否则模型看不到错误内容，无法自我纠正。
-// 只有「找不到工具」「服务端不支持工具调用」「请求结构畸形」才用 JSON-RPC error。
-//
-// 对 moss 来说这条尤其重要：命令被拦截、agent 掉线、退出码非零，
-// 都属于要让 AI 看见并据此改变行为的信息，全部走 isError。
+// 统一返回结构化 JSON（同时写入 Content[0].Text 与 StructuredContent）并附带 status 字段，
+// 使调用端无论读 structuredContent 还是解析 content 文本，都能拿到一致的状态机字段，
+// 避免节点离线/断连时退化为无结构的纯文本报错。
 func toolFailure(msg string) mcpCallToolResult {
-	return mcpCallToolResult{Content: mcpText(msg), IsError: true}
+	status := "error"
+	switch {
+	case strings.Contains(msg, "离线") || strings.Contains(msg, "未连接"):
+		status = "offline"
+	case strings.Contains(msg, "掉线"):
+		status = "disconnected"
+	case strings.Contains(msg, "拦截"):
+		status = "blocked"
+	case strings.Contains(msg, "超时"):
+		status = "timed_out"
+	case strings.Contains(msg, "取消"):
+		status = "canceled"
+	}
+	payload := map[string]any{
+		"status":  status,
+		"running": false,
+		"error":   msg,
+	}
+	b, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return mcpCallToolResult{Content: mcpText(msg), IsError: true}
+	}
+	return mcpCallToolResult{
+		Content:           mcpText(string(b)),
+		StructuredContent: payload,
+		IsError:           true,
+	}
 }
 
 func boolPtr(b bool) *bool { return &b }

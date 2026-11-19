@@ -16,6 +16,7 @@ import (
 
 type adminServer struct {
 	ID        string `json:"id"`
+	UUID      string `json:"uuid,omitempty"`
 	Name      string `json:"name"`
 	Group     string `json:"group"`
 	Region    string `json:"region"`
@@ -35,12 +36,10 @@ type adminServer struct {
 	// 版本比对规则全部收在后端（upgradeAvailability）：前端只消费结论，
 	// 不自己比较版本号——否则「哪些 agent 认识升级指令」这条判据会散落两处，
 	// 改一处漏一处。UpgradeStage / UpgradeErr 为内存态，面板重启归零。
-	AgentVersion  string `json:"agentVersion"`
-	TargetVersion string `json:"targetVersion"`         // server 自身版本对应的 tag，开发态为空
-	Upgradable    bool   `json:"upgradable"`            // 可一键升级：版本不一致、在线、且 agent 认识升级指令
-	UpgradeHint   string `json:"upgradeHint,omitempty"` // 不可一键升级时的原因；已是最新时为空
-	// UpgradeHintCode 上一行那句提示的错误码，供前端翻译；
-	// 认不出时前端退回显示 UpgradeHint 的中文原文。
+	AgentVersion      string `json:"agentVersion"`
+	TargetVersion     string `json:"targetVersion"`
+	Upgradable        bool   `json:"upgradable"`
+	UpgradeHint       string `json:"upgradeHint,omitempty"`
 	UpgradeHintCode   string `json:"upgradeHintCode,omitempty"`
 	UpgradeHintDetail string `json:"upgradeHintDetail,omitempty"`
 	UpgradeStage      string `json:"upgradeStage,omitempty"` // 进行中/终态阶段
@@ -58,6 +57,8 @@ type adminServer struct {
 }
 
 type serverForm struct {
+	ID          string `json:"id"`
+	UUID        string `json:"uuid"`
 	Name        string `json:"name"`
 	Group       string `json:"group"`
 	Region      string `json:"region"`
@@ -73,7 +74,7 @@ type serverForm struct {
 
 func (s *App) handleAdminServers(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(
-		`SELECT id, name, grp, region, flag, auto_flag, note, expire_at, token, ip, ipv6, last_seen, created_at,
+		`SELECT id, uuid, name, grp, region, flag, auto_flag, note, expire_at, token, ip, ipv6, last_seen, created_at,
 		        gcp_enabled, gcp_cred_id, gcp_project, gcp_zone, gcp_instance, agent_version, os
 		 FROM servers ORDER BY sort, created_at`)
 	if err != nil {
@@ -88,7 +89,7 @@ func (s *App) handleAdminServers(w http.ResponseWriter, r *http.Request) {
 		// agentOS 只用于判可升级性，不进响应体：后台列表不显示系统名，
 		// 加进 JSON 只会让契约多背一个没人消费的字段。
 		var agentOS string
-		if err := rows.Scan(&a.ID, &a.Name, &a.Group, &a.Region, &a.Flag, &a.AutoFlag, &a.Note,
+		if err := rows.Scan(&a.ID, &a.UUID, &a.Name, &a.Group, &a.Region, &a.Flag, &a.AutoFlag, &a.Note,
 			&a.ExpireAt, &a.Token, &a.IP, &a.IPv6, &a.LastSeen, &a.CreatedAt,
 			&a.GcpEnabled, &a.GcpCredID, &a.GcpProject, &a.GcpZone, &a.GcpInstance, &a.AgentVersion, &agentOS); err != nil {
 			log.Printf("handleAdminServers scan: %v", err)
@@ -147,6 +148,25 @@ func normalizeGCP(db *sql.DB, f *serverForm) *apiErr {
 	return nil
 }
 
+func isValidServerID(s string) bool {
+	if len(s) < 2 || len(s) > 64 {
+		return false
+	}
+	for _, r := range s {
+		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_'
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// handleAddServer 新增或重注册节点。
+//
+// 支持固定节点 UUID 与固定 ID：
+//   - 若传入的 uuid（或显式指定的 id）在库中已存在对应节点，则直接复用原 server_id 与 token（或更新配置），
+//     避免节点重装/重注册后 server_id 漂移导致白名单、历史曲线与审计断链；
+//   - 若传入新的合法固定 id，则按指定 id 建档，否则生成 8 位随机 id。
 func (s *App) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	var f serverForm
 	if err := json.NewDecoder(r.Body).Decode(&f); err != nil || f.Name == "" {
@@ -160,16 +180,49 @@ func (s *App) handleAddServer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, *e)
 		return
 	}
+	f.ID = strings.TrimSpace(f.ID)
+	f.UUID = strings.ToLower(strings.TrimSpace(f.UUID))
+
+	var existingID, existingToken string
+	if f.UUID != "" {
+		_ = s.db.QueryRow(`SELECT id, token FROM servers WHERE uuid = ? LIMIT 1`, f.UUID).Scan(&existingID, &existingToken)
+	}
+	if existingID == "" && f.ID != "" {
+		_ = s.db.QueryRow(`SELECT id, token FROM servers WHERE id = ? LIMIT 1`, f.ID).Scan(&existingID, &existingToken)
+	}
+	if existingID != "" {
+		if _, err := s.db.Exec(
+			`UPDATE servers SET name=?, grp=?, region=?, flag=?, note=?, expire_at=?,
+			        uuid=COALESCE(NULLIF(?, ''), uuid),
+			        gcp_enabled=?, gcp_cred_id=?, gcp_project=?, gcp_zone=?, gcp_instance=?
+			  WHERE id=?`,
+			f.Name, f.Group, f.Region, f.Flag, f.Note, f.ExpireAt,
+			f.UUID,
+			f.GcpEnabled, f.GcpCredID, f.GcpProject, f.GcpZone, f.GcpInstance,
+			existingID,
+		); err != nil {
+			log.Printf("handleAddServer reuse update (id=%s): %v", existingID, err)
+			writeErr(w, errInternal)
+			return
+		}
+		s.hub.BroadcastMeta()
+		writeJSON(w, 200, map[string]any{"id": existingID, "uuid": f.UUID, "token": existingToken, "reused": true})
+		return
+	}
+
 	id := randString(8)
+	if f.ID != "" && isValidServerID(f.ID) {
+		id = f.ID
+	}
 	token := newToken()
 	// 新服务器排到列表末尾：sort = 当前最大值 + 1
 	var maxSort int
 	s.db.QueryRow(`SELECT COALESCE(MAX(sort), 0) FROM servers`).Scan(&maxSort)
 	if _, err := s.db.Exec(
-		`INSERT INTO servers(id, token, name, grp, region, flag, note, expire_at, sort, created_at,
+		`INSERT INTO servers(id, uuid, token, name, grp, region, flag, note, expire_at, sort, created_at,
 		                     gcp_enabled, gcp_cred_id, gcp_project, gcp_zone, gcp_instance)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, token, f.Name, f.Group, f.Region, f.Flag, f.Note, f.ExpireAt, maxSort+1, time.Now().Unix(),
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, f.UUID, token, f.Name, f.Group, f.Region, f.Flag, f.Note, f.ExpireAt, maxSort+1, time.Now().Unix(),
 		f.GcpEnabled, f.GcpCredID, f.GcpProject, f.GcpZone, f.GcpInstance,
 	); err != nil {
 		log.Printf("handleAddServer insert (id=%s): %v", id, err)
@@ -177,7 +230,7 @@ func (s *App) handleAddServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.hub.BroadcastMeta()
-	writeJSON(w, 200, map[string]string{"id": id, "token": token})
+	writeJSON(w, 200, map[string]string{"id": id, "uuid": f.UUID, "token": token})
 }
 
 func (s *App) handleUpdateServer(w http.ResponseWriter, r *http.Request) {
@@ -393,26 +446,16 @@ func (s *App) handleReorderTasks(w http.ResponseWriter, r *http.Request) {
 /* ---------- 站点设置 ---------- */
 
 type settingsView struct {
-	Username string `json:"username"`
-	SiteName string `json:"siteName"`
-	SiteDesc string `json:"siteDesc"`
-	// Lang 界面语言档位：auto / zh / en。auto 表示跟随每位访客的浏览器语言，
-	// zh、en 则是全站强制——首页对外公开，这个选择对所有访客生效，不只是管理员自己。
-	Lang           string `json:"lang"`
-	ReportInterval int    `json:"reportInterval"`
-	SampleInterval int    `json:"sampleInterval"`
-	HistoryDays    int    `json:"historyDays"`
-	PingDays       int    `json:"pingDays"`
-	// ExecAuditDays 执行审计保留天数。
-	//
-	// 下限刻意不给到 1 天：审计的意义是「AI 动过什么事后查得到」，
-	// 少于一周意味着周末发生的事周一就没了——而周末恰恰是无人值守、
-	// AI 自主处置最多的时候。单条记录不可删除，只能整体设定保留时长。
-	ExecAuditDays int `json:"execAuditDays"`
-	// ExecAuditMaxRows 审计条数上限，与保留天数取先触发者。
-	// 可设 100–5000；不再提供「不限制」选项——无上限意味着一次失控的高频调用
-	// 就能把库撑到 GB 级，而 SQLite 打满磁盘会带走整个面板。
-	ExecAuditMaxRows int `json:"execAuditMaxRows"`
+	Username         string `json:"username"`
+	SiteName         string `json:"siteName"`
+	SiteDesc         string `json:"siteDesc"`
+	Lang             string `json:"lang"`
+	ReportInterval   int    `json:"reportInterval"`
+	SampleInterval   int    `json:"sampleInterval"`
+	HistoryDays      int    `json:"historyDays"`
+	PingDays         int    `json:"pingDays"`
+	ExecAuditDays    int    `json:"execAuditDays"`
+	ExecAuditMaxRows int    `json:"execAuditMaxRows"`
 }
 
 func (s *App) handleGetSettings(w http.ResponseWriter, r *http.Request) {

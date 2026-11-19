@@ -328,7 +328,7 @@ var protectedPaths = []struct {
 		// 篡改 moss 自身：agent 被换成别的二进制或被停用，
 		// 这台机器就从中枢上摘掉了，且无从察觉。
 		prefixes: []string{"/etc/moss/", "/etc/systemd/system/moss", "/lib/systemd/system/moss", "/usr/lib/systemd/system/moss"},
-		exact:    []string{"/usr/local/bin/moss-agent", "/usr/bin/moss-agent"},
+		exact:    []string{"/usr/local/bin/moss-agent", "/usr/bin/moss-agent", "/etc/moss-agent.env"},
 		why:      "moss agent 自身的二进制或服务配置",
 	},
 	{
@@ -365,6 +365,29 @@ func checkProtectedPath(path string) string {
 				return rule.why
 			}
 		}
+	}
+	return ""
+}
+
+// checkProtectedReadPath 检查 read_file 不允许直接读取的高危凭证文件（如 shadow 或 moss-agent token）。
+func checkProtectedReadPath(path string) string {
+	p := strings.ReplaceAll(strings.TrimSpace(path), "\\", "/")
+	for strings.Contains(p, "//") {
+		p = strings.ReplaceAll(p, "//", "/")
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return "路径含 .. 无法判定实际落点，请使用规范化的绝对路径"
+		}
+	}
+	lower := strings.ToLower(p)
+	for _, exact := range []string{"/etc/shadow", "/etc/gshadow", "/etc/moss-agent.env"} {
+		if lower == exact {
+			return "系统密码哈希或 moss agent 凭证文件禁止通过 read_file 读取"
+		}
+	}
+	if strings.HasPrefix(lower, "/etc/moss/") {
+		return "moss agent 凭证目录禁止通过 read_file 读取"
 	}
 	return ""
 }

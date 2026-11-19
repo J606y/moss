@@ -5,9 +5,11 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +20,21 @@ import (
 
 // agentVersion 发版时由 -ldflags "-X main.agentVersion=..." 注入（见 release.yml）。
 var agentVersion = "dev"
+
+// formatVersionString 返回 moss-agent --version 的标准版本输出行。
+func formatVersionString() string {
+	return fmt.Sprintf("moss-agent %s (%s/%s)", agentVersion, runtime.GOOS, runtime.GOARCH)
+}
+
+func isVersionArg(args []string) bool {
+	for _, a := range args {
+		switch a {
+		case "--version", "-version", "-v", "version":
+			return true
+		}
+	}
+	return false
+}
 
 func wsURL(endpoint, token string) (string, error) {
 	endpoint = strings.TrimRight(endpoint, "/")
@@ -68,10 +85,16 @@ func resolveToken(token, tokenFile string) string {
 }
 
 func main() {
+	if len(os.Args) > 1 && isVersionArg(os.Args[1:]) {
+		fmt.Println(formatVersionString())
+		os.Exit(0)
+	}
+
 	endpoint := flag.String("endpoint", "", "服务端地址，如 https://moss.example.com")
 	token := flag.String("token", "", "服务器 token（明文，不推荐；优先用 --token-file 或 MOSS_TOKEN 环境变量）")
 	tokenFile := flag.String("token-file", "", "从文件读取 token（推荐，文件权限设 600）")
 	allowExec := flag.Bool("allow-exec", false, "允许服务端下发命令在本机执行（默认关闭，也可用 MOSS_ALLOW_EXEC=1 开启）")
+	showVersion := flag.Bool("version", false, "打印 moss-agent 版本号并退出")
 	guard := flag.Bool("rollback-guard", false, "内部使用：升级回滚守护，由自升级流程拉起，勿手动运行")
 	guardTarget := flag.String("guard-target", "", "内部使用：回滚守护的目标二进制路径")
 	guardGrace := flag.Int("guard-grace", protocol.UpgradeDefaultGrace, "内部使用：回滚守护等待新版本连回的秒数")
@@ -79,6 +102,11 @@ func main() {
 
 	// 守护模式必须在 token 校验之前分流：它只负责重启与回滚，不连 server，
 	// 也就没有 token 可用——升级中的机器此刻正处在两个版本之间。
+	if *showVersion {
+		fmt.Println(formatVersionString())
+		os.Exit(0)
+	}
+
 	if *guard {
 		if *guardTarget == "" {
 			log.Fatal("--rollback-guard 需要 --guard-target")
@@ -191,9 +219,21 @@ func runOnce(target string, runner *execRunner, up *upgrader) error {
 					// 否则期间的心跳与配置下发全部停摆。
 					runner.Handle(c, *msg.Exec)
 				}
+			case "job_query":
+				if msg.JobQuery != nil {
+					runner.HandleJobQuery(c, *msg.JobQuery)
+				}
+			case "job_cancel":
+				if msg.JobCancel != nil {
+					runner.HandleJobCancel(c, *msg.JobCancel)
+				}
 			case "write":
 				if msg.Write != nil {
 					runner.HandleWrite(c, *msg.Write)
+				}
+			case "read":
+				if msg.Read != nil {
+					runner.HandleRead(c, *msg.Read)
 				}
 			case "upgrade":
 				// 刻意不检查 allow：--allow-exec 管的是「允许远程执行任意命令」，

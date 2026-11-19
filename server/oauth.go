@@ -19,6 +19,7 @@ import (
 	"html/template"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -116,22 +117,54 @@ func pruneOAuthClients(db *sql.DB, maxRows int) {
 	}
 }
 
+// trustForwardedHeaders 判断当前请求是否允许信任反代注入的 X-Forwarded-* 请求头。
+// 仅在启用 --trust-proxy 且（未限制 --trusted-proxies 或直接对端属于环回/可信代理网段）时返回 true。
+func (s *App) trustForwardedHeaders(r *http.Request) bool {
+	if !s.trustProxy {
+		return false
+	}
+	if len(s.trustedProxies) == 0 {
+		return true
+	}
+	ip := net.ParseIP(hostOnly(r.RemoteAddr))
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ipInNets(ip, s.trustedProxies)
+}
+
 // baseURL 推断当前请求的对外基准地址（scheme://host），用于拼装元数据与 WWW-Authenticate。
-// 若配置了 MOSS_PUBLIC_URL（例如反代回源改写了 Host 头），优先使用它；其次读取 X-Forwarded-Host。
+// 若配置了 MOSS_PUBLIC_URL（例如反代回源改写了 Host 头），优先使用它；
+// 否则仅在受 trust-proxy 开关（及 trusted-proxies 网段）许可时才读取 X-Forwarded-Proto 与 X-Forwarded-Host。
 func (s *App) baseURL(r *http.Request) string {
 	if pub := strings.TrimRight(strings.TrimSpace(os.Getenv("MOSS_PUBLIC_URL")), "/"); pub != "" {
 		return pub
 	}
+	trusted := s.trustForwardedHeaders(r)
 	scheme := "http"
-	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+	if r.TLS != nil {
 		scheme = "https"
+	} else if trusted {
+		proto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
+		if i := strings.IndexByte(proto, ','); i >= 0 {
+			proto = strings.TrimSpace(proto[:i])
+		}
+		if strings.EqualFold(proto, "https") {
+			scheme = "https"
+		}
 	}
-	host := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	var host string
+	if trusted {
+		host = strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+		if i := strings.IndexByte(host, ','); i >= 0 {
+			host = strings.TrimSpace(host[:i])
+		}
+	}
 	if host == "" {
 		host = strings.TrimSpace(r.Host)
-	}
-	if i := strings.IndexByte(host, ','); i >= 0 {
-		host = strings.TrimSpace(host[:i])
+		if i := strings.IndexByte(host, ','); i >= 0 {
+			host = strings.TrimSpace(host[:i])
+		}
 	}
 	if host == "" {
 		host = "localhost"
@@ -206,7 +239,7 @@ func (s *App) handleOAuthServerMetadata(w http.ResponseWriter, r *http.Request) 
 		"registration_endpoint":                 base + "/oauth/register",
 		"response_types_supported":              []string{"code"},
 		"grant_types_supported":                 []string{"authorization_code"},
-		"token_endpoint_auth_methods_supported": []string{"none", "client_secret_post", "client_secret_basic"},
+		"token_endpoint_auth_methods_supported": []string{"none"},
 		"code_challenge_methods_supported":      []string{"S256"},
 		"scopes_supported":                      allCaps,
 	})
@@ -296,6 +329,10 @@ func (s *App) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_client_metadata", "JSON 解析失败")
+		return
+	}
+	if method := strings.TrimSpace(req.TokenEndpointAuthMethod); method != "" && method != "none" {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_client_metadata", "仅支持 token_endpoint_auth_method=none（PKCE 公开客户端）")
 		return
 	}
 	if len(req.RedirectURIs) == 0 || len(req.RedirectURIs) > 16 {
@@ -391,14 +428,14 @@ func (s *App) validateAuthorizeParams(r *http.Request, q url.Values) (*oauthAuth
 	if p.RedirectURI == "" || !validRedirectURI(p.RedirectURI) {
 		return nil, "redirect_uri 缺失或不符合 OAuth 2.1 安全要求（需为 HTTPS 或本地环回地址）"
 	}
-	if regName, regURIs, ok := s.lookupOAuthClient(p.ClientID); ok {
-		if !redirectURIMatches(regURIs, p.RedirectURI) {
-			return nil, "redirect_uri 与客户端注册的回调地址不匹配"
-		}
-		p.ClientName = regName
-	} else {
-		p.ClientName = p.ClientID
+	regName, regURIs, ok := s.lookupOAuthClient(p.ClientID)
+	if !ok {
+		return nil, "client_id 未注册，请先通过 /oauth/register 完成客户端注册"
 	}
+	if !redirectURIMatches(regURIs, p.RedirectURI) {
+		return nil, "redirect_uri 与客户端注册的回调地址不匹配"
+	}
+	p.ClientName = regName
 	if p.ResponseType != "code" {
 		return nil, "仅支持 response_type=code"
 	}
@@ -417,16 +454,17 @@ func (s *App) validResourceIndicator(r *http.Request, res string) bool {
 	return strings.EqualFold(clean, base) || strings.EqualFold(clean, base+"/mcp")
 }
 
+// parseRequestedCaps 解析 scope 字符串中的能力列表；未指定或无有效能力时默认仅返回只读（read）。
 func parseRequestedCaps(scope string) []string {
 	if scope == "" {
-		return allCaps
+		return []string{capRead}
 	}
 	fields := strings.FieldsFunc(scope, func(r rune) bool {
 		return r == ' ' || r == ','
 	})
 	caps := normalizeCaps(fields)
 	if len(caps) == 0 {
-		return allCaps
+		return []string{capRead}
 	}
 	return caps
 }
@@ -479,28 +517,20 @@ func (s *App) handleOAuthAuthorizeGET(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, errMsg, http.StatusBadRequest)
 		return
 	}
-	caps := parseRequestedCaps(p.Scope)
-	hasCap := func(c string) bool {
-		for _, x := range caps {
-			if x == c {
-				return true
-			}
-		}
-		return false
-	}
 	cbHost := p.RedirectURI
 	if u, err := url.Parse(p.RedirectURI); err == nil && u.Host != "" {
 		cbHost = u.Scheme + "://" + u.Host
 	}
+	// 最小权限默认：授权页初始渲染默认仅勾选只读（read），exec 与 write 必须由管理员主动勾选。
 	data := oauthPageData{
 		Params:       p,
 		CallbackHost: cbHost,
 		Authed:       s.isAuthed(r),
 		Username:     getSetting(s.db, keyUsername, "admin"),
 		KeyName:      "OAuth: " + p.ClientName,
-		CapRead:      hasCap(capRead),
-		CapExec:      hasCap(capExec),
-		CapWrite:     hasCap(capWrite),
+		CapRead:      true,
+		CapExec:      false,
+		CapWrite:     false,
 		AllServers:   true,
 		Servers:      s.listServerOptions(nil),
 		Days:         90,
@@ -753,9 +783,12 @@ func (s *App) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		resource = r.FormValue("resource")
 	}
 
-	if basicUser, _, ok := r.BasicAuth(); ok && clientID == "" {
-		clientID = basicUser
-	}
+	grantType = strings.TrimSpace(grantType)
+	code = strings.TrimSpace(code)
+	redirectURI = strings.TrimSpace(redirectURI)
+	clientID = strings.TrimSpace(clientID)
+	codeVerifier = strings.TrimSpace(codeVerifier)
+	resource = strings.TrimSpace(resource)
 
 	if grantType != "authorization_code" {
 		writeOAuthError(w, http.StatusBadRequest, "unsupported_grant_type", "仅支持 grant_type=authorization_code")
@@ -765,17 +798,32 @@ func (s *App) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "缺少 code 或 code_verifier")
 		return
 	}
+	if clientID == "" {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "缺少 client_id")
+		return
+	}
+	if redirectURI == "" {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "缺少 redirect_uri")
+		return
+	}
 
+	// 原子消费一次性授权码，确保任何失败的兑换尝试同样销毁该授权码
 	entry, ok := popOAuthCode(code)
+
+	_, regURIs, regOK := s.lookupOAuthClient(clientID)
+	if !regOK {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_client", "client_id 未注册")
+		return
+	}
 	if !ok || !time.Now().Before(entry.CodeExpiresAt) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "授权码无效或已过期")
 		return
 	}
-	if clientID != "" && clientID != entry.ClientID {
+	if clientID != entry.ClientID {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "client_id 不匹配")
 		return
 	}
-	if redirectURI != entry.RedirectURI {
+	if redirectURI != entry.RedirectURI || !redirectURIMatches(regURIs, redirectURI) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "redirect_uri 不匹配")
 		return
 	}

@@ -1,14 +1,19 @@
-// moss-agent 命令执行端：接收服务端下发的执行任务，流式回传输出。
+// moss-agent 命令执行端：接收服务端下发的执行任务，流式回传输出或托管 detach 后台长任务。
 //
 // 安全前提：执行能力默认关闭。装了 agent 不等于接受被远程操作，
 // 必须通过 --allow-exec 或 MOSS_ALLOW_EXEC=1 显式开启。
 package main
 
 import (
+	"encoding/hex"
 	"errors"
 	"io"
 	"log"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,9 +22,10 @@ import (
 )
 
 const (
-	execMaxConcurrent  = 4                // 同时执行的命令数上限，防止一次性下发过多把机器压垮
+	execMaxConcurrent  = 4                // 同时执行的流式命令数上限，防止一次性下发过多把机器压垮
 	execSeenTTL        = 30 * time.Minute // 幂等记录保留时长，超时后清理避免无限增长
 	execDefaultTimeout = 60               // 服务端未指定超时时的默认值（秒）
+	detachKeepAge      = 7 * 24 * time.Hour
 
 	// execDrainGrace 是强杀之后仍等待输出管道关闭的宽限。
 	//
@@ -39,24 +45,80 @@ const (
 )
 
 // sender 是执行端回传消息的出口。抽成接口而非直接依赖 *client，
-// 是为了让执行逻辑（超时强杀、分片、截断）能脱离真实 WebSocket 连接被测试。
+// 是为了让执行逻辑（超时强杀、分片、截断、后台托管）能脱离真实 WebSocket 连接被测试。
 type sender interface {
 	send(v any) error
+}
+
+type activeTask struct {
+	killer   processKiller
+	canceled atomic.Bool
 }
 
 // execRunner 管理命令执行的准入、幂等与并发。
 // 生命周期跨越 WS 重连：幂等记录必须在重连后依然有效，
 // 否则服务端重发同一任务会导致二次执行（例如重复跑一次部署）。
 type execRunner struct {
-	allow bool
+	allow  bool
+	jobDir string // detach 后台托管任务的落盘根目录
 
 	mu      sync.Mutex
 	seen    map[string]time.Time // 任务 ID → 首次受理时间
 	running int
+	active  map[string]*activeTask // 普通在途任务的终止句柄，供 cancel 终止
 }
 
 func newExecRunner(allow bool) *execRunner {
-	return &execRunner{allow: allow, seen: make(map[string]time.Time)}
+	return &execRunner{
+		allow:  allow,
+		jobDir: defaultDetachBaseDir(),
+		seen:   make(map[string]time.Time),
+		active: make(map[string]*activeTask),
+	}
+}
+
+// defaultDetachBaseDir 选择 detach 后台任务的落盘目录。
+//
+// 优先用 /var/lib/moss-agent/jobs（跨重启持久且不与 systemd PrivateTmp 隔离冲突）；
+// 非 root 环境（如本地单测）写不进去时回退到临时目录。
+func defaultDetachBaseDir() string {
+	const prodDir = "/var/lib/moss-agent/jobs"
+	if err := os.MkdirAll(prodDir, 0o700); err == nil {
+		return prodDir
+	}
+	fallback := filepath.Join(os.TempDir(), "moss-jobs")
+	_ = os.MkdirAll(fallback, 0o700)
+	return fallback
+}
+
+// sanitizeJobToken 过滤任务 ID 中的特殊字符，仅保留字母、数字、横线与下划线。
+func sanitizeJobToken(id string) string {
+	var b strings.Builder
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// jobUnit 生成 detach 后台托管任务的 systemd 单元名（moss-job-<id>）。
+func jobUnit(id string) string {
+	return "moss-job-" + sanitizeJobToken(id)
+}
+
+// jobPath 返回某个 detach 任务在磁盘上的工作目录路径。
+func (r *execRunner) jobPath(id string) string {
+	tok := sanitizeJobToken(id)
+	if tok == "" {
+		tok = "hex_" + hex.EncodeToString([]byte(id))
+	}
+	base := r.jobDir
+	if base == "" {
+		base = defaultDetachBaseDir()
+	}
+	return filepath.Join(base, tok)
 }
 
 // admit 校验准入并登记，返回拒绝原因（空串表示放行）。
@@ -103,10 +165,166 @@ func (r *execRunner) Handle(c sender, task protocol.ExecTask) {
 		sendExecFinal(c, task.ID, 0, reason, false)
 		return
 	}
+	if task.Detach {
+		go func() {
+			// systemd-run 拉起后台服务后立刻返回，并发槽随即释放，长任务不占流式槽位
+			defer r.done()
+			r.runDetach(c, task)
+		}()
+		return
+	}
 	go func() {
 		defer r.done()
 		r.run(c, task)
 	}()
+}
+
+func (r *execRunner) runDetach(c sender, task protocol.ExecTask) {
+	timeout := task.Timeout
+	if timeout <= 0 {
+		timeout = protocol.ExecDetachDefaultTimeout
+	}
+	if timeout > protocol.ExecDetachMaxTimeout {
+		timeout = protocol.ExecDetachMaxTimeout
+	}
+	unit, err := r.startDetachedJob(task, timeout)
+	if err != nil {
+		sendExecFinal(c, task.ID, 0, err.Error(), false)
+		return
+	}
+	if err := c.send(protocol.AgentMsg{
+		Type: "exec_result",
+		Exec: &protocol.ExecResult{
+			ID:       task.ID,
+			Done:     true,
+			Detached: true,
+			Unit:     unit,
+		},
+	}); err != nil {
+		log.Printf("回传 detach 启动结果失败: %v", err)
+	}
+}
+
+// HandleJobQuery 处理服务端发来的后台任务状态与日志分段读取请求。
+func (r *execRunner) HandleJobQuery(c sender, q protocol.JobQuery) {
+	go func() {
+		st := r.queryDetachedJob(q)
+		if err := c.send(protocol.AgentMsg{Type: "job_status", JobStatus: &st}); err != nil {
+			log.Printf("回传任务状态失败: %v", err)
+		}
+	}()
+}
+
+// HandleJobCancel 处理服务端发来的任务取消请求（兼顾普通在途任务与 detach 后台任务）。
+func (r *execRunner) HandleJobCancel(c sender, req protocol.JobCancel) {
+	go func() {
+		r.mu.Lock()
+		act := r.active[req.JobID]
+		r.mu.Unlock()
+		if act != nil {
+			act.canceled.Store(true)
+			act.killer.KillTree()
+			st := protocol.JobStatus{
+				ReqID:    req.ReqID,
+				JobID:    req.JobID,
+				Found:    true,
+				Running:  false,
+				Canceled: true,
+				ExitCode: -1,
+				Error:    "任务已取消",
+			}
+			_ = c.send(protocol.AgentMsg{Type: "job_status", JobStatus: &st})
+			return
+		}
+		st := r.cancelDetachedJob(req)
+		if err := c.send(protocol.AgentMsg{Type: "job_status", JobStatus: &st}); err != nil {
+			log.Printf("回传任务取消结果失败: %v", err)
+		}
+	}()
+}
+
+// parseDetachStatusFile 解析状态文件内容（格式：<kind>:<code>）。
+func parseDetachStatusFile(raw string) (canceled bool, exitCode int, errMsg string) {
+	raw = strings.TrimSpace(raw)
+	kind, codeStr, _ := strings.Cut(raw, ":")
+	code, err := strconv.Atoi(strings.TrimSpace(codeStr))
+	if err != nil {
+		code = -1
+	}
+	switch kind {
+	case "exited", "success", "exit-code":
+		if kind == "success" && codeStr == "" {
+			code = 0
+		}
+		return false, code, ""
+	case "canceled":
+		return true, -1, "任务已取消"
+	case "timeout":
+		return false, -1, "执行超时，后台任务已由 systemd 终止 (RuntimeMaxSec)"
+	case "oom-kill":
+		return false, -1, "后台任务因内存不足 (OOM) 被终止"
+	case "lost":
+		return false, -1, "后台任务单元已停止，未捕获到退出码"
+	default:
+		return false, code, "后台任务异常终止 (" + raw + ")"
+	}
+}
+
+// writeDetachStatusAtomic 原子写入状态文件，避免读取方看到半截内容。
+func writeDetachStatusAtomic(dir, content string) error {
+	statusPath := filepath.Join(dir, "status")
+	tmpPath := filepath.Join(dir, "status.tmp")
+	if err := os.WriteFile(tmpPath, []byte(content+"\n"), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, statusPath)
+}
+
+// readLogSlice 从磁盘日志文件按 offset 或 tail 读取一段字节（上限收敛至 ExecChunkSize）。
+//
+// limit < 0 表示仅获取当前文件总大小而不读取内容。
+func readLogSlice(logPath string, offset, tailBytes int64, limit int) (data []byte, actualOffset, nextOffset, totalBytes int64) {
+	fi, err := os.Stat(logPath)
+	if err != nil {
+		return nil, 0, 0, 0
+	}
+	totalBytes = fi.Size()
+	if limit < 0 {
+		return nil, totalBytes, totalBytes, totalBytes
+	}
+	if limit == 0 || limit > protocol.ExecChunkSize {
+		limit = protocol.ExecChunkSize
+	}
+	start := offset
+	if tailBytes > 0 {
+		start = totalBytes - tailBytes
+	}
+	if start < 0 {
+		start = 0
+	}
+	if start > totalBytes {
+		start = totalBytes
+	}
+	remain := totalBytes - start
+	if remain <= 0 {
+		return nil, start, start, totalBytes
+	}
+	toRead := int64(limit)
+	if remain < toRead {
+		toRead = remain
+	}
+	f, err := os.Open(logPath)
+	if err != nil {
+		return nil, start, start, totalBytes
+	}
+	defer f.Close()
+	buf := make([]byte, toRead)
+	n, err := f.ReadAt(buf, start)
+	if err != nil && !errors.Is(err, io.EOF) && n == 0 {
+		return nil, start, start, totalBytes
+	}
+	buf = buf[:n]
+	return buf, start, start + int64(n), totalBytes
 }
 
 // chunk 是输出读取协程与发送协程之间传递的数据单元。
@@ -166,6 +384,16 @@ func (r *execRunner) run(c sender, task protocol.ExecTask) {
 
 	// 超时强杀。timedOut 必须用原子量：写在定时器协程，读在 Wait() 之后的主协程，
 	// 而“杀进程 → Wait 返回”是经由操作系统传递的，不构成 Go 内存模型的 happens-before。
+	act := &activeTask{killer: killer}
+	r.mu.Lock()
+	r.active[task.ID] = act
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		delete(r.active, task.ID)
+		r.mu.Unlock()
+	}()
+
 	var timedOut atomic.Bool
 	var forcedDrain atomic.Bool
 	timer := time.AfterFunc(time.Duration(timeout)*time.Second, func() {
@@ -236,6 +464,10 @@ func (r *execRunner) run(c sender, task protocol.ExecTask) {
 	// Close 幂等，与函数出口的 defer 重复调用无害。
 	killer.Close()
 
+	if act.canceled.Load() {
+		sendExecFinal(c, task.ID, sent, "任务已取消", truncated)
+		return
+	}
 	if timedOut.Load() {
 		msg := "执行超时，进程树已终止"
 		if forcedDrain.Load() {

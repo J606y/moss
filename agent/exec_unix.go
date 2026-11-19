@@ -4,12 +4,18 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
+
+	"moss/internal/protocol"
 )
 
 // ---- 为什么需要 cgroup，而不只是进程组 ----
@@ -69,11 +75,7 @@ func systemdRunUsable() bool {
 	return systemdRunOK
 }
 
-// scopeUnit 由任务 ID 生成 systemd 单元名。
-//
-// 只保留字母数字：单元名的合法字符集有限，而 jobID 的字母表将来可能变。
-// 与其信任上游，不如在这里过滤掉——一个非法单元名会让 systemd-run 直接失败，
-// 那就等于这条命令根本执行不了。
+// scopeUnit 由任务 ID 生成流式执行的 systemd scope 单元名。
 func scopeUnit(id string) string {
 	var b strings.Builder
 	b.WriteString("moss-exec-")
@@ -151,4 +153,238 @@ func (k *unixKiller) Close() {
 	k.mu.Lock()
 	k.closed = true
 	k.mu.Unlock()
+}
+
+/* ---------- detach 后台托管（systemd-run --unit=moss-job-<id>） ---------- */
+
+// buildDetachSystemdArgs 构造 systemd-run 启动后台托管服务的参数列表。
+//
+// 关键设计：
+//   - 不加 --scope：以 transient service 单元交由 PID 1 systemd 托管，命令立即返回且彻底脱离 moss-agent；
+//   - RuntimeMaxSec 控制最长运行时间（最高 24 小时），超时由 systemd 自动终止整个 cgroup；
+//   - ExecStopPost 作为兜底：无论正常退出、RuntimeMaxSec 超时、OOM 还是 systemctl stop，
+//     都在单元回收前把 SERVICE_RESULT 与 EXIT_STATUS 原子写入状态文件。
+func buildDetachSystemdArgs(unit, dir, runScript, postScript string, timeout int) []string {
+	args := []string{
+		"--unit=" + unit,
+		"--quiet",
+		"--collect",
+		"-p", "RuntimeMaxSec=" + strconv.Itoa(timeout),
+		"-p", "ExecStopPost=/bin/sh " + postScript,
+	}
+	if dir != "" {
+		args = append(args, "--working-directory="+dir)
+	}
+	args = append(args, "/bin/sh", runScript)
+	return args
+}
+
+// pruneDetachedJobDirs 顺带清理已结束且超过保留期的磁盘任务目录。
+func (r *execRunner) pruneDetachedJobDirs() {
+	base := r.jobDir
+	if base == "" {
+		return
+	}
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(base, e.Name())
+		fi, err := os.Stat(filepath.Join(dir, "status"))
+		if err != nil {
+			continue // 尚无 status 文件说明可能仍在运行，绝不清理
+		}
+		if now.Sub(fi.ModTime()) > detachKeepAge {
+			_ = os.RemoveAll(dir)
+		}
+	}
+}
+
+// startDetachedJob 用 systemd-run --unit=moss-job-<id> 拉起后台托管任务并立即返回。
+func (r *execRunner) startDetachedJob(task protocol.ExecTask, timeout int) (string, error) {
+	if _, err := exec.LookPath("systemd-run"); err != nil {
+		return "", errors.New("本机未找到 systemd-run，无法启动 detach 后台托管任务")
+	}
+	if task.Dir != "" {
+		fi, err := os.Stat(task.Dir)
+		if err != nil || !fi.IsDir() {
+			return "", fmt.Errorf("工作目录不存在或不可用: %s", task.Dir)
+		}
+	}
+
+	r.pruneDetachedJobDirs()
+
+	dir := r.jobPath(task.ID)
+	_ = os.RemoveAll(dir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("创建任务目录失败: %w", err)
+	}
+
+	logPath := filepath.Join(dir, "output.log")
+	cmdScript := filepath.Join(dir, "cmd.sh")
+	runScript := filepath.Join(dir, "run.sh")
+	postScript := filepath.Join(dir, "post.sh")
+	statusPath := filepath.Join(dir, "status")
+	statusTmp := filepath.Join(dir, "status.tmp")
+
+	// 预先创建空日志文件，使任务刚启动时的首次 get_result 即可正常打开读取。
+	if err := os.WriteFile(logPath, nil, 0o600); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", fmt.Errorf("创建日志文件失败: %w", err)
+	}
+	// 用户命令单独落脚本文件，彻底规避多层引号、换行、heredoc 与 exit 提前退出外层包装的问题。
+	if err := os.WriteFile(cmdScript, []byte(task.Cmd+"\n"), 0o700); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", fmt.Errorf("写入命令脚本失败: %w", err)
+	}
+
+	runBody := fmt.Sprintf(`#!/bin/sh
+/bin/sh %q >> %q 2>&1
+code=$?
+if [ ! -f %q ]; then
+	printf 'exited:%%d\n' "$code" > %q && mv %q %q
+fi
+exit "$code"
+`, cmdScript, logPath, statusPath, statusTmp, statusTmp, statusPath)
+	if err := os.WriteFile(runScript, []byte(runBody), 0o700); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", fmt.Errorf("写入启动包装脚本失败: %w", err)
+	}
+
+	postBody := fmt.Sprintf(`#!/bin/sh
+if [ ! -f %q ]; then
+	printf '%%s:%%s\n' "${SERVICE_RESULT:-unknown}" "${EXIT_STATUS:-1}" > %q && mv %q %q
+fi
+`, statusPath, statusTmp, statusTmp, statusPath)
+	if err := os.WriteFile(postScript, []byte(postBody), 0o700); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", fmt.Errorf("写入收尾脚本失败: %w", err)
+	}
+
+	unit := jobUnit(task.ID)
+	args := buildDetachSystemdArgs(unit, task.Dir, runScript, postScript, timeout)
+	out, err := exec.Command("systemd-run", args...).CombinedOutput()
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		detail := strings.TrimSpace(string(out))
+		if detail != "" {
+			return "", fmt.Errorf("systemd-run 启动失败: %v (%s)", err, detail)
+		}
+		return "", fmt.Errorf("systemd-run 启动失败: %v", err)
+	}
+	return unit + ".service", nil
+}
+
+// inspectDetachedState 读取指定后台托管任务当前的运行状态与退出码。
+func (r *execRunner) inspectDetachedState(dir, unit string) (running, canceled bool, exitCode int, errMsg string) {
+	statusPath := filepath.Join(dir, "status")
+	if b, err := os.ReadFile(statusPath); err == nil && len(strings.TrimSpace(string(b))) > 0 {
+		canceled, exitCode, errMsg = parseDetachStatusFile(string(b))
+		return false, canceled, exitCode, errMsg
+	}
+
+	// 状态文件尚未生成时，向 systemd 确认单元是否仍在运行。
+	if err := exec.Command("systemctl", "is-active", "--quiet", unit+".service").Run(); err == nil {
+		return true, false, 0, ""
+	}
+
+	// 单元已不活跃：给 ExecStopPost 留出极短落盘窗口后再读一次 status 文件，
+	// 避免恰好在进程退出与 ExecStopPost 写盘之间读到空状态。
+	time.Sleep(50 * time.Millisecond)
+	if b, err := os.ReadFile(statusPath); err == nil && len(strings.TrimSpace(string(b))) > 0 {
+		canceled, exitCode, errMsg = parseDetachStatusFile(string(b))
+		return false, canceled, exitCode, errMsg
+	}
+
+	// 单元已消失且无状态文件（例如机器重启过），落盘标记以免后续每次都调 systemctl。
+	_ = writeDetachStatusAtomic(dir, "lost:-1")
+	return false, false, -1, "后台任务单元已停止，未捕获到退出码"
+}
+
+// queryDetachedJob 读取后台托管任务的状态与指定区间（offset 或 tail）的磁盘日志。
+func (r *execRunner) queryDetachedJob(q protocol.JobQuery) protocol.JobStatus {
+	dir := r.jobPath(q.JobID)
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		return protocol.JobStatus{
+			ReqID: q.ReqID,
+			JobID: q.JobID,
+			Found: false,
+			Error: "目标机上找不到该后台任务的磁盘记录",
+		}
+	}
+	unit := jobUnit(q.JobID)
+	running, canceled, exitCode, errMsg := r.inspectDetachedState(dir, unit)
+	logPath := filepath.Join(dir, "output.log")
+	data, actualOffset, nextOffset, totalBytes := readLogSlice(logPath, q.Offset, q.Tail, q.Limit)
+	return protocol.JobStatus{
+		ReqID:      q.ReqID,
+		JobID:      q.JobID,
+		Unit:       unit + ".service",
+		Found:      true,
+		Running:    running,
+		Canceled:   canceled,
+		ExitCode:   exitCode,
+		Error:      errMsg,
+		Data:       data,
+		Offset:     actualOffset,
+		NextOffset: nextOffset,
+		TotalBytes: totalBytes,
+	}
+}
+
+// cancelDetachedJob 终止后台托管任务的 systemd 单元并落盘取消状态。
+func (r *execRunner) cancelDetachedJob(req protocol.JobCancel) protocol.JobStatus {
+	dir := r.jobPath(req.JobID)
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		return protocol.JobStatus{
+			ReqID: req.ReqID,
+			JobID: req.JobID,
+			Found: false,
+			Error: "目标机上找不到该后台任务的磁盘记录",
+		}
+	}
+	unit := jobUnit(req.JobID)
+	statusPath := filepath.Join(dir, "status")
+	if b, err := os.ReadFile(statusPath); err == nil && len(strings.TrimSpace(string(b))) > 0 {
+		canceled, exitCode, errMsg := parseDetachStatusFile(string(b))
+		_, _, _, totalBytes := readLogSlice(filepath.Join(dir, "output.log"), 0, 0, -1)
+		return protocol.JobStatus{
+			ReqID:      req.ReqID,
+			JobID:      req.JobID,
+			Unit:       unit + ".service",
+			Found:      true,
+			Running:    false,
+			Canceled:   canceled,
+			ExitCode:   exitCode,
+			Error:      errMsg,
+			Offset:     totalBytes,
+			NextOffset: totalBytes,
+			TotalBytes: totalBytes,
+		}
+	}
+
+	// 先写状态文件再停单元，防止 ExecStopPost 抢先把状态写成 signal:TERM。
+	_ = writeDetachStatusAtomic(dir, "canceled:130")
+	_ = exec.Command("systemctl", "stop", unit+".service").Run()
+	_ = exec.Command("systemctl", "kill", "--kill-whom=all", "--signal=SIGKILL", unit+".service").Run()
+
+	_, _, _, totalBytes := readLogSlice(filepath.Join(dir, "output.log"), 0, 0, -1)
+	return protocol.JobStatus{
+		ReqID:      req.ReqID,
+		JobID:      req.JobID,
+		Unit:       unit + ".service",
+		Found:      true,
+		Running:    false,
+		Canceled:   true,
+		ExitCode:   -1,
+		Error:      "任务已取消",
+		Offset:     totalBytes,
+		NextOffset: totalBytes,
+		TotalBytes: totalBytes,
+	}
 }

@@ -1,11 +1,14 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -34,11 +37,74 @@ var (
 )
 
 // collectWarnInterval 同一类采集失败的日志间隔。
+var (
+	nodeUUIDOnce   sync.Once
+	cachedNodeUUID string
+)
+
+// resolveNodeUUID 获取或持久化节点的固定 UUID。
 //
-// 采集失败几乎都是持续性的（权限不足、/proc 不可读、内核不支持），
-// 按每 2 秒一拍的上报频率不限流的话一天能刷出 4 万条相同的日志，
-// 把 journal 撑爆并淹掉真正有价值的记录。按「错误类别」限流而不是按次数丢弃，
-// 保证每一类故障始终看得见，运维至少能发现「这台机器的某个指标一直取不到」。
+// 优先级：
+//  1. 环境变量 MOSS_NODE_UUID（支持显式指定）；
+//  2. 本地持久化文件 /var/lib/moss-agent/node.uuid（跨重装、重注册稳定）；
+//  3. 操作系统/硬件 machine-id（gopsutil host.Info().HostID 或 /etc/machine-id）；
+//  4. 随机生成的 UUID v4 并落盘保存。
+func resolveNodeUUID(hi *host.InfoStat, persistPath string) string {
+	if v := strings.TrimSpace(os.Getenv("MOSS_NODE_UUID")); v != "" {
+		return strings.ToLower(v)
+	}
+	if persistPath != "" {
+		if b, err := os.ReadFile(persistPath); err == nil {
+			if id := strings.ToLower(strings.TrimSpace(string(b))); len(id) >= 8 {
+				return id
+			}
+		}
+	}
+	var candidate string
+	if hi != nil && strings.TrimSpace(hi.HostID) != "" {
+		candidate = strings.ToLower(strings.TrimSpace(hi.HostID))
+	}
+	if candidate == "" && runtime.GOOS == "linux" {
+		for _, p := range []string{"/etc/machine-id", "/var/lib/dbus/machine-id"} {
+			if b, err := os.ReadFile(p); err == nil {
+				if id := strings.ToLower(strings.TrimSpace(string(b))); len(id) >= 8 {
+					candidate = id
+					break
+				}
+			}
+		}
+	}
+	if candidate == "" {
+		var raw [16]byte
+		_, _ = rand.Read(raw[:])
+		raw[6] = (raw[6] & 0x0f) | 0x40
+		raw[8] = (raw[8] & 0x3f) | 0x80
+		candidate = fmt.Sprintf("%s-%s-%s-%s-%s",
+			hex.EncodeToString(raw[0:4]),
+			hex.EncodeToString(raw[4:6]),
+			hex.EncodeToString(raw[6:8]),
+			hex.EncodeToString(raw[8:10]),
+			hex.EncodeToString(raw[10:16]))
+	}
+	if persistPath != "" {
+		if err := os.MkdirAll(filepath.Dir(persistPath), 0o700); err == nil {
+			_ = os.WriteFile(persistPath, []byte(candidate+"\n"), 0o600)
+		}
+	}
+	return candidate
+}
+
+func getNodeUUID(hi *host.InfoStat) string {
+	nodeUUIDOnce.Do(func() {
+		persistPath := "/var/lib/moss-agent/node.uuid"
+		if runtime.GOOS == "windows" {
+			persistPath = filepath.Join(os.TempDir(), "moss-agent-node.uuid")
+		}
+		cachedNodeUUID = resolveNodeUUID(hi, persistPath)
+	})
+	return cachedNodeUUID
+}
+
 const collectWarnInterval = 10 * time.Minute
 
 var (
@@ -155,7 +221,8 @@ func collectInfo() protocol.AgentInfo {
 		CPUCores:     runtime.NumCPU(),
 		AgentVersion: agentVersion,
 	}
-	if hi, err := host.Info(); err == nil {
+	hi, err := host.Info()
+	if err == nil {
 		osName := hi.Platform
 		if hi.PlatformVersion != "" && !strings.Contains(osName, hi.PlatformVersion) {
 			// debian + 12 → Debian 12；Windows 的 Platform 已含版本号
@@ -167,6 +234,7 @@ func collectInfo() protocol.AgentInfo {
 		}
 		info.Virtualization = detectVirt(hi)
 	}
+	info.UUID = getNodeUUID(hi)
 	if cis, err := cpu.Info(); err == nil && len(cis) > 0 {
 		info.CPUModel = strings.TrimSpace(cis[0].ModelName)
 	}

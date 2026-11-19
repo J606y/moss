@@ -37,7 +37,7 @@ type notifyConfig struct {
 	// 晚几十秒毫无损失；而误发一次会让人以为没事了，实际还在反复。
 	RecoverSec int  `json:"recoverSec"`
 	ExpireOn   bool `json:"expireOn"`
-	ExpireDays int  `json:"expireDays"` // 到期前几天提醒，1~7
+	ExpireDays int  `json:"expireDays"`
 }
 
 func loadNotifyConfig(db *sql.DB) notifyConfig {
@@ -74,24 +74,19 @@ type alertState struct {
 
 // Notifier 离线/负载告警引擎，事件由 Hub 驱动，离线判定走独立检查循环。
 type Notifier struct {
-	db *sql.DB
-
-	// isOnline 从 Hub 取节点实时在线状态（main.go 注入），GCP 自动开机
-	// 靠它而非 WS 断连事件判离线，面板重启后仍能守护已离线节点。
+	db       *sql.DB
 	isOnline func(id string) bool
 
 	mu     sync.Mutex
 	cfg    notifyConfig
 	states map[string]*alertState
 
-	gcpCfg gcpConfig
-	gcp    map[string]*gcpState
-	// gcpClients 按凭证 id 缓存已建好的客户端（连同它内部的 OAuth token）。
-	// 必须按 id 分槽：单槽时两个账号的节点交替开机会互相冲刷，
-	// 每轮都要重签 JWT 重换 token。凭证变更后由 Reload 整体清空。
+	gcpCfg     gcpConfig
+	gcp        map[string]*gcpState
 	gcpClients map[string]*gcpCachedClient
 
-	webhook webhookConfig
+	webhook   webhookConfig
+	lastFired map[string]time.Time // 告警推送防抖表：eventKey → 最近一次推送时刻
 }
 
 // gcpCachedClient 缓存槽。留着 raw 是因为「更换同一份凭证的密钥」时 id 不变、
@@ -101,17 +96,58 @@ type gcpCachedClient struct {
 	cli *gcpClient
 }
 
-// fire 是所有告警的唯一出口：一份事件同时走 Telegram 与 webhook。
-//
-// 统一出口而非在每个告警点分别调两次，是为了避免新增通道时漏改某个分支——
-// 告警点有六处，漏一处就意味着某类故障永远不会通知到人。
+// alertDedupKey 生成单条告警事件的防抖键（按事件类型 + 节点 + 指标区分）。
+func alertDedupKey(ev alertEvent) string {
+	target := ev.ServerID
+	if target == "" {
+		target = ev.ServerName
+	}
+	return ev.Type + "|" + target + "|" + ev.Metric
+}
+
+// shouldDebounce 判断该告警事件是否落在防抖冷却窗口内；若是恢复事件，顺带清除对应告警事件的冷却记录。
+func (n *Notifier) shouldDebounce(ev alertEvent) (webhookConfig, bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	wh := n.webhook
+	if n.lastFired == nil {
+		n.lastFired = make(map[string]time.Time)
+	}
+	target := ev.ServerID
+	if target == "" {
+		target = ev.ServerName
+	}
+	// 恢复事件到达时清除对应故障告警的防抖记录，确保下一次真实故障能立即告警。
+	switch ev.Type {
+	case evtServerOnline:
+		delete(n.lastFired, evtServerOffline+"|"+target+"|")
+	case evtLoadRecovered:
+		delete(n.lastFired, evtLoadAlert+"|"+target+"|"+ev.Metric)
+	case evtNetRecovered:
+		delete(n.lastFired, evtNetAlert+"|"+target+"|"+ev.Metric)
+	}
+	if ev.Type == "test" || wh.DebounceSec <= 0 {
+		return wh, false
+	}
+	key := alertDedupKey(ev)
+	now := time.Now()
+	window := time.Duration(wh.DebounceSec) * time.Second
+	if last, ok := n.lastFired[key]; ok && now.Sub(last) < window {
+		return wh, true
+	}
+	n.lastFired[key] = now
+	return wh, false
+}
+
+// fire 是所有告警的唯一出口：一份事件同时走 Telegram 与 webhook，并在出口做原生防抖抑制。
 func (n *Notifier) fire(cfg notifyConfig, ev alertEvent) {
 	if ev.Timestamp == 0 {
 		ev.Timestamp = time.Now().Unix()
 	}
-	n.mu.Lock()
-	wh := n.webhook
-	n.mu.Unlock()
+	wh, suppressed := n.shouldDebounce(ev)
+	if suppressed {
+		return
+	}
 
 	// 文案在这里才成形：告警产生处只给结构化字段与参数。
 	// 两条通道拿同一句话——webhook 的 text 本就是「人类可读兜底」，
@@ -146,6 +182,7 @@ func newNotifier(db *sql.DB) *Notifier {
 		gcp:        make(map[string]*gcpState),
 		gcpClients: make(map[string]*gcpCachedClient),
 		webhook:    loadWebhookConfig(db),
+		lastFired:  make(map[string]time.Time),
 	}
 }
 

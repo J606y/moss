@@ -14,6 +14,7 @@ import (
 const schema = `
 CREATE TABLE IF NOT EXISTS servers (
 	id TEXT PRIMARY KEY,
+	uuid TEXT NOT NULL DEFAULT '',
 	token TEXT UNIQUE NOT NULL,
 	name TEXT NOT NULL,
 	grp TEXT NOT NULL DEFAULT '默认',
@@ -90,7 +91,11 @@ CREATE TABLE IF NOT EXISTS exec_audit (
 	error TEXT NOT NULL DEFAULT '',
 	stdout TEXT NOT NULL DEFAULT '',
 	stderr TEXT NOT NULL DEFAULT '',
-	truncated INTEGER NOT NULL DEFAULT 0
+	truncated INTEGER NOT NULL DEFAULT 0,
+	detach INTEGER NOT NULL DEFAULT 0,
+	unit TEXT NOT NULL DEFAULT '',
+	canceled INTEGER NOT NULL DEFAULT 0,
+	log_bytes INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_exec_audit_job ON exec_audit(job_id);
 CREATE INDEX IF NOT EXISTS idx_exec_audit_time ON exec_audit(started_at);
@@ -104,14 +109,9 @@ CREATE TABLE IF NOT EXISTS api_keys (
 	expires_at INTEGER NOT NULL DEFAULT 0,
 	created_at INTEGER NOT NULL,
 	last_used_at INTEGER NOT NULL DEFAULT 0,
-	-- revoked 现表示「已停用」（可再启用）。列名保留是为了不迁移已有数据。
 	revoked INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
--- GCP Spot 自动开机的 Service Account 凭证，可并存多份（多账号），每台节点绑一份。
--- project_id / client_email 是从 sa_json 里解析出来后冗余存下的：列表页要显示它们，
--- 而解密可能失败（主密钥变更），那时仍需把这条凭证如实列出来而不是伪装成「未配置」。
--- sa_json 存密文（encryptSecret），任何接口都不回显。
 CREATE TABLE IF NOT EXISTS gcp_credentials (
 	id TEXT PRIMARY KEY,
 	project_id TEXT NOT NULL,
@@ -119,8 +119,6 @@ CREATE TABLE IF NOT EXISTS gcp_credentials (
 	sa_json TEXT NOT NULL,
 	created_at INTEGER NOT NULL
 );
--- 同一个 SA 只该存一份：client_email 形如 name@project.iam.gserviceaccount.com，
--- 项目已嵌在里面，全局唯一，不存在跨项目重名。重复添加只会是误操作。
 CREATE UNIQUE INDEX IF NOT EXISTS idx_gcp_cred_email ON gcp_credentials(client_email);
 CREATE TABLE IF NOT EXISTS oauth_clients (
 	client_id TEXT PRIMARY KEY,
@@ -157,16 +155,13 @@ func pruneExecAudit(db *sql.DB, now time.Time, days, maxRows int) {
 }
 
 var defaultSettings = map[string]string{
-	keySiteName:       "Moss",
-	keySiteDesc:       "智控中心",
-	keyReportInterval: "2",
-	keySampleInterval: "10", // 秒：历史落库最细粒度，决定时间轴可缩放的下限
-	keyHistoryDays:    "7",
-	keyPingDays:       "7",
-	keyExecAuditDays:  "90", // 执行审计保留期。用户无法主动删除单条记录，只能整体设定保留时长
-	// 条数上限与保留期取先触发者。默认取满 5000：按实测单条均值约 1.2KB 计不到 6MB，
-	// 足够覆盖数十天的正常使用，同时为失控的高频调用守住磁盘——
-	// SQLite 撑爆磁盘会带走整个面板，比丢几条旧审计严重得多。
+	keySiteName:         "Moss",
+	keySiteDesc:         "智控中心",
+	keyReportInterval:   "2",
+	keySampleInterval:   "10",
+	keyHistoryDays:      "7",
+	keyPingDays:         "7",
+	keyExecAuditDays:    "90",
 	keyExecAuditMaxRows: "5000",
 }
 
@@ -192,6 +187,9 @@ func openDB(path string) (*sql.DB, error) {
 		return nil, err
 	}
 	// 老库迁移：CREATE TABLE IF NOT EXISTS 不会给已有表加新列，按需补齐。
+	if err := ensureColumn(db, "servers", "uuid", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, err
+	}
 	if err := ensureColumn(db, "servers", "auto_flag", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
@@ -221,6 +219,16 @@ func openDB(path string) (*sql.DB, error) {
 	}
 	// sample_interval 单位由「分钟」改为「秒」：老库存的是分钟值，首次升级一次性 ×60 迁移，
 	// 保持原有落库节奏不变；同时把仍是旧默认(30 天)的历史保留期下调到 7 天，配合更细的采样控制体积。
+	for col, def := range map[string]string{
+		"detach":    "INTEGER NOT NULL DEFAULT 0",
+		"unit":      "TEXT NOT NULL DEFAULT ''",
+		"canceled":  "INTEGER NOT NULL DEFAULT 0",
+		"log_bytes": "INTEGER NOT NULL DEFAULT 0",
+	} {
+		if err := ensureColumn(db, "exec_audit", col, def); err != nil {
+			return nil, err
+		}
+	}
 	if getSetting(db, keySampleUnitSec, "") == "" {
 		var v string
 		if err := db.QueryRow(`SELECT value FROM settings WHERE key = ?`, keySampleInterval).Scan(&v); err == nil {

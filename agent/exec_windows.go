@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"log"
 	"os"
 	"os/exec"
@@ -11,7 +12,10 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"moss/internal/protocol"
 )
+
+const errWindowsDetachUnsupported = "Windows 暂不支持 detach 后台托管模式"
 
 // buildShellCmd 用 COMSPEC（通常是 cmd.exe）执行命令。
 //
@@ -101,5 +105,27 @@ func (k *winKiller) Close() {
 	k.closed = true
 	if err := windows.CloseHandle(k.job); err != nil {
 		log.Printf("关闭 Job Object 句柄失败: %v", err)
+	}
+}
+
+func (r *execRunner) startDetachedJob(_ protocol.ExecTask, _ int) (string, error) {
+	return "", errors.New(errWindowsDetachUnsupported)
+}
+
+func (r *execRunner) queryDetachedJob(q protocol.JobQuery) protocol.JobStatus {
+	return protocol.JobStatus{
+		ReqID: q.ReqID,
+		JobID: q.JobID,
+		Found: false,
+		Error: errWindowsDetachUnsupported,
+	}
+}
+
+func (r *execRunner) cancelDetachedJob(req protocol.JobCancel) protocol.JobStatus {
+	return protocol.JobStatus{
+		ReqID: req.ReqID,
+		JobID: req.JobID,
+		Found: false,
+		Error: errWindowsDetachUnsupported,
 	}
 }
