@@ -94,15 +94,23 @@ type JobStatus struct {
 }
 
 // WriteTask server → agent 的文件写入任务。
+//
+// 不复用 ExecTask + heredoc：shell 转义是 AI 写配置文件时最高频的出错点，
+// 且内容混在命令行里无法原样审计。独立任务类型让「写了什么」可以逐字节留痕。
 type WriteTask struct {
 	ID     string `json:"id"`
 	Path   string `json:"path"`
 	Data   []byte `json:"data"`
-	Mode   uint32 `json:"mode,omitempty"`
-	Append bool   `json:"append,omitempty"`
-	Mkdir  bool   `json:"mkdir,omitempty"`
+	Mode   uint32 `json:"mode,omitempty"`   // 0 表示用 0644
+	Append bool   `json:"append,omitempty"` // 追加而非覆盖
+	Mkdir  bool   `json:"mkdir,omitempty"`  // 自动创建父目录
 }
 
+// WriteSizeCap 单次写入的内容上限。
+//
+// WS 单条消息上限 64KB，base64 后膨胀约 33%，故内容取 48KB 上限一次装得下，
+// 无需为写入再实现一套分片重组。nginx 配置、compose 文件、systemd 单元
+// 都在几 KB 量级，48KB 覆盖绝大多数场景；更大的文件本就应当用 exec 去目标机拉取。
 const WriteSizeCap = 48 << 10
 
 // ReadTask server → agent 的分块文件读取/下载任务。
@@ -140,28 +148,37 @@ const (
 	UpgradeStageRestarting  = "restarting"
 )
 
+// UpgradeDefaultGrace 新 agent 重启后允许的最长失联时间（秒）。
+// 正常重连在数秒内完成，60s 给足富余；再长则机器失联时间不可接受。
 const UpgradeDefaultGrace = 60
 
 // UpgradeResult agent → server 的升级进度。
+//
+// 收不到最终成功回执是正常的：agent 在 restarting 阶段就会被重启掐断连接。
+// 真正的成功判据是「agent 重新连上来且上报的版本号等于目标版本」，由 server 侧判定。
 type UpgradeResult struct {
 	ID    string `json:"id"`
 	Stage string `json:"stage"`
-	Error string `json:"error,omitempty"`
+	Error string `json:"error,omitempty"` // 非空表示升级在该阶段失败，此时不会重启
 }
 
 // ExecResult agent → server 的执行输出分片。
+// 输出流式回传：同一个 ID 会产生多条 Seq 递增的分片，最后一条 Done=true 且携带退出码。
 type ExecResult struct {
 	ID     string `json:"id"`
-	Seq    int    `json:"seq"`
-	Stream string `json:"stream,omitempty"`
-	Data   []byte `json:"data,omitempty"`
+	Seq    int    `json:"seq"`              // 分片序号，从 0 递增，供 server 侧排序重组
+	Stream string `json:"stream,omitempty"` // stdout / stderr
+	// Data 用 []byte 而非 string：命令输出可能含非 UTF-8 字节，
+	// Go 的 encoding/json 会把无效 UTF-8 的 string 替换成 U+FFFD 从而损坏输出，
+	// []byte 走 base64 可原样往返。
+	Data []byte `json:"data,omitempty"`
 
-	Done      bool   `json:"done"`
+	Done      bool   `json:"done"` // true 表示本次执行结束，此后不再有分片
 	Detached  bool   `json:"detached,omitempty"`
 	Unit      string `json:"unit,omitempty"`
-	ExitCode  int    `json:"exitCode,omitempty"`
-	Error     string `json:"error,omitempty"`
-	Truncated bool   `json:"truncated,omitempty"`
+	ExitCode  int    `json:"exitCode,omitempty"`  // 仅 Done=true 且 Error 为空时有效
+	Error     string `json:"error,omitempty"`     // 非空表示未能正常执行（拒绝/超时/启动失败）
+	Truncated bool   `json:"truncated,omitempty"` // 输出触顶 ExecOutputCap 被截断
 }
 
 // AgentMsg agent → server。
@@ -171,7 +188,7 @@ type AgentMsg struct {
 	Stats     *Stats     `json:"stats,omitempty"`
 	UptimeSec uint64     `json:"uptimeSec,omitempty"`
 	TaskID    int64      `json:"taskId,omitempty"`
-	Ms        int        `json:"ms"`
+	Ms        int        `json:"ms"` // -1 表示探测失败/丢包；agent 将 <1ms 记为 1ms，故 0 不会出现
 
 	Exec      *ExecResult    `json:"exec,omitempty"`
 	Upgrade   *UpgradeResult `json:"upgrade,omitempty"`

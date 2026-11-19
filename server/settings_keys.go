@@ -40,8 +40,13 @@ const (
 	// 面板自更新
 	keyPanelChannel    = "panel_update_channel"
 	keyPanelAutoUpdate = "panel_update_auto"
+	// keyPanelHostServer 面板所在机器的 ID。必须显式指定，不做自动探测——
+	// NAT、多网卡、反代都会让「出口 IP 对得上」这种猜法出错，
+	// 而猜错的后果是把更新打到别的机器上。
 	keyPanelHostServer = "panel_host_server"
 
+	// keyGCPSAJSON 是多凭证之前的全局单份凭证，已由 migrateGCPCredentials 迁进
+	// gcp_credentials 表。保留不删：降级回旧版本仍能读到它，排障时也是原始凭证的唯一底本。
 	keyGCPSAJSON       = "gcp_sa_json"
 	keyGCPCredMigrated = "gcp_cred_migrated"
 

@@ -128,6 +128,11 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
 );
 `
 
+// pruneExecAudit 清理执行审计：按保留天数与条数上限，两条规则取先触发者。
+// maxRows 为 0 表示不限制条数。
+//
+// 单独成函数而不是内联在 cleanupLoop 里：这是会删数据的逻辑，
+// 写错就是静默删掉不该删的记录，必须能在测试里直接驱动。
 func pruneExecAudit(db *sql.DB, now time.Time, days, maxRows int) {
 	if _, err := db.Exec(
 		`DELETE FROM exec_audit WHERE started_at < ?`,
@@ -138,6 +143,9 @@ func pruneExecAudit(db *sql.DB, now time.Time, days, maxRows int) {
 	if maxRows <= 0 {
 		return
 	}
+	// 用主键比较而不是 `id NOT IN (SELECT ... LIMIT n)`：后者要为每一行做一次
+	// 集合判定，表大起来会很慢；这里只取第 n+1 新的那一行的 id 做一次范围删除。
+	// 表内不足 n 行时子查询返回 NULL，`id <= NULL` 恒为 NULL，一行都不会删。
 	if _, err := db.Exec(
 		`DELETE FROM exec_audit WHERE id <= (SELECT id FROM exec_audit ORDER BY id DESC LIMIT 1 OFFSET ?)`,
 		maxRows,
@@ -157,6 +165,10 @@ var defaultSettings = map[string]string{
 	keyExecAuditMaxRows: "5000",
 }
 
+// 审计条数上限的可设范围。
+//
+// 下限 100 而不是更小：设成个位数等于审计刚写进去就被冲掉，
+// 那不是「限制容量」而是「变相关闭审计」，与单条记录不可删除的原则相悖。
 const (
 	execAuditMinRows = 100
 	execAuditMaxRows = 5000
@@ -168,10 +180,13 @@ func openDB(path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	// WAL + busy_timeout 下少量并发连接安全；只留 1 个连接会在
+	// “rows 未关闭期间再发查询”时直接死锁，放宽到 4 兜底
 	db.SetMaxOpenConns(4)
 	if _, err := db.Exec(schema); err != nil {
 		return nil, err
 	}
+	// 老库迁移：CREATE TABLE IF NOT EXISTS 不会给已有表加新列，按需补齐。
 	if err := ensureColumn(db, "servers", "uuid", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
@@ -181,12 +196,16 @@ func openDB(path string) (*sql.DB, error) {
 	if err := ensureColumn(db, "servers", "ipv6", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
+	// 老库全为 0，ORDER BY sort, id 仍保持原有按 id 的顺序
 	if err := ensureColumn(db, "ping_tasks", "sort", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return nil, err
 	}
+	// 到期提醒去重标记：记录已就哪个到期日提醒过，防重启/每轮检查重复推送
 	if err := ensureColumn(db, "servers", "expire_notified", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
+	// GCP Spot 自动开机：project 留空时用所绑凭证 SA JSON 里的 project_id。
+	// gcp_cred_id 指向 gcp_credentials.id，老库由 migrateGCPCredentials 一次性回填。
 	for col, def := range map[string]string{
 		"gcp_enabled":  "INTEGER NOT NULL DEFAULT 0",
 		"gcp_project":  "TEXT NOT NULL DEFAULT ''",
@@ -198,6 +217,8 @@ func openDB(path string) (*sql.DB, error) {
 			return nil, err
 		}
 	}
+	// sample_interval 单位由「分钟」改为「秒」：老库存的是分钟值，首次升级一次性 ×60 迁移，
+	// 保持原有落库节奏不变；同时把仍是旧默认(30 天)的历史保留期下调到 7 天，配合更细的采样控制体积。
 	for col, def := range map[string]string{
 		"detach":    "INTEGER NOT NULL DEFAULT 0",
 		"unit":      "TEXT NOT NULL DEFAULT ''",
@@ -220,6 +241,9 @@ func openDB(path string) (*sql.DB, error) {
 		}
 		setSetting(db, keySampleUnitSec, "1")
 	}
+	// 站点描述随定位调整而变更。defaultSettings 走的是 INSERT OR IGNORE，
+	// 对已有库不生效，因此这里显式迁移——但只在仍是旧默认值时改，
+	// 用户自己改过的描述必须原样保留。
 	if getSetting(db, keySiteDesc, "") == "轻量服务器监控" {
 		setSetting(db, keySiteDesc, "智控中心")
 	}
@@ -231,6 +255,7 @@ func openDB(path string) (*sql.DB, error) {
 	return db, nil
 }
 
+// ensureColumn 在列不存在时给表追加列（SQLite 不支持 ADD COLUMN IF NOT EXISTS）。
 func ensureColumn(db *sql.DB, table, col, def string) error {
 	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
 	if err != nil {
@@ -247,7 +272,7 @@ func ensureColumn(db *sql.DB, table, col, def string) error {
 			return err
 		}
 		if name == col {
-			return nil
+			return nil // 已存在
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -281,6 +306,7 @@ func getSettingInt(db *sql.DB, key string, fallback int) int {
 const tokenChars = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 func randString(n int) string {
+	// 无偏采样：拒绝落在 [limit, 256) 区间的字节，避免取模偏置使前若干字符概率偏高。
 	limit := 256 - (256 % len(tokenChars))
 	out := make([]byte, 0, n)
 	buf := make([]byte, n)
@@ -303,6 +329,7 @@ func randString(n int) string {
 
 func newToken() string { return "mk_" + randString(16) }
 
+// cleanupLoop 周期清理过期历史数据与会话。
 func cleanupLoop(db *sql.DB) {
 	for {
 		histDays := getSettingInt(db, keyHistoryDays, 7)
@@ -320,8 +347,8 @@ func cleanupLoop(db *sql.DB) {
 		pruneExecAudit(db, now,
 			getSettingInt(db, keyExecAuditDays, 90),
 			getSettingInt(db, keyExecAuditMaxRows, execAuditMaxRows))
-		gcLoginAttempts(now)
-		gcOAuthCodes(now)
+		gcLoginAttempts(now) // 回收登录失败限流的内存 map，防无界增长
+		gcOAuthCodes(now)    // 回收过期 OAuth 一次性授权码
 		pruneOAuthClients(db, oauthMaxClients)
 		time.Sleep(time.Hour)
 	}

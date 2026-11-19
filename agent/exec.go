@@ -28,6 +28,19 @@ const (
 	detachKeepAge      = 7 * 24 * time.Hour
 
 	// execDrainGrace 是强杀之后仍等待输出管道关闭的宽限。
+	//
+	// 这个上限是必须的，不是保险。systemd 可用时 KillTree 走 cgroup、收得走
+	// 逃逸子孙（见 exec_unix.go），但容器里、非 root 无 polkit 授权时会回退到
+	// 进程组信号——那时已经 setsid 的子孙不在原进程组内、杀不掉，
+	// 它们会继续持有 stdout 管道的写端，
+	// 于是 pumpPipe 永远读不到 EOF、ch 永不关闭、run 永久挂起——
+	// 而 run 挂起意味着 defer r.done() 不执行、并发槽永不回落。
+	// 累计 execMaxConcurrent 次之后，这台机器再也无法执行任何命令，
+	// 只能重启 agent，且服务端只看到宽限超时，没有任何线索指向真因。
+	//
+	// 触发它不需要恶意：`setsid sleep 3600 &`、自行 fork+setsid 守护化的程序、
+	// 部分 `xxx start` 脚本都会。panel_update 的下发命令刻意写了
+	// `>/dev/null 2>&1 < /dev/null` 来避开，但 agent 侧本身必须有兜底。
 	execDrainGrace = 5 * time.Second
 )
 
@@ -339,6 +352,7 @@ func (r *execRunner) run(c sender, task protocol.ExecTask) {
 
 	// buildShellCmd 由平台文件实现：选定 shell、处理各自的命令行转义规则，
 	// 并预置进程组 / Job Object 所需属性，使超时后能连子孙进程一并终止。
+	// 只杀父进程会留下孤儿：`sh -c "sleep 999"` 里真正睡着的是 sleep 不是 sh。
 	cmd := buildShellCmd(task.ID, task.Cmd)
 	cmd.Dir = task.Dir
 
@@ -360,6 +374,7 @@ func (r *execRunner) run(c sender, task protocol.ExecTask) {
 
 	killer, err := newProcessKiller(task.ID, cmd)
 	if err != nil {
+		// 拿不到可靠的终止手段就不执行：宁可失败，也不留下杀不掉的进程。
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		sendExecFinal(c, task.ID, 0, "无法建立进程终止句柄: "+err.Error(), false)
@@ -367,6 +382,8 @@ func (r *execRunner) run(c sender, task protocol.ExecTask) {
 	}
 	defer killer.Close()
 
+	// 超时强杀。timedOut 必须用原子量：写在定时器协程，读在 Wait() 之后的主协程，
+	// 而“杀进程 → Wait 返回”是经由操作系统传递的，不构成 Go 内存模型的 happens-before。
 	act := &activeTask{killer: killer}
 	r.mu.Lock()
 	r.active[task.ID] = act
@@ -383,6 +400,16 @@ func (r *execRunner) run(c sender, task protocol.ExecTask) {
 		timedOut.Store(true)
 		killer.KillTree()
 
+		// 强杀之后再给一段宽限收尾。到点仍未 EOF，说明有子孙逃出了进程组、
+		// 正攥着管道写端不放——这时主动关掉父进程侧的读端，逼 pumpPipe 的
+		// Read 出错退出，ch 才能关闭、run 才能返回、并发槽才能释放。
+		//
+		// 关读端而不是直接 return 不排空：后者会漏掉两个 pumpPipe goroutine
+		// 和一对管道 fd，把「槽泄漏」换成「fd 泄漏」，没解决问题。
+		//
+		// 也不能改成并发 cmd.Wait() 来提前得知进程已退出——Wait 在进程回收后
+		// 会立即关闭父进程侧管道（closeDescriptors(parentIOPipes)），
+		// 那会把还缓冲在管道里、尚未读出的输出直接截断。
 		time.AfterFunc(execDrainGrace, func() {
 			forcedDrain.Store(true)
 			stdout.Close()
@@ -400,13 +427,14 @@ func (r *execRunner) run(c sender, task protocol.ExecTask) {
 		close(ch)
 	}()
 
+	// 单一发送协程：保证 Seq 全局单调，服务端可据此重组顺序。
 	var sent int
 	var total int
 	var truncated bool
-	broken := false
+	broken := false // 连接已断，停止回传但不影响命令继续执行
 	for ck := range ch {
 		if broken {
-			continue
+			continue // 必须继续排空 channel，否则读取协程阻塞 → 子进程写管道阻塞 → 永不退出
 		}
 		if total >= protocol.ExecOutputCap {
 			truncated = true
@@ -422,6 +450,7 @@ func (r *execRunner) run(c sender, task protocol.ExecTask) {
 			ID: task.ID, Seq: sent, Stream: ck.stream, Data: data,
 		}})
 		if err != nil {
+			// 连接断了。不杀进程：部署跑到一半被中断，比拿不到输出更糟。
 			log.Printf("回传执行输出失败: %v，命令继续在本机执行", err)
 			broken = true
 			continue
@@ -431,6 +460,8 @@ func (r *execRunner) run(c sender, task protocol.ExecTask) {
 
 	waitErr := cmd.Wait()
 	timer.Stop()
+	// 进程已回收，立即让 killer 失效，把「超时回调恰好在此刻触发」的窗口压到最小。
+	// Close 幂等，与函数出口的 defer 重复调用无害。
 	killer.Close()
 
 	if act.canceled.Load() {
@@ -440,6 +471,8 @@ func (r *execRunner) run(c sender, task protocol.ExecTask) {
 	if timedOut.Load() {
 		msg := "执行超时，进程树已终止"
 		if forcedDrain.Load() {
+			// 有子孙逃出了进程组，输出是被强制掐断的，不是自然结束——
+			// 这一点必须说出来，否则使用者会把不完整的输出当成全部。
 			msg = "执行超时；有子进程脱离进程组未能终止，输出已强制截断"
 			truncated = true
 		}
@@ -457,7 +490,7 @@ func (r *execRunner) run(c sender, task protocol.ExecTask) {
 		}
 	}
 	if broken {
-		return
+		return // 连接已断，收尾消息没有去处
 	}
 	if err := c.send(protocol.AgentMsg{Type: "exec_result", Exec: &protocol.ExecResult{
 		ID: task.ID, Seq: sent, Done: true, ExitCode: exitCode, Truncated: truncated,
@@ -478,7 +511,7 @@ func pumpPipe(wg *sync.WaitGroup, ch chan<- chunk, stream string, rc io.ReadClos
 			ch <- chunk{stream: stream, data: data}
 		}
 		if err != nil {
-			return
+			return // 含 io.EOF：进程退出后管道关闭
 		}
 	}
 }

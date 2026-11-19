@@ -16,6 +16,9 @@ import (
 )
 
 // mcpTools 返回工具清单。编译期固定，故 capabilities 里不声明 listChanged。
+//
+// 说明文字是写给模型看的，不是写给人看的：要讲清楚什么时候用、
+// 返回什么、有什么坑，模型才不会拿错工具或反复试错。
 func mcpTools() []mcpTool {
 	return []mcpTool{
 		{
@@ -229,8 +232,8 @@ func mcpTools() []mcpTool {
 			},
 		},
 		{
-			Name:  "cancel",
-			Title: "取消执行任务",
+			Name:        "cancel",
+			Title:       "取消执行任务",
 			Description: "终止正在运行的命令任务（支持 detach 后台托管任务与普通异步任务），并将取消状态持久化到数据库。",
 			InputSchema: map[string]any{
 				"type": "object",
@@ -252,8 +255,8 @@ func mcpTools() []mcpTool {
 			},
 		},
 		{
-			Name:  "list_jobs",
-			Title: "列出执行任务",
+			Name:        "list_jobs",
+			Title:       "列出执行任务",
 			Description: "列出命令执行任务（含 detach 后台长任务与普通异步任务）。任务元数据存于数据库，不受 30 分钟内存 TTL 和服务端重启影响；跨会话或重启后可用本工具找回在途或已完成的任务。",
 			InputSchema: map[string]any{
 				"type": "object",
@@ -400,6 +403,10 @@ func mcpTools() []mcpTool {
 }
 
 // mcpCallTool 分发工具调用。
+//
+// 返回值一律是 jsonrpcResponse 包着 mcpCallToolResult：
+// 工具层面的失败（越权、拦截、掉线、非零退出码）走 isError=true 让模型看见并自我纠正，
+// 只有「工具不存在」才用 JSON-RPC error——这是规范的明确要求。
 func (s *App) mcpCallTool(r *http.Request, key *apiKey, id json.RawMessage, p mcpCallToolParams) jsonrpcResponse {
 	switch p.Name {
 	case "list_servers":
@@ -429,6 +436,9 @@ func (s *App) mcpCallTool(r *http.Request, key *apiKey, id json.RawMessage, p mc
 	}
 }
 
+// jsonResult 把结构化数据同时放进 structuredContent 与 text 块。
+// 规范建议：返回结构化内容时也应把序列化后的 JSON 放进一个 text 块，
+// 以兼容尚未支持 structuredContent 的客户端。
 func jsonResult(v any) mcpCallToolResult {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -437,6 +447,7 @@ func jsonResult(v any) mcpCallToolResult {
 	return mcpCallToolResult{Content: mcpText(string(b)), StructuredContent: v}
 }
 
+// requireCap 校验能力集（闸 1 的前半）。
 func requireCap(key *apiKey, cap string) *mcpCallToolResult {
 	if !key.has(cap) {
 		f := toolFailure(fmt.Sprintf("当前 Key 缺少 %q 能力，无法执行此操作。请让管理员在 moss 后台调整 Key 权限。", cap))
@@ -461,6 +472,7 @@ func (s *App) resolveTarget(key *apiKey, serverID string) (string, *mcpCallToolR
 	if errors.Is(err, sql.ErrNoRows) || canonicalID == "" {
 		// 若库里不存在，但当前 Key 本身有白名单限制且传入的 ID 不在白名单内，优先报权限错误（与既有单测保持一致）
 		if !key.canAccess(serverID) {
+			// 措辞明确告诉模型这是权限问题而非 ID 写错，避免它反复重试。
 			f := toolFailure("当前 Key 未被授权访问服务器 " + serverID + "。这是权限限制，重试不会成功；可调用 list_servers 查看有权访问的机器。")
 			return "", &f
 		}
@@ -510,6 +522,8 @@ func (s *App) toolListServers(key *apiKey) mcpCallToolResult {
 			&it.CPUCores, &it.MemTotal, &it.DiskGB, &it.IP, &it.Note, &it.AgentVersion); err != nil {
 			return toolFailure("读取服务器列表失败: " + err.Error())
 		}
+		// 只返回这把 Key 有权访问的机器：让模型看见它碰不到的机器毫无意义，
+		// 只会诱导它去尝试越权操作。
 		if !key.canAccess(it.ID) && (it.UUID == "" || !key.canAccess(it.UUID)) {
 			continue
 		}
@@ -565,12 +579,16 @@ func (s *App) toolGetMetrics(key *apiKey, raw json.RawMessage) mcpCallToolResult
 
 /* ---------- get_history ---------- */
 
+// historyMetric 把一个指标的三种写法钉在一起：入参名沿用数据库列的 snake_case
+// （模型看 schema 就能猜对），输出键统一 camelCase 以对齐项目其余 JSON。
 type historyMetric struct {
 	arg string
 	col string
 	key string
 }
 
+// 顺序即输出顺序，也是校验入参用的白名单——col 直接拼进 SQL，
+// 只能取自这张表，绝不能让入参字符串落到 SQL 里。
 var historyMetricList = []historyMetric{
 	{"cpu", "cpu", "cpu"},
 	{"mem", "mem", "mem"},
@@ -583,8 +601,12 @@ var historyMetricList = []historyMetric{
 	{"processes", "processes", "processes"},
 }
 
+// 默认只给这三条：模型要的是「哪台机器什么时候开始变坏」，
+// 一次把九条曲线全塞回去只会把它真正需要的上下文挤掉。
 var historyDefaultMetrics = []string{"cpu", "mem", "disk"}
 
+// historyMaxPoints 是单条曲线的返回点数上限。
+// 采样间隔默认 10 秒，一小时就是 360 点、一天 8640 点，不降采样必然撑爆模型上下文。
 const historyMaxPoints = 120
 
 type historySummary struct {
@@ -622,6 +644,8 @@ func (s *App) toolGetHistory(key *apiKey, raw json.RawMessage) mcpCallToolResult
 	if hours < 1 {
 		hours = 1
 	}
+	// 保留期之外的数据早被 cleanupLoop 删了，放行只会让模型误以为「那段真的没事」。
+	// 收敛而不是报错：它要的是曲线，给到手里能拿到的最长一段更有用。
 	maxHours := getSettingInt(s.db, keyHistoryDays, 7) * 24
 	if hours > maxHours {
 		notes = append(notes, fmt.Sprintf("hours 超出历史保留期，已收敛为 %d 小时（history_days=%d 天）。",
@@ -649,6 +673,8 @@ func (s *App) toolGetHistory(key *apiKey, raw json.RawMessage) mcpCallToolResult
 		}
 	}
 	if len(times) == 0 {
+		// 空窗口不是错误：机器刚接入、长期离线、或数据已过保留期都会走到这里，
+		// 报 isError 会诱导模型反复重试同一个必然为空的查询。
 		notes = append(notes, "该时间窗内没有历史数据。可能是机器刚接入、长时间离线，或数据已超出保留期；换更大的 hours 再看一次即可判断，不必重复用相同参数重试。")
 	}
 
@@ -670,6 +696,8 @@ func (s *App) toolGetHistory(key *apiKey, raw json.RawMessage) mcpCallToolResult
 	return jsonResult(res)
 }
 
+// pickHistoryMetrics 把入参指标名解析成白名单条目，顺序按 historyMetricList 归一化。
+// 未知指标直接报错而不是静默忽略：静默会让模型以为自己拿到了那条曲线。
 func pickHistoryMetrics(want []string) ([]historyMetric, error) {
 	if len(want) == 0 {
 		want = historyDefaultMetrics
@@ -702,20 +730,29 @@ func pickHistoryMetrics(want []string) ([]historyMetric, error) {
 	return sel, nil
 }
 
+// historyBucketSeconds 选出能把点数压进上限的最小「整」粒度。
+//
+// 取整值（30s/60s/5min…）而不是 跨度÷120 的余数粒度，是为了让模型一眼看懂分辨率。
+// 判据用严格大于：桶宽恰好等于 跨度÷120 时，落在区间末端的那一行会算出第 120 个桶号，
+// 点数就会变成 121 而破掉上限。
 func historyBucketSeconds(rangeSec int64) int64 {
 	for _, b := range []int64{10, 15, 20, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400, 21600, 43200, 86400} {
 		if b*historyMaxPoints > rangeSec {
 			return b
 		}
 	}
-	return rangeSec/historyMaxPoints + 1
+	return rangeSec/historyMaxPoints + 1 // 跨度超过 120 天时的兜底，同样保证严格大于
 }
 
+// queryHistory 在 SQL 里按等距时间桶聚合，避免把上万原始行捞进内存再算。
+// 桶号以 sinceMs 为原点而非 epoch：epoch 对齐会让首尾各多出半个桶，点数不可控。
 func (s *App) queryHistory(serverID string, sel []historyMetric, sinceMs, untilMs, bucketMs int64) ([]int64, [][]float64, error) {
 	cols := make([]string, len(sel))
 	for i, m := range sel {
 		cols[i] = "AVG(" + m.col + ")"
 	}
+	// time <= untilMs 不能省：agent 时钟快了会写入未来时间戳，那种行的桶号会越界，
+	// 一行脏数据就能把返回点数顶破上限。
 	rows, err := s.db.Query(
 		`SELECT CAST(AVG(time) AS INTEGER), `+strings.Join(cols, ", ")+
 			` FROM history WHERE server_id = ? AND time >= ? AND time <= ?
@@ -753,6 +790,7 @@ func (s *App) queryHistory(serverID string, sel []historyMetric, sinceMs, untilM
 	return times, series, nil
 }
 
+// summarize 出摘要。模型多数时候看完摘要就能下判断，逐点读曲线是浪费 token。
 func summarize(v []float64) historySummary {
 	out := historySummary{Min: v[0], Max: v[0], First: v[0], Last: v[len(v)-1]}
 	sum := 0.0
@@ -770,6 +808,10 @@ func summarize(v []float64) historySummary {
 	return out
 }
 
+// trendOf 用首尾各 1/4 段的均值比较判断走向。
+// 取段均值而不是首尾两个点：单点受毛刺影响太大，一次采样抖动就能翻转结论。
+// 阈值取相对值而非绝对值：绝对差 5 对百分比是明显变化，对字节每秒则毫无意义。
+// 基准取首尾两段中较大的一个，避免起点为 0（机器刚起来）时除零。
 func trendOf(v []float64) string {
 	q := len(v) / 4
 	if q < 1 {
@@ -866,6 +908,7 @@ func (s *App) toolExec(key *apiKey, raw json.RawMessage) mcpCallToolResult {
 
 	jobID, err := s.exec.Start(s.hub, serverID, s.callerLabel(key), task)
 	if err != nil {
+		// 拦截与掉线都在这里落地。带上 jobId：调用方仍可用 get_result 看到完整原因。
 		msg := err.Error()
 		if errors.Is(err, errExecBlocked) {
 			if out, _, _, ok := s.exec.Result(jobID); ok && out.Error != "" {
@@ -893,6 +936,15 @@ func (s *App) toolExec(key *apiKey, raw json.RawMessage) mcpCallToolResult {
 
 /* ---------- get_result ---------- */
 
+// getResultFromAudit 在内存里查不到 jobID 时回退查审计表。
+//
+// jobs 与 finished 都是纯内存，服务端一重启就全部归零；而 exec_audit 里明明
+// 有这条记录。此前一律回「jobId 有误，或结果已超过 30 分钟保留期」，
+// 等于把「服务端重启过」说成「你参数写错了」，会让模型往完全错误的方向排查，
+// 甚至把一条非幂等的命令重跑一遍。
+//
+// 审计里的输出被截到 32KB（内存留全量、审计留摘要），所以要明确告知这是
+// 降级结果，别让调用方把截断后的日志当成完整输出。
 func sliceTextByOffsetTailLimit(s string, offset, tailKB, limitBytes int64) (sliced string, actualOffset, nextOffset, totalBytes int64) {
 	totalBytes = int64(len(s))
 	start := offset
@@ -917,6 +969,7 @@ func (s *App) getResultFromAudit(key *apiKey, jobID string, offset, tailKB, limi
 	if err != nil {
 		return toolFailure("找不到任务 " + jobID + "：jobId 有误，或记录已被审计清理策略删除。")
 	}
+	// 审计表这条路同样要过机器作用域闸，不能因为走了降级分支就放行。
 	if _, f := s.resolveTarget(key, meta.ServerID); f != nil {
 		return *f
 	}
@@ -1141,8 +1194,16 @@ func (s *App) toolGetResult(key *apiKey, raw json.RawMessage) mcpCallToolResult 
 
 	out, serverID, running, found := s.exec.Result(args.JobID)
 	if !found {
+		// 查不到时回退查审计表，把两种完全不同的情况区分开。
+		//
+		// jobs/finished 都是纯内存：服务端一重启，在途任务与已完成结果一并归零，
+		// 而 exec_audit 里明明有这条记录（含 32KB 截断输出）。此前一律回
+		// 「jobId 有误」，等于把「服务端重启过」说成「你参数写错了」，
+		// 会让模型往完全错误的方向排查。
 		return s.getResultFromAudit(key, args.JobID, args.Offset, args.Tail, args.Limit)
 	}
+	// 闸 1 的后半：机器作用域。get_result 曾是六个工具里唯一漏掉这道闸的，
+	// 任何持 exec 能力的 Key 都能读到别的机器上的完整 stdout。
 	if _, f := s.resolveTarget(key, serverID); f != nil {
 		return *f
 	}
@@ -1202,10 +1263,11 @@ func isWindowsAbs(p string) bool {
 	return len(p) >= 3 && p[1] == ':' && (p[2] == '\\' || p[2] == '/')
 }
 
+// parseFileMode 解析八进制权限字符串。
 func parseFileMode(s string) (uint32, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return 0, nil
+		return 0, nil // 交给 agent 用默认 0644
 	}
 	var mode uint32
 	if _, err := fmt.Sscanf(s, "%o", &mode); err != nil || mode > 0o7777 {
@@ -1214,6 +1276,8 @@ func parseFileMode(s string) (uint32, error) {
 	return mode, nil
 }
 
+// callerLabel 生成审计里的调用方标识。
+// 带上 Key 名与 ID：同一把 Key 可能被改名，ID 才是稳定锚点。
 func (s *App) callerLabel(key *apiKey) string {
 	return fmt.Sprintf("key:%d(%s)", key.ID, key.Name)
 }
