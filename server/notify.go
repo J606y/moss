@@ -13,36 +13,27 @@ import (
 	"time"
 )
 
-// notifyConfig 通知告警配置，存于 settings 表。
 type notifyConfig struct {
 	TgToken       string `json:"tgToken"`
 	TgChat        string `json:"tgChat"`
 	OfflineOn     bool   `json:"offlineOn"`
-	OfflineDelay  int    `json:"offlineDelay"` // 秒，离线超过该时长才告警（防抖）
+	OfflineDelay  int    `json:"offlineDelay"`
 	LoadOn        bool   `json:"loadOn"`
-	CPUThreshold  int    `json:"cpuThreshold"`  // %
-	MemThreshold  int    `json:"memThreshold"`  // %
-	DiskThreshold int    `json:"diskThreshold"` // %
-	LoadMinutes   int    `json:"loadMinutes"`   // 持续超阈值多少分钟才告警
+	CPUThreshold  int    `json:"cpuThreshold"`
+	MemThreshold  int    `json:"memThreshold"`
+	DiskThreshold int    `json:"diskThreshold"`
+	LoadMinutes   int    `json:"loadMinutes"`
 	NetOn         bool   `json:"netOn"`
-	NetThreshold  int    `json:"netThreshold"` // MB/s（1MB=1024KB，与面板展示同口径），上/下行任一方向
-	NetSeconds    int    `json:"netSeconds"`   // 持续超阈值多少秒才告警
-	// RecoverSec 持续低于回差线多少秒才发恢复通知，负载与网速共用。
-	//
-	// 只靠回差带挡不住大幅波动：阈值 90 时，95↔75 来回摆会不断触发
-	// 「告警→恢复→告警」，因为 75 已经低于回差线 81。加上时间确认后，
-	// 恢复侧与告警侧的语义才对称——都是「持续这么久才算数」。
-	//
-	// 代价是恢复通知延迟这么久，但这个代价该付：恢复通知的作用是「告诉你不用管了」，
-	// 晚几十秒毫无损失；而误发一次会让人以为没事了，实际还在反复。
-	RecoverSec int  `json:"recoverSec"`
-	ExpireOn   bool `json:"expireOn"`
-	ExpireDays int  `json:"expireDays"` // 到期前几天提醒，1~7
+	NetThreshold  int    `json:"netThreshold"`
+	NetSeconds    int    `json:"netSeconds"`
+	RecoverSec    int    `json:"recoverSec"`
+	ExpireOn      bool   `json:"expireOn"`
+	ExpireDays    int    `json:"expireDays"`
 }
 
 func loadNotifyConfig(db *sql.DB) notifyConfig {
 	return notifyConfig{
-		TgToken:       decryptSecret(getSetting(db, keyNotifyTgToken, "")), // 加密列，历史明文透传
+		TgToken:       decryptSecret(getSetting(db, keyNotifyTgToken, "")),
 		TgChat:        getSetting(db, keyNotifyTgChat, ""),
 		OfflineOn:     getSetting(db, keyNotifyOffline, "0") == "1",
 		OfflineDelay:  getSettingInt(db, keyNotifyOfflineDelay, 60),
@@ -60,75 +51,93 @@ func loadNotifyConfig(db *sql.DB) notifyConfig {
 	}
 }
 
-// alertState 单台服务器的告警状态机。
 type alertState struct {
-	offlineSince   time.Time // 零值 = 在线
+	offlineSince   time.Time
 	offlineAlerted bool
-	highSince      map[string]time.Time // 指标 → 开始超阈值时间
+	highSince      map[string]time.Time
 	highAlerted    map[string]bool
-	// lowSince 指标 → 开始低于回差线的时间，与 highSince 对称。
-	// 回差带内（回差线 ~ 阈值之间）两个计时都保持不动：那既不算高也不算低，
-	// 维持现状即可，否则指标在带内游走会把两侧的计时反复清零。
-	lowSince map[string]time.Time
+	lowSince       map[string]time.Time
 }
 
-// Notifier 离线/负载告警引擎，事件由 Hub 驱动，离线判定走独立检查循环。
 type Notifier struct {
-	db *sql.DB
-
-	// isOnline 从 Hub 取节点实时在线状态（main.go 注入），GCP 自动开机
-	// 靠它而非 WS 断连事件判离线，面板重启后仍能守护已离线节点。
+	db       *sql.DB
 	isOnline func(id string) bool
 
 	mu     sync.Mutex
 	cfg    notifyConfig
 	states map[string]*alertState
 
-	gcpCfg gcpConfig
-	gcp    map[string]*gcpState
-	// gcpClients 按凭证 id 缓存已建好的客户端（连同它内部的 OAuth token）。
-	// 必须按 id 分槽：单槽时两个账号的节点交替开机会互相冲刷，
-	// 每轮都要重签 JWT 重换 token。凭证变更后由 Reload 整体清空。
+	gcpCfg     gcpConfig
+	gcp        map[string]*gcpState
 	gcpClients map[string]*gcpCachedClient
 
-	webhook webhookConfig
+	webhook   webhookConfig
+	lastFired map[string]time.Time // 告警推送防抖表：eventKey → 最近一次推送时刻
 }
 
-// gcpCachedClient 缓存槽。留着 raw 是因为「更换同一份凭证的密钥」时 id 不变、
-// 只有 JSON 变，光看 id 认不出来该重建。
 type gcpCachedClient struct {
 	raw string
 	cli *gcpClient
 }
 
-// fire 是所有告警的唯一出口：一份事件同时走 Telegram 与 webhook。
-//
-// 统一出口而非在每个告警点分别调两次，是为了避免新增通道时漏改某个分支——
-// 告警点有六处，漏一处就意味着某类故障永远不会通知到人。
+// alertDedupKey 生成单条告警事件的防抖键（按事件类型 + 节点 + 指标区分）。
+func alertDedupKey(ev alertEvent) string {
+	target := ev.ServerID
+	if target == "" {
+		target = ev.ServerName
+	}
+	return ev.Type + "|" + target + "|" + ev.Metric
+}
+
+// shouldDebounce 判断该告警事件是否落在防抖冷却窗口内；若是恢复事件，顺带清除对应告警事件的冷却记录。
+func (n *Notifier) shouldDebounce(ev alertEvent) (webhookConfig, bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	wh := n.webhook
+	if n.lastFired == nil {
+		n.lastFired = make(map[string]time.Time)
+	}
+	target := ev.ServerID
+	if target == "" {
+		target = ev.ServerName
+	}
+	// 恢复事件到达时清除对应故障告警的防抖记录，确保下一次真实故障能立即告警。
+	switch ev.Type {
+	case evtServerOnline:
+		delete(n.lastFired, evtServerOffline+"|"+target+"|")
+	case evtLoadRecovered:
+		delete(n.lastFired, evtLoadAlert+"|"+target+"|"+ev.Metric)
+	case evtNetRecovered:
+		delete(n.lastFired, evtNetAlert+"|"+target+"|"+ev.Metric)
+	}
+	if ev.Type == "test" || wh.DebounceSec <= 0 {
+		return wh, false
+	}
+	key := alertDedupKey(ev)
+	now := time.Now()
+	window := time.Duration(wh.DebounceSec) * time.Second
+	if last, ok := n.lastFired[key]; ok && now.Sub(last) < window {
+		return wh, true
+	}
+	n.lastFired[key] = now
+	return wh, false
+}
+
+// fire 是所有告警的唯一出口：一份事件同时走 Telegram 与 webhook，并在出口做原生防抖抑制。
 func (n *Notifier) fire(cfg notifyConfig, ev alertEvent) {
 	if ev.Timestamp == 0 {
 		ev.Timestamp = time.Now().Unix()
 	}
-	n.mu.Lock()
-	wh := n.webhook
-	n.mu.Unlock()
+	wh, suppressed := n.shouldDebounce(ev)
+	if suppressed {
+		return
+	}
 
-	// 文案在这里才成形：告警产生处只给结构化字段与参数。
-	// 两条通道拿同一句话——webhook 的 text 本就是「人类可读兜底」，
-	// 没有理由和 Telegram 里那句不一致。
 	ev.Text = renderAlert(ev, n.alertLang())
 	n.send(cfg, ev.Text)
 	n.sendWebhook(wh, ev)
 }
 
-// alertLang 推送用的语言。
-//
-// 站点档位 auto 时退回中文：推送没有浏览器可问，auto 在这条路上无从解析，
-// 而中文是改造前的行为。要英文告警就把站点语言显式设成 English。
-//
-// 现读不缓存：站点设置保存时不会调 Reload，缓存会一直陈旧到进程重启。
-// 告警是低频事件，每条多一次 settings 读可以忽略——同一条路径上的
-// serverName 本来就每次查一次库。
 func (n *Notifier) alertLang() string {
 	if normLang(getSetting(n.db, keyLang, langAuto)) == langEN {
 		return langEN
@@ -146,10 +155,10 @@ func newNotifier(db *sql.DB) *Notifier {
 		gcp:        make(map[string]*gcpState),
 		gcpClients: make(map[string]*gcpCachedClient),
 		webhook:    loadWebhookConfig(db),
+		lastFired:  make(map[string]time.Time),
 	}
 }
 
-// Reload 设置变更后刷新配置缓存。
 func (n *Notifier) Reload() {
 	cfg := loadNotifyConfig(n.db)
 	gcpCfg := loadGCPConfig(n.db)
@@ -161,13 +170,6 @@ func (n *Notifier) Reload() {
 	n.webhook = wh
 	n.gcpClients = make(map[string]*gcpCachedClient)
 
-	// 开关被关掉、或阈值被改动时，清掉受影响指标的告警态。
-	//
-	// 不清的话会留下一个 stale 的 highAlerted：比如网速告警已触发 → 用户关掉
-	// 网速告警 → 过一阵再打开，此时 highAlerted["net"] 仍是 true，
-	// **新的超阈值不会再告警**；而等到网速跌破回差线并满 RecoverSec，
-	// 又会凭空发出一条「✅ 网速恢复」——用户从未收到过对应的告警。
-	// 改阈值同理：留下来的告警态是按旧阈值算出来的，对新阈值没有意义。
 	if !cfg.LoadOn || cfg.CPUThreshold != old.CPUThreshold {
 		n.clearMetricState(metricCPU)
 	}
@@ -183,7 +185,6 @@ func (n *Notifier) Reload() {
 	n.mu.Unlock()
 }
 
-// clearMetricState 清掉某个指标在所有机器上的告警态。调用方必须已持锁。
 func (n *Notifier) clearMetricState(metric string) {
 	for _, st := range n.states {
 		delete(st.highSince, metric)
@@ -222,7 +223,7 @@ func (n *Notifier) OnOnline(id string) {
 	downSince := st.offlineSince
 	st.offlineSince = time.Time{}
 	st.offlineAlerted = false
-	delete(n.gcp, id) // 上线即重置自动开机计数/冷却/放弃标记
+	delete(n.gcp, id)
 	cfg := n.cfg
 	n.mu.Unlock()
 
@@ -247,8 +248,6 @@ func (n *Notifier) OnOffline(id string) {
 	n.mu.Unlock()
 }
 
-// OnReport 负载/网速告警：超阈值持续指定时长才告警，回落 10%（迟滞）后发恢复。
-// netUp/netDown 单位 B/s。
 func (n *Notifier) OnReport(id string, cpu, mem, disk, netUp, netDown float64) {
 	n.mu.Lock()
 	cfg := n.cfg
@@ -257,11 +256,6 @@ func (n *Notifier) OnReport(id string, cpu, mem, disk, netUp, netDown float64) {
 		return
 	}
 	st := n.state(id)
-	// 除文案外一并携带指标名、实测值与阈值：接收端（AI 网关）应当读结构化字段，
-	// 而不是去解析中文告警文案——文案一改，对端就崩。
-	//
-	// 判定在锁内、推送在锁外：机器名要查库，不能持锁时做。
-	// 所以 params 里的 name 留到出锁后统一补。
 	type fire struct {
 		typ    string
 		met    string
@@ -272,7 +266,6 @@ func (n *Notifier) OnReport(id string, cpu, mem, disk, netUp, netDown float64) {
 	var fires []fire
 	now := time.Now()
 	hold := time.Duration(cfg.LoadMinutes) * time.Minute
-	// 恢复确认时长，负载与网速共用同一个设置。
 	recoverHold := time.Duration(cfg.RecoverSec) * time.Second
 
 	check := func(metric string, val float64, threshold int) {
@@ -297,8 +290,6 @@ func (n *Notifier) OnReport(id string, cpu, mem, disk, netUp, netDown float64) {
 					},
 				})
 			}
-		// 按比例迟滞带（恢复回差），低阈值也可达，避免在阈值附近反复告警；
-		// 再叠加时间确认，挡住回差带兜不住的大幅波动。
 		case val < th*0.9:
 			delete(st.highSince, metric)
 			if st.lowSince[metric].IsZero() {
@@ -315,7 +306,6 @@ func (n *Notifier) OnReport(id string, cpu, mem, disk, netUp, netDown float64) {
 					},
 				})
 			}
-			// 回差带内两个计时都不动：既不算高也不算低，维持现状。
 		}
 	}
 	if cfg.LoadOn {
@@ -324,15 +314,13 @@ func (n *Notifier) OnReport(id string, cpu, mem, disk, netUp, netDown float64) {
 		check(metricDisk, disk, cfg.DiskThreshold)
 	}
 
-	// 网速：上/下行任一方向超阈值即计时，独立的持续时长（秒），复用同一状态机与迟滞逻辑
 	if cfg.NetOn && cfg.NetThreshold > 0 {
-		const mb = 1024 * 1024 // 与面板展示同口径（1MB = 1024KB）
+		const mb = 1024 * 1024
 		th := float64(cfg.NetThreshold) * mb
 		speed := netUp
 		if netDown > speed {
 			speed = netDown
 		}
-		// 上下行两个数字两条文案都要用，先算好
 		up := fmt.Sprintf("%.1f", netUp/mb)
 		down := fmt.Sprintf("%.1f", netDown/mb)
 		switch {
@@ -389,7 +377,6 @@ func (n *Notifier) OnReport(id string, cpu, mem, disk, netUp, netDown float64) {
 	}
 }
 
-// Forget 服务器删除时清理状态。
 func (n *Notifier) Forget(id string) {
 	n.mu.Lock()
 	delete(n.states, id)
@@ -397,20 +384,6 @@ func (n *Notifier) Forget(id string) {
 	n.mu.Unlock()
 }
 
-// SeedOfflineStates 启动时按库里的服务器清单播种离线计时。
-//
-// 不做这件事，「机器死了」这件事会彻底静默——而这是监控系统存在的唯一理由。
-// states 的条目只能由 OnOnline / OnOffline / OnReport 创建，三者全部由 WS
-// 连接事件驱动；一台已经离线的机器在面板重启后从未在新进程里注册过，
-// Run() 根本遍历不到它，「🔴 离线」永远不会发。它日后恢复上线时
-// wasAlerted 为 false，连「🟢 恢复」也不会发。面板自更新成功后的那次重启
-// 同样会触发这一幕。gcp_autostart 早就绕开了这个坑（见其头注释），
-// 但告警引擎自己一直没有这层兜底。
-//
-// 计时起点取**进程启动时间**而不是 servers.last_seen：面板自己停机一周后
-// 重启，用 last_seen 会让所有机器一上来就越过 OfflineDelay，一口气补发
-// 一堆离线告警。用启动时间，等于启动后先给足一个 OfflineDelay 的重连窗口，
-// 到点仍然连不上的才告警一次——既不刷屏，也不静默。
 func (n *Notifier) SeedOfflineStates(startedAt time.Time) {
 	rows, err := n.db.Query(`SELECT id FROM servers`)
 	if err != nil {
@@ -433,7 +406,6 @@ func (n *Notifier) SeedOfflineStates(startedAt time.Time) {
 
 	n.mu.Lock()
 	for _, id := range ids {
-		// 已经有状态说明该机器在播种之前就连上来了，别覆盖它。
 		if _, exists := n.states[id]; exists {
 			continue
 		}
@@ -442,7 +414,6 @@ func (n *Notifier) SeedOfflineStates(startedAt time.Time) {
 	n.mu.Unlock()
 }
 
-// Run 离线检查循环：离线超过 OfflineDelay 且未告警 → 推送。
 func (n *Notifier) Run() {
 	t := time.NewTicker(15 * time.Second)
 	defer t.Stop()
@@ -457,10 +428,6 @@ func (n *Notifier) Run() {
 				if st.offlineSince.IsZero() || st.offlineAlerted || time.Since(st.offlineSince) < delay {
 					continue
 				}
-				// 发之前跟 hub 的实时状态对一次。offlineSince 是事件驱动写上去的，
-				// 可能因为连接事件乱序而变陈旧（旧连接的 OnOffline 跑在新连接的
-				// OnOnline 之后）；只认 offlineSince 就会推一条假的离线告警。
-				// hub 说在线就说明这台机器好好的，清掉计时而不是告警。
 				if n.isOnline(id) {
 					st.offlineSince = time.Time{}
 					continue
@@ -489,8 +456,6 @@ func (n *Notifier) Run() {
 	}
 }
 
-// checkExpiry 到期提醒：到期日在 ExpireDays 天内且尚未就该日期提醒过的服务器推送通知。
-// 已提醒的到期日持久化在 servers.expire_notified（防重启重发）；改到期时间后按新日期重新提醒。
 func (n *Notifier) checkExpiry(cfg notifyConfig) {
 	rows, err := n.db.Query(
 		`SELECT id, name, expire_at FROM servers WHERE expire_at != '' AND expire_at != expire_notified`)
@@ -513,7 +478,7 @@ func (n *Notifier) checkExpiry(cfg notifyConfig) {
 		}
 		exp, err := time.ParseInLocation("2006-01-02", d.expireAt, time.Local)
 		if err != nil {
-			continue // 非 YYYY-MM-DD 格式无法判定，跳过
+			continue
 		}
 		d.daysLeft = int(exp.Sub(today).Hours() / 24)
 		if d.daysLeft < 0 || d.daysLeft > cfg.ExpireDays {
@@ -522,12 +487,10 @@ func (n *Notifier) checkExpiry(cfg notifyConfig) {
 		dues = append(dues, d)
 	}
 	for _, d := range dues {
-		// 先落标记再推送：宁可推送失败漏一条（有日志），不因发送阻塞/失败反复轰炸
 		if _, err := n.db.Exec(`UPDATE servers SET expire_notified = ? WHERE id = ?`, d.expireAt, d.id); err != nil {
 			log.Printf("checkExpiry mark (id=%s): %v", d.id, err)
 			continue
 		}
-		// 「今天到期」换一条文案而不是让 {days} 填 0：「剩余 0 天」在两种语言里都别扭。
 		key := ""
 		if d.daysLeft == 0 {
 			key = txtExpiringToday
@@ -546,17 +509,11 @@ func (n *Notifier) checkExpiry(cfg notifyConfig) {
 	}
 }
 
-// NotifyBlocked 推送一条命令拦截告警。
-//
-// 只有被拦截的操作才推送：AI 正常执行的命令留在审计里供事后查阅，
-// 逐条推送会把通知变成噪音，两天后人就把它关了。而「AI 试图动防火墙」
-// 这类事必须当场知道——它意味着模型的判断偏离了预期。
 func (n *Notifier) NotifyBlocked(serverName, caller, cmd, reason string) {
 	n.mu.Lock()
 	cfg := n.cfg
 	n.mu.Unlock()
 
-	// 命令可能很长（比如一整段脚本），截断避免推送失败
 	if len([]rune(cmd)) > 300 {
 		cmd = string([]rune(cmd)[:300]) + "…"
 	}
@@ -576,7 +533,6 @@ func (n *Notifier) NotifyBlocked(serverName, caller, cmd, reason string) {
 
 var notifyHTTP = &http.Client{Timeout: 15 * time.Second}
 
-// send 异步推送，失败仅记日志，不阻塞调用方。
 func (n *Notifier) send(cfg notifyConfig, text string) {
 	if cfg.TgToken == "" || cfg.TgChat == "" {
 		return
@@ -626,7 +582,6 @@ func (s *App) handlePutNotify(w http.ResponseWriter, r *http.Request) {
 		}
 		return "0"
 	}
-	// Bot Token 加密落库：拿到 moss.db 就等于拿到 bot 的完全控制权。
 	tgToken, err := encryptSecret(strings.TrimSpace(v.TgToken))
 	if err != nil {
 		writeErr(w, errNotifyEncrypt)

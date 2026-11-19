@@ -293,3 +293,24 @@ func TestReadFileChunkOffsetAndEOF(t *testing.T) {
 		t.Fatal("未开启远程执行时 readFileChunk 应拒绝")
 	}
 }
+
+func TestAgentVersionFlagAndResolveUUID(t *testing.T) {
+	if !isVersionArg([]string{"--version"}) || !isVersionArg([]string{"-v"}) || isVersionArg([]string{"--endpoint"}) {
+		t.Fatal("isVersionArg 判定不符")
+	}
+	verStr := formatVersionString()
+	if !strings.HasPrefix(verStr, "moss-agent ") {
+		t.Fatalf("版本输出应以 moss-agent 开头，实际: %q", verStr)
+	}
+
+	// 验证节点固定 UUID 生成与持久化：二次读取应保持完全相同
+	persistFile := filepath.Join(t.TempDir(), "node.uuid")
+	u1 := resolveNodeUUID(nil, persistFile)
+	if len(u1) < 8 {
+		t.Fatalf("应生成有效的节点 UUID，实际: %q", u1)
+	}
+	u2 := resolveNodeUUID(nil, persistFile)
+	if u1 != u2 {
+		t.Fatalf("持久化的节点 UUID 跨重启必须一致: %q != %q", u1, u2)
+	}
+}

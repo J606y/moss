@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -564,4 +565,214 @@ func TestMCPBatchExecConcurrentAggregation(t *testing.T) {
 	if batch.Results[1].ServerID != "s2" || batch.Results[1].Output != "cve-detected-on-s2" || batch.Results[1].ExitCode != 1 || batch.Results[1].OK {
 		t.Fatalf("s2 结果不符: %+v", batch.Results[1])
 	}
+}
+
+// TestServerUUIDPersistenceRebindAndLookup 验证第六项前半：
+//  1. 节点注册上报 uuid 后持久化入库，list_servers 返回 uuid，且所有 MCP 工具均支持直接用 uuid 寻址；
+//  2. 节点重装/重注册时（无论是后台带 uuid 再次添加，还是用新 token 连接上来但携带相同硬件 uuid），
+//     均自动复用原 server_id，不会发生 server_id 漂移。
+func TestServerUUIDPersistenceRebindAndLookup(t *testing.T) {
+	app := scopeTestApp(t)
+	const fixedUUID = "550e8400-e29b-41d4-a716-446655440000"
+
+	// 1. s1 首次连接并上报固定 UUID
+	attachMockAgent(t, app, "s1", "tok-s1", func(send func(protocol.AgentMsg), msg protocol.ServerMsg) {})
+	// 主动更新 s1 的 uuid（模拟 register 消息落地）
+	if _, err := app.db.Exec(`UPDATE servers SET uuid = ?, agent_version = '2.2.0', os = 'Debian 13' WHERE id = 's1'`, fixedUUID); err != nil {
+		t.Fatal(err)
+	}
+
+	keyAll := &apiKey{ID: 1, Name: "ops", Caps: []string{capRead, capExec}}
+
+	// list_servers 必须返回 uuid
+	lsRes := app.toolListServers(keyAll)
+	if !strings.Contains(resultText(lsRes), fixedUUID) {
+		t.Fatalf("list_servers 应包含节点固定 uuid，实际: %s", resultText(lsRes))
+	}
+
+	// resolveTarget 支持用固定 uuid 寻址并归一化为原 server_id ("s1")
+	resolvedID, f := app.resolveTarget(keyAll, fixedUUID)
+	if f != nil || resolvedID != "s1" {
+		t.Fatalf("按固定 UUID 寻址应解析回 s1，实际 id=%q err=%+v", resolvedID, f)
+	}
+
+	// 2. 模拟后台重注册（handleAddServer 传入相同 uuid）：应直接复用原 server_id="s1"
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/servers",
+		strings.NewReader(`{"name":"机器s1-重装","uuid":"`+fixedUUID+`"}`))
+	w := httptest.NewRecorder()
+	app.handleAddServer(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("handleAddServer 状态码 %d: %s", w.Code, w.Body.String())
+	}
+	var addResp struct {
+		ID     string `json:"id"`
+		Reused bool   `json:"reused"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &addResp)
+	if addResp.ID != "s1" || !addResp.Reused {
+		t.Fatalf("相同 UUID 重添加时必须复用原 server_id=s1，实际: %+v", addResp)
+	}
+}
+
+// TestMCPUpgradeAgentCheckAndControlledUpgrade 验证第六项中段：
+// upgrade_agent 工具支持版本查询、可升级性校验与受控自升级下发（并落审计）。
+func TestMCPUpgradeAgentCheckAndControlledUpgrade(t *testing.T) {
+	oldVer := serverVersion
+	t.Cleanup(func() { serverVersion = oldVer })
+	serverVersion = "2.3.0"
+
+	app := scopeTestApp(t)
+	if _, err := app.db.Exec(`UPDATE servers SET agent_version = '2.2.0', os = 'Debian 13', uuid = 'uuid-s1' WHERE id = 's1'`); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotUpgrade *protocol.UpgradeTask
+	var mu sync.Mutex
+	attachMockAgent(t, app, "s1", "tok-s1", func(send func(protocol.AgentMsg), msg protocol.ServerMsg) {
+		if msg.Type == "upgrade" && msg.Upgrade != nil {
+			mu.Lock()
+			u := *msg.Upgrade
+			gotUpgrade = &u
+			mu.Unlock()
+		}
+	})
+
+	key := &apiKey{ID: 1, Name: "ops", Caps: []string{capRead, capExec}, Servers: []string{"s1"}}
+
+	// 1. action="check" 查询版本与可升级性（使用 uuid 寻址）
+	chk := app.toolUpgradeAgent(key, json.RawMessage(`{"server_id":"uuid-s1","action":"check"}`))
+	if chk.IsError {
+		t.Fatalf("upgrade_agent check 不应失败: %s", resultText(chk))
+	}
+	var chkPayload struct {
+		ServerID      string `json:"serverId"`
+		AgentVersion  string `json:"agentVersion"`
+		TargetVersion string `json:"targetVersion"`
+		Upgradable    bool   `json:"upgradable"`
+	}
+	_ = json.Unmarshal([]byte(resultText(chk)), &chkPayload)
+	if chkPayload.ServerID != "s1" || chkPayload.AgentVersion != "2.2.0" || chkPayload.TargetVersion != "v2.3.0" || !chkPayload.Upgradable {
+		t.Fatalf("upgrade_agent check 返回不符: %+v", chkPayload)
+	}
+
+	// 2. action="upgrade" 触发受控升级
+	upRes := app.toolUpgradeAgent(key, json.RawMessage(`{"server_id":"s1","action":"upgrade"}`))
+	if upRes.IsError {
+		t.Fatalf("upgrade_agent upgrade 不应失败: %s", resultText(upRes))
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		done := gotUpgrade != nil
+		mu.Unlock()
+		if done {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if gotUpgrade == nil || gotUpgrade.Version != "v2.3.0" {
+		t.Fatalf("Agent 应收到目标版本 v2.3.0 的受控升级指令，实际: %+v", gotUpgrade)
+	}
+}
+
+// TestWebhookHMACSignatureAndDebounce 验证第六项后半：
+//  1. Webhook 推送原生携带 X-Moss-Timestamp、X-Moss-Signature（带时间戳 HMAC-SHA256）与 X-Moss-Signature-256；
+//  2. 同一告警事件在防抖窗口内不重复推送，恢复事件到达后自动解除对应告警的冷却并正常推送。
+func TestWebhookHMACSignatureAndDebounce(t *testing.T) {
+	type capturedReq struct {
+		body []byte
+		sig  string
+		sig2 string
+		ts   string
+		ev   alertEvent
+	}
+	ch := make(chan capturedReq, 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := readAllBody(r)
+		var ev alertEvent
+		_ = json.Unmarshal(b, &ev)
+		ch <- capturedReq{
+			body: b,
+			sig:  r.Header.Get("X-Moss-Signature"),
+			sig2: r.Header.Get("X-Moss-Signature-256"),
+			ts:   r.Header.Get("X-Moss-Timestamp"),
+			ev:   ev,
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	n := webhookTestNotifier(t, srv.URL, "hmac-secret-key", true)
+
+	// 1. 首次触发离线告警：应收到推送且 HMAC-SHA256 签名校验通过
+	ev1 := alertEvent{
+		Type:       evtServerOffline,
+		ServerID:   "srv1",
+		ServerName: "hk-01",
+		Timestamp:  1700000000,
+		params:     map[string]string{"name": "hk-01", "sec": "60"},
+	}
+	n.fire(notifyConfig{}, ev1)
+
+	var got1 capturedReq
+	select {
+	case got1 = <-ch:
+	case <-time.After(3 * time.Second):
+		t.Fatal("等待首次 webhook 推送超时")
+	}
+	if got1.ts != "1700000000" {
+		t.Fatalf("X-Moss-Timestamp 应为 1700000000，实际 %q", got1.ts)
+	}
+	if !verifyWebhookHMAC("hmac-secret-key", got1.sig, 1700000000, got1.body) {
+		t.Fatalf("X-Moss-Signature HMAC 校验未通过: sig=%q", got1.sig)
+	}
+	if !verifyWebhookHMAC("hmac-secret-key", got1.sig2, 1700000000, got1.body) {
+		t.Fatalf("X-Moss-Signature-256 HMAC 校验未通过: sig2=%q", got1.sig2)
+	}
+	if verifyWebhookHMAC("wrong-key", got1.sig, 1700000000, got1.body) {
+		t.Fatal("错误密钥不应通过 HMAC 校验")
+	}
+
+	// 2. 防抖窗口（默认 30s）内再次触发同一节点的同一离线告警：应被原生防抖拦截
+	n.fire(notifyConfig{}, ev1)
+	select {
+	case unexpected := <-ch:
+		t.Fatalf("防抖窗口内重复的相同告警应被抑制，却收到了: %+v", unexpected.ev)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// 3. 节点恢复上线（evtServerOnline）：恢复事件本身正常推送，且自动清除离线告警的防抖冷却
+	n.fire(notifyConfig{}, alertEvent{
+		Type:       evtServerOnline,
+		ServerID:   "srv1",
+		ServerName: "hk-01",
+		params:     map[string]string{"name": "hk-01", "dur": "1m"},
+	})
+	select {
+	case rec := <-ch:
+		if rec.ev.Type != evtServerOnline {
+			t.Fatalf("应收到恢复上线事件，实际 %q", rec.ev.Type)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("恢复事件不应被防抖拦截")
+	}
+
+	// 4. 恢复之后再次发生离线：防抖记录已由恢复事件清除，新的离线告警必须正常发出
+	n.fire(notifyConfig{}, ev1)
+	select {
+	case again := <-ch:
+		if again.ev.Type != evtServerOffline {
+			t.Fatalf("恢复后的新一轮离线告警应正常推送，实际 %q", again.ev.Type)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("恢复后的新一轮离线告警被错误抑制")
+	}
+}
+
+func readAllBody(r *http.Request) ([]byte, error) {
+	var buf bytes.Buffer
+	_, err := buf.ReadFrom(r.Body)
+	return buf.Bytes(), err
 }

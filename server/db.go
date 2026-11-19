@@ -14,6 +14,7 @@ import (
 const schema = `
 CREATE TABLE IF NOT EXISTS servers (
 	id TEXT PRIMARY KEY,
+	uuid TEXT NOT NULL DEFAULT '',
 	token TEXT UNIQUE NOT NULL,
 	name TEXT NOT NULL,
 	grp TEXT NOT NULL DEFAULT '默认',
@@ -108,7 +109,6 @@ CREATE TABLE IF NOT EXISTS api_keys (
 	expires_at INTEGER NOT NULL DEFAULT 0,
 	created_at INTEGER NOT NULL,
 	last_used_at INTEGER NOT NULL DEFAULT 0,
-	-- revoked 现表示「已停用」（可再启用）。列名保留是为了不迁移已有数据。
 	revoked INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
@@ -128,8 +128,6 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
 );
 `
 
-// pruneExecAudit 清理执行审计：按保留天数与条数上限，两条规则取先触发者。
-// maxRows 为 0 表示不限制条数。
 func pruneExecAudit(db *sql.DB, now time.Time, days, maxRows int) {
 	if _, err := db.Exec(
 		`DELETE FROM exec_audit WHERE started_at < ?`,
@@ -174,6 +172,9 @@ func openDB(path string) (*sql.DB, error) {
 	if _, err := db.Exec(schema); err != nil {
 		return nil, err
 	}
+	if err := ensureColumn(db, "servers", "uuid", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, err
+	}
 	if err := ensureColumn(db, "servers", "auto_flag", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
@@ -197,7 +198,6 @@ func openDB(path string) (*sql.DB, error) {
 			return nil, err
 		}
 	}
-	// detach 长任务元数据列迁移：支撑跨重启与超 30 分钟的 get_result / cancel / list_jobs。
 	for col, def := range map[string]string{
 		"detach":    "INTEGER NOT NULL DEFAULT 0",
 		"unit":      "TEXT NOT NULL DEFAULT ''",
@@ -231,7 +231,6 @@ func openDB(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-// ensureColumn 在列不存在时给表追加列（SQLite 不支持 ADD COLUMN IF NOT EXISTS）。
 func ensureColumn(db *sql.DB, table, col, def string) error {
 	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
 	if err != nil {
@@ -304,7 +303,6 @@ func randString(n int) string {
 
 func newToken() string { return "mk_" + randString(16) }
 
-// cleanupLoop 周期清理过期历史数据与会话。
 func cleanupLoop(db *sql.DB) {
 	for {
 		histDays := getSettingInt(db, keyHistoryDays, 7)

@@ -2,6 +2,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,10 +21,8 @@ func mcpTools() []mcpTool {
 		{
 			Name:  "list_servers",
 			Title: "列出服务器",
-			Description: "列出所有服务器及其在线状态、系统信息。返回的 id 是后续所有工具的目标标识，任何操作前都应先调用本工具确认 id。" +
-				"agentVersion 是该机 agent 的版本：exec / write_file 需要 2.0.0 及以上，" +
-				"低于此版本的 agent 会静默丢弃这两类任务，症状是干等到超时而非报错。" +
-				"因此命令执行超时却查不出原因时，应先回来核对本字段，而不是反复重试。",
+			Description: "列出所有服务器及其在线状态、固定 UUID、系统信息与 Agent 版本。返回的 id（或固定的 uuid）均可作为后续所有工具的 server_id 目标标识。" +
+				"agentVersion 是该机 agent 的版本：exec / write_file / read_file 需要 2.0.0 及以上，也可调用 upgrade_agent 核对版本或触发受控升级。",
 			InputSchema: map[string]any{
 				"type":                 "object",
 				"properties":           map[string]any{},
@@ -46,7 +45,7 @@ func mcpTools() []mcpTool {
 				"properties": map[string]any{
 					"server_id": map[string]any{
 						"type":        "string",
-						"description": "目标服务器 id，来自 list_servers",
+						"description": "目标服务器 id 或固定 uuid，来自 list_servers",
 					},
 				},
 				"required":             []string{"server_id"},
@@ -76,7 +75,7 @@ func mcpTools() []mcpTool {
 				"properties": map[string]any{
 					"server_id": map[string]any{
 						"type":        "string",
-						"description": "目标服务器 id，来自 list_servers",
+						"description": "目标服务器 id 或固定 uuid，来自 list_servers",
 					},
 					"hours": map[string]any{
 						"type":        "integer",
@@ -115,7 +114,7 @@ func mcpTools() []mcpTool {
 				"properties": map[string]any{
 					"server_id": map[string]any{
 						"type":        "string",
-						"description": "目标服务器 id，来自 list_servers",
+						"description": "目标服务器 id 或固定 uuid，来自 list_servers",
 					},
 					"cmd": map[string]any{
 						"type":        "string",
@@ -161,7 +160,7 @@ func mcpTools() []mcpTool {
 					"server_ids": map[string]any{
 						"type":        "array",
 						"items":       map[string]any{"type": "string"},
-						"description": "目标服务器 id 列表；留空则自动选中当前 Key 有权访问的所有在线服务器",
+						"description": "目标服务器 id（或 uuid）列表；留空则自动选中当前 Key 有权访问的所有在线服务器",
 					},
 					"group": map[string]any{
 						"type":        "string",
@@ -261,7 +260,7 @@ func mcpTools() []mcpTool {
 				"properties": map[string]any{
 					"server_id": map[string]any{
 						"type":        "string",
-						"description": "按目标服务器 id 筛选；留空则列出当前 Key 有权访问的所有服务器上的任务",
+						"description": "按目标服务器 id（或 uuid）筛选；留空则列出当前 Key 有权访问的所有服务器上的任务",
 					},
 					"running_only": map[string]any{
 						"type":        "boolean",
@@ -292,7 +291,7 @@ func mcpTools() []mcpTool {
 				"properties": map[string]any{
 					"server_id": map[string]any{
 						"type":        "string",
-						"description": "目标服务器 id，来自 list_servers",
+						"description": "目标服务器 id 或固定 uuid，来自 list_servers",
 					},
 					"path": map[string]any{
 						"type":        "string",
@@ -334,7 +333,7 @@ func mcpTools() []mcpTool {
 				"properties": map[string]any{
 					"server_id": map[string]any{
 						"type":        "string",
-						"description": "目标服务器 id，来自 list_servers",
+						"description": "目标服务器 id 或固定 uuid，来自 list_servers",
 					},
 					"path": map[string]any{
 						"type":        "string",
@@ -368,6 +367,35 @@ func mcpTools() []mcpTool {
 				OpenWorldHint:   boolPtr(false),
 			},
 		},
+		{
+			Name:  "upgrade_agent",
+			Title: "Agent 版本查询与受控升级",
+			Description: "查询指定服务器 moss-agent 的当前版本、服务端目标版本、可升级性与在途升级进度（action=\"check\" 或 \"status\"），" +
+				"或触发带 SHA256 校验与 60 秒失联自动回滚守护的受控自升级（action=\"upgrade\"，仅升级至当前服务端官方版本并记入审计）。",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"server_id": map[string]any{
+						"type":        "string",
+						"description": "目标服务器 id 或固定 uuid，来自 list_servers",
+					},
+					"action": map[string]any{
+						"type":        "string",
+						"enum":        []string{"check", "status", "upgrade"},
+						"description": "操作类型：check / status（默认，只读查询版本与升级状态）或 upgrade（下发受控自升级指令）",
+					},
+				},
+				"required":             []string{"server_id"},
+				"additionalProperties": false,
+			},
+			Annotations: &mcpToolAnnotations{
+				Title:           "Agent 版本查询与受控升级",
+				ReadOnlyHint:    boolPtr(false),
+				DestructiveHint: boolPtr(false),
+				IdempotentHint:  boolPtr(true),
+				OpenWorldHint:   boolPtr(false),
+			},
+		},
 	}
 }
 
@@ -394,6 +422,8 @@ func (s *App) mcpCallTool(r *http.Request, key *apiKey, id json.RawMessage, p mc
 		return rpcResult(id, s.toolReadFile(key, p.Arguments))
 	case "write_file":
 		return rpcResult(id, s.toolWriteFile(r, key, p.Arguments))
+	case "upgrade_agent":
+		return rpcResult(id, s.toolUpgradeAgent(key, p.Arguments))
 	default:
 		return rpcError(id, jrpcInvalidParams, "未知的工具: "+p.Name, nil)
 	}
@@ -415,28 +445,40 @@ func requireCap(key *apiKey, cap string) *mcpCallToolResult {
 	return nil
 }
 
+// resolveTarget 校验机器作用域并确认服务器存在（支持传入 id 或节点固定 uuid）。
 func (s *App) resolveTarget(key *apiKey, serverID string) (string, *mcpCallToolResult) {
 	serverID = strings.TrimSpace(serverID)
 	if serverID == "" {
 		f := toolFailure("server_id 不能为空，请先调用 list_servers 获取")
 		return "", &f
 	}
-	if !key.canAccess(serverID) {
-		f := toolFailure("当前 Key 未被授权访问服务器 " + serverID + "。这是权限限制，重试不会成功；可调用 list_servers 查看有权访问的机器。")
-		return "", &f
-	}
-	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(1) FROM servers WHERE id = ?`, serverID).Scan(&n); err != nil || n == 0 {
+	// 先尝试按 id 或固定 uuid 解析出规范的 server_id
+	var canonicalID string
+	err := s.db.QueryRow(
+		`SELECT id FROM servers WHERE id = ? OR (uuid != '' AND LOWER(uuid) = LOWER(?)) ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END LIMIT 1`,
+		serverID, serverID, serverID,
+	).Scan(&canonicalID)
+	if errors.Is(err, sql.ErrNoRows) || canonicalID == "" {
+		// 若库里不存在，但当前 Key 本身有白名单限制且传入的 ID 不在白名单内，优先报权限错误（与既有单测保持一致）
+		if !key.canAccess(serverID) {
+			f := toolFailure("当前 Key 未被授权访问服务器 " + serverID + "。这是权限限制，重试不会成功；可调用 list_servers 查看有权访问的机器。")
+			return "", &f
+		}
 		f := toolFailure("服务器不存在: " + serverID)
 		return "", &f
 	}
-	return serverID, nil
+	if !key.canAccess(canonicalID) && !key.canAccess(serverID) {
+		f := toolFailure("当前 Key 未被授权访问服务器 " + serverID + "。这是权限限制，重试不会成功；可调用 list_servers 查看有权访问的机器。")
+		return "", &f
+	}
+	return canonicalID, nil
 }
 
 /* ---------- list_servers ---------- */
 
 type mcpServerInfo struct {
 	ID           string `json:"id"`
+	UUID         string `json:"uuid,omitempty"`
 	Name         string `json:"name"`
 	Group        string `json:"group"`
 	Online       bool   `json:"online"`
@@ -454,7 +496,7 @@ func (s *App) toolListServers(key *apiKey) mcpCallToolResult {
 	if f := requireCap(key, capRead); f != nil {
 		return *f
 	}
-	rows, err := s.db.Query(`SELECT id, name, grp, os, arch, cpu_cores, mem_total, disk_total, ip, note, agent_version
+	rows, err := s.db.Query(`SELECT id, uuid, name, grp, os, arch, cpu_cores, mem_total, disk_total, ip, note, agent_version
 	                         FROM servers ORDER BY sort, id`)
 	if err != nil {
 		return toolFailure("查询服务器列表失败: " + err.Error())
@@ -464,11 +506,11 @@ func (s *App) toolListServers(key *apiKey) mcpCallToolResult {
 	list := make([]mcpServerInfo, 0, 16)
 	for rows.Next() {
 		var it mcpServerInfo
-		if err := rows.Scan(&it.ID, &it.Name, &it.Group, &it.OS, &it.Arch,
+		if err := rows.Scan(&it.ID, &it.UUID, &it.Name, &it.Group, &it.OS, &it.Arch,
 			&it.CPUCores, &it.MemTotal, &it.DiskGB, &it.IP, &it.Note, &it.AgentVersion); err != nil {
 			return toolFailure("读取服务器列表失败: " + err.Error())
 		}
-		if !key.canAccess(it.ID) {
+		if !key.canAccess(it.ID) && (it.UUID == "" || !key.canAccess(it.UUID)) {
 			continue
 		}
 		_, _, it.Online = s.hub.Snapshot(it.ID)
@@ -756,8 +798,6 @@ func round2(v float64) float64 { return math.Round(v*100) / 100 }
 
 /* ---------- 状态机与输出聚合辅助函数 ---------- */
 
-// combineOutput 合并 stdout 与 stderr 为统一的 output 字段，
-// 确保只读 output 字段的调用端与读 stdout/stderr 的调用端看到一致内容。
 func combineOutput(stdout, stderr string) string {
 	if stdout != "" && stderr != "" {
 		if strings.HasSuffix(stdout, "\n") {
@@ -771,11 +811,6 @@ func combineOutput(stdout, stderr string) string {
 	return stderr
 }
 
-// classifyExecStatus 将任务终态映射为统一的状态机字符串。
-//
-// 通道异常与命令退出码解耦：
-//   - 命令正常跑完（errMsg == ""）：无论 exitCode 是否为 0，通道状态均为 "completed"；
-//   - 通道或调度异常（errMsg != ""）：细分为 "canceled" / "blocked" / "timed_out" / "disconnected" / "offline" / "failed"。
 func classifyExecStatus(canceled bool, errMsg string) string {
 	if canceled || errMsg == "任务已取消" {
 		return "canceled"
@@ -858,7 +893,6 @@ func (s *App) toolExec(key *apiKey, raw json.RawMessage) mcpCallToolResult {
 
 /* ---------- get_result ---------- */
 
-// sliceTextByOffsetTailLimit 对内存/审计中的文本按 offset、tailKB 与 limitBytes 切片。
 func sliceTextByOffsetTailLimit(s string, offset, tailKB, limitBytes int64) (sliced string, actualOffset, nextOffset, totalBytes int64) {
 	totalBytes = int64(len(s))
 	start := offset

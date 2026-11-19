@@ -3,6 +3,7 @@ package protocol
 
 // AgentInfo 注册时上报的主机静态信息。
 type AgentInfo struct {
+	UUID           string `json:"uuid,omitempty"` // 节点固定硬件/持久化 UUID，用于重注册时稳定绑定 server_id
 	OS             string `json:"os"`
 	Arch           string `json:"arch"`
 	Virtualization string `json:"virtualization"`
@@ -62,15 +63,12 @@ type ExecTask struct {
 }
 
 // JobQuery server → agent 查询后台托管任务的运行状态与增量/尾部日志。
-//
-// 单次读取的原始字节数由 agent 侧收敛在 ExecChunkSize（32KB）以内，
-// 确保 base64 编码后不会触碰 WebSocket 单帧 64KB 上限。
 type JobQuery struct {
-	ReqID  string `json:"reqId"`            // 本次查询请求 ID，用于并发查询的响应匹配
-	JobID  string `json:"jobId"`            // 目标任务 ID
-	Offset int64  `json:"offset,omitempty"` // 起始字节偏移（>= 0）
-	Tail   int64  `json:"tail,omitempty"`   // 若 > 0，读取日志末尾 Tail 字节（优先于 Offset）
-	Limit  int    `json:"limit,omitempty"`  // 本次最多读取字节数；<0 表示仅查状态不读日志，0 表示取默认上限 ExecChunkSize
+	ReqID  string `json:"reqId"`
+	JobID  string `json:"jobId"`
+	Offset int64  `json:"offset,omitempty"`
+	Tail   int64  `json:"tail,omitempty"`
+	Limit  int    `json:"limit,omitempty"`
 }
 
 // JobCancel server → agent 终止正在执行的任务（含 detach 后台单元与普通在途进程树）。
@@ -89,10 +87,10 @@ type JobStatus struct {
 	Canceled   bool   `json:"canceled,omitempty"`
 	ExitCode   int    `json:"exitCode"`
 	Error      string `json:"error,omitempty"`
-	Data       []byte `json:"data,omitempty"` // 本次读出的日志片段
-	Offset     int64  `json:"offset"`         // Data 对应的起始字节偏移
-	NextOffset int64  `json:"nextOffset"`     // Data 之后的下一个字节偏移（offset + len(data)）
-	TotalBytes int64  `json:"totalBytes"`     // 当前磁盘日志总字节数
+	Data       []byte `json:"data,omitempty"`
+	Offset     int64  `json:"offset"`
+	NextOffset int64  `json:"nextOffset"`
+	TotalBytes int64  `json:"totalBytes"`
 }
 
 // WriteTask server → agent 的文件写入任务。
@@ -100,23 +98,19 @@ type WriteTask struct {
 	ID     string `json:"id"`
 	Path   string `json:"path"`
 	Data   []byte `json:"data"`
-	Mode   uint32 `json:"mode,omitempty"`   // 0 表示用 0644
-	Append bool   `json:"append,omitempty"` // 追加而非覆盖
-	Mkdir  bool   `json:"mkdir,omitempty"`  // 自动创建父目录
+	Mode   uint32 `json:"mode,omitempty"`
+	Append bool   `json:"append,omitempty"`
+	Mkdir  bool   `json:"mkdir,omitempty"`
 }
 
-// WriteSizeCap 单次写入的内容上限。
 const WriteSizeCap = 48 << 10
 
 // ReadTask server → agent 的分块文件读取/下载任务。
-//
-// 单次 WS 帧读取上限由 agent 收敛在 ExecChunkSize（32KB），
-// server 侧可按需多帧连续拉取并拼接回传给调用方。
 type ReadTask struct {
 	ReqID  string `json:"reqId"`
 	Path   string `json:"path"`
 	Offset int64  `json:"offset,omitempty"`
-	Length int    `json:"length,omitempty"` // 0 表示默认取 ExecChunkSize (32KB)
+	Length int    `json:"length,omitempty"`
 }
 
 // ReadResult agent → server 的分块文件读取回执。

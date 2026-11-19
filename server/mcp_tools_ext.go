@@ -1,4 +1,4 @@
-// MCP 工具集扩展实现：batch_exec（批量并发执行）、cancel（取消任务）、list_jobs（任务列表）、read_file（分块文件拉取）与 write_file（原子文件写入）。
+// MCP 工具集扩展实现：batch_exec（批量并发执行）、cancel（取消任务）、list_jobs（任务列表）、read_file（分块文件拉取）、write_file（原子文件写入）与 upgrade_agent（Agent 版本查询与受控升级）。
 package main
 
 import (
@@ -353,7 +353,7 @@ func (s *App) toolListJobs(key *apiKey, raw json.RawMessage) mcpCallToolResult {
 		       a.detach, a.unit, a.started_at, a.finished_at, a.exit_code, a.error,
 		       a.canceled, a.log_bytes
 		  FROM exec_audit a LEFT JOIN servers s ON s.id = a.server_id
-		 WHERE a.cmd NOT LIKE '[write_file] %'`
+		 WHERE a.cmd NOT LIKE '[write_file] %' AND a.cmd NOT LIKE '[upgrade_agent] %'`
 	qArgs := []any{}
 	if args.ServerID != "" {
 		query += ` AND a.server_id = ?`
@@ -596,5 +596,114 @@ func (s *App) toolWriteFile(r *http.Request, key *apiKey, raw json.RawMessage) m
 		"bytes":    len(args.Content),
 		"mode":     fmt.Sprintf("%o", mode),
 		"appended": args.Append,
+	})
+}
+
+/* ---------- upgrade_agent ---------- */
+
+func (s *App) toolUpgradeAgent(key *apiKey, raw json.RawMessage) mcpCallToolResult {
+	var args struct {
+		ServerID string `json:"server_id"`
+		Action   string `json:"action"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return toolFailure("参数解析失败: " + err.Error())
+	}
+	action := strings.ToLower(strings.TrimSpace(args.Action))
+	if action == "" {
+		action = "check"
+	}
+	if action != "check" && action != "status" && action != "upgrade" {
+		return toolFailure("action 仅支持 \"check\"、\"status\" 或 \"upgrade\"")
+	}
+	if action == "upgrade" {
+		if f := requireCap(key, capExec); f != nil {
+			return *f
+		}
+	} else {
+		if !key.has(capRead) && !key.has(capExec) {
+			if f := requireCap(key, capRead); f != nil {
+				return *f
+			}
+		}
+	}
+
+	serverID, f := s.resolveTarget(key, args.ServerID)
+	if f != nil {
+		return *f
+	}
+
+	var name, uuid, agentOS, agentVer string
+	if err := s.db.QueryRow(
+		`SELECT name, uuid, os, agent_version FROM servers WHERE id = ?`, serverID,
+	).Scan(&name, &uuid, &agentOS, &agentVer); err != nil {
+		return toolFailure("读取服务器信息失败: " + err.Error())
+	}
+
+	_, _, online := s.hub.Snapshot(serverID)
+	if s.hub.AgentConn(serverID) != nil {
+		online = true
+	}
+	targetVer := upgradeTarget()
+	upgradable, hint := upgradeAvailability(agentVer, agentOS, online)
+	stage, upgradeErr := s.upgrade.Status(serverID)
+
+	if action == "check" || action == "status" {
+		res := map[string]any{
+			"status":          "completed",
+			"serverId":        serverID,
+			"uuid":            uuid,
+			"serverName":      name,
+			"os":              agentOS,
+			"online":          online,
+			"agentVersion":    agentVer,
+			"targetVersion":   targetVer,
+			"supportsUpgrade": agentSupportsUpgrade(agentVer),
+			"upgradable":      upgradable,
+			"upToDate":        targetVer != "" && sameVersion(agentVer, targetVer),
+		}
+		if hint != nil {
+			res["hint"] = hint.Error()
+			res["hintCode"] = hint.Code
+		}
+		if stage != "" {
+			res["stage"] = stage
+		}
+		if upgradeErr != "" {
+			res["upgradeError"] = upgradeErr
+		}
+		return jsonResult(res)
+	}
+
+	// action == "upgrade"：受控自升级，先落审计记录再由 upgradeManager 下发官方升级指令。
+	auditJob := &execJob{
+		id:       newExecJobID(),
+		serverID: serverID,
+		started:  time.Now(),
+		done:     make(chan struct{}),
+	}
+	_ = s.exec.auditStart(auditJob, serverID, s.callerLabel(key), protocol.ExecTask{
+		Cmd: fmt.Sprintf("[upgrade_agent] %s -> %s", displayVersion(agentVer), displayVersion(targetVer)),
+	})
+
+	if err := s.upgrade.Start(s.hub, serverID, agentVer, agentOS); err != nil {
+		s.exec.auditFinish(auditJob.id, ExecOutcome{JobID: auditJob.id, Error: err.Error()})
+		return toolFailure("下发 Agent 升级失败: " + err.Error())
+	}
+	s.exec.auditFinish(auditJob.id, ExecOutcome{
+		JobID:  auditJob.id,
+		Stdout: fmt.Sprintf("已向 %s 下发受控升级任务 (%s -> %s)", serverID, displayVersion(agentVer), displayVersion(targetVer)),
+	})
+
+	stage, _ = s.upgrade.Status(serverID)
+	return jsonResult(map[string]any{
+		"status":        "running",
+		"serverId":      serverID,
+		"uuid":          uuid,
+		"serverName":    name,
+		"fromVersion":   agentVer,
+		"targetVersion": targetVer,
+		"stage":         stage,
+		"message":       "已下发受控升级指令；agent 校验 SHA256 替换二进制后将自动重启，若 60 秒内未能连回将自动回滚。",
 	})
 }
